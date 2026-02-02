@@ -1,0 +1,154 @@
+from django.conf import settings
+from django.db import models
+
+
+class ConversationContext(models.TextChoices):
+    GENERAL = "general", "General"
+    SUBSCRIPTION = "subscription", "Subscription"
+    PRODUCT = "product", "Product"
+    BUDGETING = "budgeting", "Budgeting"
+
+
+class Conversation(models.Model):
+    """
+    Represents a single chat thread between a user and the AI.
+    May be linked to a specific subscription or valuation for context.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="conversations",
+    )
+
+    title = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Optional human-readable title for the conversation.",
+    )
+
+    context_type = models.CharField(
+        max_length=32,
+        choices=ConversationContext.choices,
+        default=ConversationContext.GENERAL,
+    )
+
+    linked_subscription = models.ForeignKey(
+        "subscriptions.Subscription",
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="conversations",
+        help_text="Set if this conversation is about a specific subscription.",
+    )
+
+    linked_item_valuation = models.ForeignKey(
+        "valuations.ItemValuation",
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="conversations",
+        help_text="Set if this conversation is about a purchase decision.",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        indexes = [
+            models.Index(fields=["user", "updated_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Conversation({self.user} • {self.context_type})"
+
+
+class MessageRole(models.TextChoices):
+    USER = "user", "User"
+    ASSISTANT = "assistant", "Assistant"
+    SYSTEM = "system", "System"
+
+
+class Message(models.Model):
+    """
+    Represents a single message inside a conversation.
+    """
+
+    conversation = models.ForeignKey(
+        Conversation,
+        on_delete=models.CASCADE,
+        related_name="messages",
+    )
+
+    role = models.CharField(
+        max_length=16,
+        choices=MessageRole.choices,
+    )
+
+    content = models.TextField()
+
+    metadata_json = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Optional metadata (tool calls, citations, extracted facts).",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["conversation", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Message({self.role} @ {self.created_at})"
+
+
+class UserFact(models.Model):
+    """
+    Stores stable, structured facts about a user extracted from chat or onboarding.
+    Used to maintain AI consistency over time.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="facts",
+    )
+
+    fact_key = models.CharField(
+        max_length=128,
+        help_text="Canonical key, e.g. 'values_convenience'.",
+    )
+
+    fact_value_json = models.JSONField(
+        default=dict,
+        help_text="Structured representation of the fact.",
+    )
+
+    source = models.CharField(
+        max_length=32,
+        default="chat",
+        help_text="chat / onboarding / inferred",
+    )
+
+    confidence = models.DecimalField(
+        max_digits=3,
+        decimal_places=2,
+        default=0.80,
+        help_text="Confidence score between 0 and 1.",
+    )
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("user", "fact_key")
+        indexes = [
+            models.Index(fields=["user", "fact_key"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user} • {self.fact_key}"
