@@ -1,6 +1,6 @@
 # zapp
 
-Django project for INFO 490.
+Backend for Django REST project for INFO 490.
 
 ## Run (dev)
 python -m venv .venv
