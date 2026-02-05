@@ -15,6 +15,7 @@ class Conversation(models.Model):
     May be linked to a specific subscription or valuation for context.
     """
 
+    id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -76,6 +77,7 @@ class Message(models.Model):
     Represents a single message inside a conversation.
     """
 
+    id = models.BigAutoField(primary_key=True)
     conversation = models.ForeignKey(
         Conversation,
         on_delete=models.CASCADE,
@@ -113,6 +115,7 @@ class UserFact(models.Model):
     Used to maintain AI consistency over time.
     """
 
+    id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
