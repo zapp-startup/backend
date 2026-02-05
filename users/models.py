@@ -43,6 +43,7 @@ class UserProfile(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="profile",
+        primary_key=True,
     )
 
     display_name = models.CharField(max_length=64, blank=True)
@@ -86,6 +87,7 @@ class UserProfile(models.Model):
 
 
 class UserPreference(models.Model):
+    id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,

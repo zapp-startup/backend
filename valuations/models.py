@@ -10,6 +10,7 @@ class Recommendation(models.TextChoices):
 
 
 class ValuationModelVersion(models.Model):
+    id = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=64)
     version = models.CharField(max_length=32)
     description = models.TextField(blank=True, null=True)
@@ -27,6 +28,7 @@ class ValuationModelVersion(models.Model):
 
 
 class SubscriptionValuation(models.Model):
+    id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -70,6 +72,7 @@ class SubscriptionValuation(models.Model):
 
 
 class ItemValuation(models.Model):
+    id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,

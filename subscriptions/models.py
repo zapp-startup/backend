@@ -32,6 +32,7 @@ class Merchant(models.Model):
     Ex: Netflix, Spotify, Costco, Crunchyroll, Planet Fitness.
     """
 
+    id = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=255, unique=True)
     category = models.CharField(
         max_length=32,
@@ -64,6 +65,7 @@ class Subscription(models.Model):
     A user's recurring subscription to a given Merchant.
     """
 
+    id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,

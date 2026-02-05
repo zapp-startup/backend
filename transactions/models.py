@@ -34,6 +34,7 @@ class Transaction(models.Model):
     Raw ledger entries. Treat these as "facts", not opinions.
     """
 
+    id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
