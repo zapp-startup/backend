@@ -1,0 +1,10 @@
+Week of Feb 4
+- Set up split settings (base/dev/prod)
+- Added .env + .env.example + updated .gitignore
+- Added docs/ structure (wireframes, branching_strategy, notes)
+
+Views for grading (Section 2):
+- HttpResponse FBV: /users/manual/
+- render() FBV: /users/render/
+- Base CBV: /users/cbv-base/
+- Generic CBV (ListView): /users/cbv-generic/
