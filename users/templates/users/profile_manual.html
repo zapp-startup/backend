@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Profiles - Manual HttpResponse</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .header {
+            background-color: #2c3e50;
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .stats {
+            background-color: #3498db;
+            color: white;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .profile-card {
+            background-color: white;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            border-left: 4px solid #3498db;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .profile-card h3 {
+            margin-top: 0;
+            color: #2c3e50;
+        }
+        .badge {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 3px;
+            font-size: 12px;
+            margin-right: 5px;
+        }
+        .goal { background-color: #e74c3c; color: white; }
+        .budget { background-color: #27ae60; color: white; }
+        .risk { background-color: #f39c12; color: white; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 VIEW 1: HttpResponse (Manual Template Loading)</h1>
+        <p>This view uses <code>loader.get_template()</code> and wraps the result in HttpResponse</p>
+    </div>
+
+    <div class="stats">
+        <h2>Total User Profiles: {{ total_count }}</h2>
+    </div>
+
+    <h2>All User Profiles</h2>
+    
+    {% if profiles %}
+        {% for profile in profiles %}
+        <div class="profile-card">
+            <h3>{{ profile.user.username }}</h3>
+            <p><strong>Display Name:</strong> {{ profile.display_name|default:"Not set" }}</p>
+            <p><strong>Age Range:</strong> {{ profile.age_range|default:"Not specified" }}</p>
+            <p><strong>Income Range:</strong> {{ profile.income_range|default:"Not specified" }}</p>
+            
+            <div>
+                {% if profile.financial_goal %}
+                <span class="badge goal">Goal: {{ profile.get_financial_goal_display }}</span>
+                {% endif %}
+                
+                {% if profile.budget_style %}
+                <span class="badge budget">Budget: {{ profile.get_budget_style_display }}</span>
+                {% endif %}
+                
+                {% if profile.risk_tolerance %}
+                <span class="badge risk">Risk: {{ profile.get_risk_tolerance_display }}</span>
+                {% endif %}
+            </div>
+            
+            <p style="color: #7f8c8d; font-size: 12px; margin-top: 10px;">
+                Created: {{ profile.created_at|date:"M d, Y" }}
+            </p>
+        </div>
+        {% endfor %}
+    {% else %}
+        <p style="background-color: #fff3cd; padding: 15px; border-radius: 5px;">
+            No user profiles found. Create some users in the admin panel!
+        </p>
+    {% endif %}
+</body>
+</html>
