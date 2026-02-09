@@ -1,40 +1,28 @@
-from django.http import HttpResponse
-from django.shortcuts import render
-from django.template import loader
-from django.views import View
-from django.views.generic import ListView
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 
-from .models import Subscription
-
-# Create your views here.
+from .models import Merchant, Subscription
+from .serializers import MerchantSerializer, SubscriptionSerializer
 
 
-def subscription_manual_view(request):
-    # Manual rendering: load the template yourself and wrap it in HttpResponse.
-    template = loader.get_template("subscriptions/subscription_manual.html")
-    context = {"title": "Manual Subscription View"}
-    return HttpResponse(template.render(context, request))
+class MerchantViewSet(ReadOnlyModelViewSet):
+    """
+    Merchants are canonical/global. Usually read-only for normal users.
+    If you want users to create merchants, switch to ModelViewSet + permissions.
+    """
+    queryset = Merchant.objects.all()
+    serializer_class = MerchantSerializer
+    permission_classes = [AllowAny]  # or IsAuthenticated if you want locked down
 
 
-def subscription_render_view(request):
-    # Django ORM query: Subscription.objects.all() returns a queryset of all rows.
-    subscriptions = Subscription.objects.all()
-    # Pass the queryset into the template context so it can be iterated over.
-    context = {"subscriptions": subscriptions}
-    return render(request, "subscriptions/subscription_list.html", context)
+class SubscriptionViewSet(ModelViewSet):
+    serializer_class = SubscriptionSerializer
+    permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        # Users can only see their own subscriptions
+        return Subscription.objects.filter(user=self.request.user).select_related("merchant")
 
-class SubscriptionBaseView(View):
-    template_name = "subscriptions/subscription_base.html"
-
-    def get(self, request):
-        # Same ORM query in a class-based view.
-        subscriptions = Subscription.objects.all()
-        context = {"subscriptions": subscriptions}
-        return render(request, self.template_name, context)
-
-
-class SubscriptionListView(ListView):
-    model = Subscription
-    template_name = "subscriptions/subscription_generic_list.html"
-    context_object_name = "subscriptions"
+    def perform_create(self, serializer):
+        # Force ownership
+        serializer.save(user=self.request.user)
