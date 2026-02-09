@@ -22,8 +22,8 @@ urlpatterns = [
     #path('subscriptions/', include('subscriptions.urls')),
 
     path("api/", include("subscriptions.urls")),
-    #path("api/", include("transactions.urls")),
-    #path("api/", include("users.urls")),
-    #path("api/", include("valuations.urls")),
-    #path("api/", include("ai.urls")),
+    path("api/", include("transactions.urls")),
+    path("api/", include("users.urls")),
+    path("api/", include("valuations.urls")),
+    path("api/", include("ai.urls")),
 ]
