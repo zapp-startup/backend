@@ -1,6 +1,8 @@
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from .models import UserProfile, UserPreference
 from .serializers import UserProfileSerializer, UserPreferenceSerializer
@@ -53,3 +55,19 @@ class UserPreferenceViewSet(ModelViewSet):
         if obj.user_id != self.request.user.id:
             raise PermissionDenied("You can only access your own preferences.")
         return obj
+
+
+class AuthSessionView(APIView):
+    """Returns the authenticated user and decoded Supabase claims."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(
+            {
+                "id": request.user.id,
+                "username": request.user.username,
+                "email": request.user.email,
+                "claims": request.auth if isinstance(request.auth, dict) else {},
+            }
+        )
