@@ -1,5 +1,3 @@
-import os
-
 import jwt
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -10,7 +8,8 @@ from rest_framework import exceptions
 class SupabaseJWTAuthentication(authentication.BaseAuthentication):
     """Validate Supabase access tokens and map them to Django users."""
 
-    keyword = "Bearer"
+    keyword = "bearer"
+    _jwks_client = None
 
     def authenticate(self, request):
         auth_header = authentication.get_authorization_header(request).decode("utf-8")
@@ -18,7 +17,7 @@ class SupabaseJWTAuthentication(authentication.BaseAuthentication):
             return None
 
         parts = auth_header.split()
-        if len(parts) != 2 or parts[0] != self.keyword:
+        if len(parts) != 2 or parts[0].lower() != self.keyword:
             return None
 
         token = parts[1]
@@ -33,12 +32,15 @@ class SupabaseJWTAuthentication(authentication.BaseAuthentication):
                 "SUPABASE_JWT_JWKS_URL is not configured"
             )
 
-        issuer = settings.SUPABASE_JWT_ISSUER or os.getenv("SUPABASE_JWT_ISSUER")
+        issuer = settings.SUPABASE_JWT_ISSUER
         audience = settings.SUPABASE_JWT_AUDIENCE
 
         try:
-            signing_key = jwt.PyJWKClient(jwks_url).get_signing_key_from_jwt(token)
-            return jwt.decode(
+            if self._jwks_client is None:
+                self.__class__._jwks_client = jwt.PyJWKClient(jwks_url)
+
+            signing_key = self._jwks_client.get_signing_key_from_jwt(token)
+            payload = jwt.decode(
                 token,
                 signing_key.key,
                 algorithms=["RS256"],
@@ -48,6 +50,12 @@ class SupabaseJWTAuthentication(authentication.BaseAuthentication):
             )
         except jwt.PyJWTError as exc:
             raise exceptions.AuthenticationFailed("Invalid Supabase JWT") from exc
+
+        expected_role = getattr(settings, "SUPABASE_JWT_ROLE", "authenticated")
+        if expected_role and payload.get("role") != expected_role:
+            raise exceptions.AuthenticationFailed("Invalid Supabase JWT role")
+
+        return payload
 
     def _get_or_create_user(self, payload):
         user_model = get_user_model()

@@ -87,6 +87,7 @@ Set these in your `.env`:
 - `SUPABASE_PROJECT_URL=https://<project-ref>.supabase.co`
 - `SUPABASE_JWT_ISSUER=https://<project-ref>.supabase.co/auth/v1`
 - `SUPABASE_JWT_AUDIENCE=authenticated`
+- `SUPABASE_JWT_ROLE=authenticated`
 - `SUPABASE_JWT_JWKS_URL=https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json` (optional if `SUPABASE_PROJECT_URL` is set)
 
 ### Request format
@@ -105,6 +106,17 @@ Authorization: Bearer <supabase_access_token>
 4. It maps token `sub` to a Django user (`username=sub`), creating the user on first request.
 5. Authenticated requests can use normal DRF permissions.
 
+
+
+### Is this OAuth with Supabase?
+
+Short answer: **partially**.
+
+- Supabase handles the OAuth flow (Google/Apple/etc.) and issues an access token after login.
+- This backend acts as a **resource server**: it verifies the Supabase access token and authorizes API requests.
+- So the backend is not running the OAuth redirect/code-exchange itself; Supabase does that part.
+
+This is a standard split-architecture pattern for separate frontend/backend apps.
 
 ### Frontend in a separate repo/folder
 

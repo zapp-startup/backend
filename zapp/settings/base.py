@@ -135,6 +135,7 @@ STATIC_URL = "static/"
 SUPABASE_PROJECT_URL = os.getenv("SUPABASE_PROJECT_URL", "")
 SUPABASE_JWT_ISSUER = os.getenv("SUPABASE_JWT_ISSUER", "")
 SUPABASE_JWT_AUDIENCE = os.getenv("SUPABASE_JWT_AUDIENCE", "authenticated")
+SUPABASE_JWT_ROLE = os.getenv("SUPABASE_JWT_ROLE", "authenticated")
 SUPABASE_JWT_JWKS_URL = os.getenv(
     "SUPABASE_JWT_JWKS_URL",
     f"{SUPABASE_PROJECT_URL}/auth/v1/.well-known/jwks.json" if SUPABASE_PROJECT_URL else "",
