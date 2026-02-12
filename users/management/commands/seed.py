@@ -99,12 +99,20 @@ class Command(BaseCommand):
             merchants.append(m)
 
         # Add some random merchants too
+        seed_domain_prefix = prefix.replace("_", "-").strip("-")  # domains can't have "_"
+
         for _ in range(40):
-            name = fake.unique.company()
+            base_name = fake.unique.company()
+            name = f"{prefix}merchant_{base_name}"   # <- seed tag in name
             cat = pick(MerchantCategory)
+
             m, _ = Merchant.objects.get_or_create(
                 name=name,
-                defaults={"category": cat, "website_domain": fake.domain_name()},
+                defaults={
+                    "category": cat,
+                    # optional: tag domain too (helps debugging / extra safety)
+                    "website_domain": f"{seed_domain_prefix}-{fake.domain_word()}.{fake.tld()}",
+                },
             )
             merchants.append(m)
 
