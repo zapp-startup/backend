@@ -1,14 +1,22 @@
-from django.core.management.base import BaseCommand
+from __future__ import annotations
+
 from django.contrib.auth import get_user_model
+from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from ai.models import Conversation, Message, UserFact
 from transactions.models import Transaction
 from valuations.models import SubscriptionValuation, ItemValuation
 from subscriptions.models import Subscription
-from users.models import UserProfile, UserPreference
+from users.models import (
+    UserPreference,
+    UserRawExplicit,
+    UserRawInferred,
+    UserComputed,
+)
 
 User = get_user_model()
+
 
 class Command(BaseCommand):
     help = "Wipe seeded data ONLY (prefix-based). Safe for shared DB."
@@ -23,7 +31,7 @@ class Command(BaseCommand):
         users = User.objects.filter(username__startswith=prefix)
         user_ids = list(users.values_list("id", flat=True))
 
-        # Delete children first (safe even if some FKs are PROTECT/SET_NULL)
+        # Delete children first
         Message.objects.filter(conversation__user_id__in=user_ids).delete()
         Conversation.objects.filter(user_id__in=user_ids).delete()
         UserFact.objects.filter(user_id__in=user_ids).delete()
@@ -34,10 +42,16 @@ class Command(BaseCommand):
 
         Subscription.objects.filter(user_id__in=user_ids).delete()
         UserPreference.objects.filter(user_id__in=user_ids).delete()
-        UserProfile.objects.filter(user_id__in=user_ids).delete()
+
+        # NEW 3-layer user tables
+        UserComputed.objects.filter(user_id__in=user_ids).delete()
+        UserRawInferred.objects.filter(user_id__in=user_ids).delete()
+        UserRawExplicit.objects.filter(user_id__in=user_ids).delete()
 
         # Finally delete users
         deleted_count = users.count()
         users.delete()
 
-        self.stdout.write(self.style.SUCCESS(f"Wiped seeded data ✅ users_deleted={deleted_count}, prefix='{prefix}'"))
+        self.stdout.write(
+            self.style.SUCCESS(f"Wiped seeded data ✅ users_deleted={deleted_count}, prefix='{prefix}'")
+        )
