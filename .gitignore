@@ -7,3 +7,6 @@ media/
 staticfiles/
 .DS_Store
 .idea/
+.env/
+*.log
+*.pot

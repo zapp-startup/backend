@@ -32,6 +32,7 @@ if not SECRET_KEY:
 # SECURITY WARNING: don't run with debug turned on in production!
 
 ALLOWED_HOSTS = []
+AUTH_USER_MODEL = "users.User"
 
 
 # Application definition
@@ -45,7 +46,7 @@ INSTALLED_APPS = [
     "corsheaders",
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'users',
+    'users.apps.UsersConfig',
     'ai',
     'subscriptions',
     'valuations',
@@ -112,6 +113,12 @@ AUTH_PASSWORD_VALIDATORS = [
         'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
     },
 ]
+
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "users.supabase_auth.SupabaseJWTAuthentication",
+    ),
+}
 
 
 # Internationalization

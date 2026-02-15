@@ -9,6 +9,7 @@ from .views import (
 )
 
 router = DefaultRouter()
+router.include_format_suffixes = False
 router.register(r"raw-explicit", UserRawExplicitViewSet, basename="raw-explicit")
 router.register(r"raw-inferred", UserRawInferredViewSet, basename="raw-inferred")
 router.register(r"computed", UserComputedViewSet, basename="computed")

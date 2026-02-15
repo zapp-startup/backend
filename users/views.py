@@ -12,9 +12,6 @@ from .serializers import (
 
 
 class UserRawExplicitViewSet(ModelViewSet):
-    """
-    Editable explicit profile (survey/onboarding).
-    """
     serializer_class = UserRawExplicitSerializer
     permission_classes = [IsAuthenticated]
 
@@ -24,51 +21,27 @@ class UserRawExplicitViewSet(ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
-    def get_object(self):
-        obj = super().get_object()
-        if obj.user_id != self.request.user.id:
-            raise PermissionDenied("You can only access your own profile.")
-        return obj
+    def perform_update(self, serializer):
+        serializer.save(user=self.request.user)
 
 
 class UserRawInferredViewSet(ReadOnlyModelViewSet):
-    """
-    Read-only inferred snapshot (system computed).
-    """
     serializer_class = UserRawInferredSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         return UserRawInferred.objects.filter(user=self.request.user)
 
-    def get_object(self):
-        obj = super().get_object()
-        if obj.user_id != self.request.user.id:
-            raise PermissionDenied("You can only access your own inferred data.")
-        return obj
-
 
 class UserComputedViewSet(ReadOnlyModelViewSet):
-    """
-    Read-only computed traits/scores (system computed).
-    """
     serializer_class = UserComputedSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         return UserComputed.objects.filter(user=self.request.user)
 
-    def get_object(self):
-        obj = super().get_object()
-        if obj.user_id != self.request.user.id:
-            raise PermissionDenied("You can only access your own computed data.")
-        return obj
-
 
 class UserPreferenceViewSet(ModelViewSet):
-    """
-    CRUD preferences for the authenticated user.
-    """
     serializer_class = UserPreferenceSerializer
     permission_classes = [IsAuthenticated]
 
@@ -78,8 +51,5 @@ class UserPreferenceViewSet(ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
-    def get_object(self):
-        obj = super().get_object()
-        if obj.user_id != self.request.user.id:
-            raise PermissionDenied("You can only access your own preferences.")
-        return obj
+    def perform_update(self, serializer):
+        serializer.save(user=self.request.user)
