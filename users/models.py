@@ -2,6 +2,18 @@ from __future__ import annotations
 
 from django.conf import settings
 from django.db import models
+import uuid
+from django.contrib.auth.models import AbstractUser
+
+class User(AbstractUser):
+    """Custom user model with UUID primary key for Supabase compatibility"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    class Meta:
+        db_table = 'auth_user'
+
+    def __str__(self)->str:
+        return self.username
 
 
 # ----------------------------
