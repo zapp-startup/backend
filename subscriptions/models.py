@@ -100,6 +100,16 @@ class Subscription(models.Model):
 
     notes = models.TextField(blank=True, null=True)
 
+    usage_frequency = models.PositiveSmallIntegerField(
+        blank=True,
+        null=True,
+        help_text="Uses per week or your chosen unit",
+    )
+    reactivation_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of times this subscription has been reactivated",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

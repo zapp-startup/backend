@@ -31,7 +31,8 @@ class PaymentChannel(models.TextChoices):
 
 class Transaction(models.Model):
     """
-    Raw ledger entries. Treat these as "facts", not opinions.
+    Raw ledger entries + optional per-transaction feedback and timing context.
+    These are "facts" that feed into behavioral inference.
     """
 
     id = models.BigAutoField(primary_key=True)
@@ -41,7 +42,7 @@ class Transaction(models.Model):
         related_name="transactions",
     )
 
-    # Merchant + Subscription are optional because not all transactions map cleanly.
+
     merchant = models.ForeignKey(
         "subscriptions.Merchant",
         on_delete=models.SET_NULL,
@@ -64,7 +65,7 @@ class Transaction(models.Model):
         default=TransactionDirection.SPEND,
     )
 
-    # Store amount as a positive number; direction indicates spend vs income/refund.
+
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     currency = models.CharField(max_length=3, default="USD")
 
@@ -88,6 +89,61 @@ class Transaction(models.Model):
         help_text="Raw bank/merchant description or user-entered note.",
     )
 
+
+    satisfaction_rating = models.PositiveSmallIntegerField(
+        blank=True,
+        null=True,
+        help_text="1-10 scale: how satisfied with this purchase",
+    )
+    regret_rating = models.PositiveSmallIntegerField(
+        blank=True,
+        null=True,
+        help_text="0-100 scale: level of regret about this purchase",
+    )
+    repurchase_likelihood = models.PositiveSmallIntegerField(
+        blank=True,
+        null=True,
+        help_text="0-100 scale: likelihood to buy again",
+    )
+    usage_frequency = models.PositiveSmallIntegerField(
+        blank=True,
+        null=True,
+        help_text="How often user expects to use this (e.g., times per week)",
+    )
+    reflection_text = models.TextField(
+        blank=True,
+        null=True,
+        help_text="User's thoughts/notes about this purchase",
+    )
+
+ 
+    considered_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text="When user started considering this purchase (for decision time calculation)",
+    )
+    used_buy_advisor = models.BooleanField(
+        default=False,
+        help_text="Did the user use the buy advisor flow for this purchase",
+    )
+    self_report_researched = models.BooleanField(
+        blank=True,
+        null=True,
+        help_text="Did user report researching before buying (nullable = not asked)",
+    )
+
+
+    impulse_score = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 computed impulse likelihood for this transaction",
+    )
+    regret_score = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 computed regret likelihood for this transaction",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -97,6 +153,32 @@ class Transaction(models.Model):
             models.Index(fields=["user", "category", "occurred_at"]),
             models.Index(fields=["subscription", "occurred_at"]),
             models.Index(fields=["merchant", "occurred_at"]),
+
+            models.Index(fields=["user", "regret_rating"]),
+            models.Index(fields=["user", "satisfaction_rating"]),
+        ]
+        constraints = [
+
+            models.CheckConstraint(
+                condition=models.Q(satisfaction_rating__gte=1, satisfaction_rating__lte=10) | models.Q(satisfaction_rating__isnull=True),
+                name="valid_satisfaction_rating",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(regret_rating__gte=0, regret_rating__lte=100) | models.Q(regret_rating__isnull=True),
+                name="valid_regret_rating",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(repurchase_likelihood__gte=0, repurchase_likelihood__lte=100) | models.Q(repurchase_likelihood__isnull=True),
+                name="valid_repurchase_likelihood",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(impulse_score__gte=0, impulse_score__lte=1) | models.Q(impulse_score__isnull=True),
+                name="valid_impulse_score",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(regret_score__gte=0, regret_score__lte=1) | models.Q(regret_score__isnull=True),
+                name="valid_regret_score",
+            ),
         ]
 
     def __str__(self) -> str:

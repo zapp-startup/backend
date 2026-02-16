@@ -9,11 +9,28 @@ class Recommendation(models.TextChoices):
     ALTERNATIVE = "alternative", "Alternative"
 
 
+class ValuationContext(models.TextChoices):
+    """Context in which a valuation was performed"""
+    SUBSCRIPTION_RENEWAL = "subscription_renewal", "Subscription Renewal"
+    SUBSCRIPTION_CANCEL = "subscription_cancel", "Subscription Cancel"
+    ONE_OFF_PURCHASE = "one_off_purchase", "One-off Purchase"
+    UPGRADE = "upgrade", "Upgrade"
+    OTHER = "other", "Other"
+
+
 class ValuationModelVersion(models.Model):
+    """
+    Model audit + version control for valuation outputs.
+    Allows tracking which model/algorithm version produced each valuation.
+    """
     id = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=64)
     version = models.CharField(max_length=32)
-    description = models.TextField(blank=True, null=True)
+    description = models.TextField(
+        blank=True,
+        null=True,
+        help_text="What changed in this version",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -28,6 +45,10 @@ class ValuationModelVersion(models.Model):
 
 
 class SubscriptionValuation(models.Model):
+    """
+    Periodic subscription evaluation for a time window.
+    Includes cost/value/net analysis + recommendation with evidence snapshot and explanation.
+    """
     id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -47,6 +68,13 @@ class SubscriptionValuation(models.Model):
         related_name="subscription_valuations",
     )
 
+    context = models.CharField(
+        max_length=32,
+        choices=ValuationContext.choices,
+        default=ValuationContext.SUBSCRIPTION_RENEWAL,
+        help_text="What triggered this valuation",
+    )
+
     period_start = models.DateField()
     period_end = models.DateField()
 
@@ -54,8 +82,29 @@ class SubscriptionValuation(models.Model):
     estimated_value = models.DecimalField(max_digits=12, decimal_places=2)
     net_value = models.DecimalField(max_digits=12, decimal_places=2)
 
-    confidence = models.FloatField(default=1.0)
-    explanation_json = models.JSONField(default=dict, blank=True)
+    recommendation = models.CharField(
+        max_length=16,
+        choices=Recommendation.choices,
+        blank=True,
+        help_text="Buy/Wait/Skip/Alternative recommendation",
+    )
+
+    confidence = models.FloatField(
+        default=1.0,
+        help_text="0-1 confidence score for this valuation",
+    )
+
+    evidence_json = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Snapshot of inputs used: weights, raw data, computed metrics",
+    )
+
+    explanation_json = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="UI-friendly explanation: summary, drivers, pros/cons",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -65,13 +114,28 @@ class SubscriptionValuation(models.Model):
             models.Index(fields=["user", "period_end"]),
             models.Index(fields=["user", "subscription", "period_end"]),
             models.Index(fields=["subscription", "period_end"]),
+            models.Index(fields=["recommendation"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "subscription", "period_start", "period_end", "model_version"],
+                name="uniq_subscription_valuation",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(confidence__gte=0, confidence__lte=1),
+                name="valid_subscription_confidence",
+            ),
         ]
 
     def __str__(self) -> str:
-        return f"{self.user} • {self.subscription} • {self.period_start}→{self.period_end}"
+        return f"{self.user} • {self.subscription} • {self.period_start}→{self.period_end} • {self.recommendation}"
 
 
 class ItemValuation(models.Model):
+    """
+    One-off purchase recommendation + personal score.
+    Includes evidence snapshot and reasoning for transparency.
+    """
     id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -79,7 +143,7 @@ class ItemValuation(models.Model):
         related_name="item_valuations",
     )
 
-    # No Product model yet. We store what the user scanned or typed.
+
     item_name = models.CharField(max_length=256)
     item_category = models.CharField(max_length=64, blank=True)
 
@@ -89,21 +153,58 @@ class ItemValuation(models.Model):
         related_name="item_valuations",
     )
 
+
+    context = models.CharField(
+        max_length=32,
+        choices=ValuationContext.choices,
+        default=ValuationContext.ONE_OFF_PURCHASE,
+        help_text="What triggered this valuation",
+    )
+
+
+    observed_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        blank=True,
+        null=True,
+        help_text="Price the user is considering paying",
+    )
+
     estimated_fair_price = models.DecimalField(
         max_digits=12,
         decimal_places=2,
         blank=True,
         null=True,
+        help_text="Market-based fair price estimate",
     )
 
-    personal_value_score = models.PositiveSmallIntegerField()
+    personal_value_score = models.PositiveSmallIntegerField(
+        help_text="0-100 personalized fit score for this user",
+    )
+
+
     recommendation = models.CharField(
         max_length=16,
         choices=Recommendation.choices,
         default=Recommendation.WAIT,
     )
 
-    reasoning_json = models.JSONField(default=dict, blank=True)
+    confidence = models.FloatField(
+        default=1.0,
+        help_text="0-1 confidence score for this valuation",
+    )
+
+    evidence_json = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Snapshot of inputs: computed weights, raw explicit/inferred data",
+    )
+
+    reasoning_json = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="UI-friendly reasoning: pros, cons, alternatives",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -113,7 +214,18 @@ class ItemValuation(models.Model):
             models.Index(fields=["user", "created_at"]),
             models.Index(fields=["user", "recommendation", "created_at"]),
             models.Index(fields=["item_name", "created_at"]),
+            models.Index(fields=["recommendation"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(personal_value_score__gte=0, personal_value_score__lte=100),
+                name="valid_personal_value_score",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(confidence__gte=0, confidence__lte=1),
+                name="valid_item_confidence",
+            ),
         ]
 
     def __str__(self) -> str:
-        return f"{self.user} • {self.item_name} • {self.recommendation} • {self.personal_value_score}"
+        return f"{self.user} • {self.item_name} • {self.recommendation} • {self.personal_value_score}/100"
