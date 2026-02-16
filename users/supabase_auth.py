@@ -4,7 +4,8 @@ import os
 import uuid
 import requests
 import jwt  # PyJWT
-from jwt.algorithms import RSAAlgorithm
+from jwt.algorithms import RSAAlgorithm, ECAlgorithm
+import json
 
 from django.contrib.auth import get_user_model
 from rest_framework.authentication import BaseAuthentication
@@ -14,6 +15,8 @@ User = get_user_model()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")  # e.g. https://xxxx.supabase.co
 SUPABASE_JWT_AUD = os.getenv("SUPABASE_JWT_AUD", "authenticated")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_JWT_ISS = os.getenv("SUPABASE_JWT_ISS")  # e.g. https://xxxx.supabase.co/auth/v1
 
 _JWKS_CACHE = None  # simple in-process cache
 
@@ -25,6 +28,24 @@ def _get_bearer_token(request):
     return header.split(" ", 1)[1].strip()
 
 
+def _fetch_jwks(jwks_url: str):
+    headers = {}
+    if SUPABASE_ANON_KEY:
+        headers["apikey"] = SUPABASE_ANON_KEY
+
+    resp = requests.get(jwks_url, timeout=5, headers=headers or None)
+    resp.raise_for_status()
+
+    content_type = resp.headers.get("content-type", "")
+    if "application/json" not in content_type:
+        raise AuthenticationFailed(
+            f"JWKS not JSON (content-type={content_type}) from {jwks_url}: {resp.text[:200]}"
+        )
+
+    return resp.json()
+
+
+
 def _get_jwks():
     global _JWKS_CACHE
     if _JWKS_CACHE is not None:
@@ -33,14 +54,22 @@ def _get_jwks():
     if not SUPABASE_URL:
         raise AuthenticationFailed("SUPABASE_URL missing in environment.")
 
-    jwks_url = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json"
-    try:
-        resp = requests.get(jwks_url, timeout=5)
-        resp.raise_for_status()
-        _JWKS_CACHE = resp.json()
-        return _JWKS_CACHE
-    except Exception as e:
-        raise AuthenticationFailed(f"Failed to fetch Supabase JWKS: {e}")
+    jwks_urls = [
+        f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json",
+        f"{SUPABASE_URL}/auth/v1/keys",
+    ]
+
+    errors = []
+    for jwks_url in jwks_urls:
+        try:
+            _JWKS_CACHE = _fetch_jwks(jwks_url)
+            return _JWKS_CACHE
+        except Exception as e:
+            errors.append(f"{jwks_url}: {e}")
+
+    raise AuthenticationFailed(
+        "Failed to fetch Supabase JWKS from known endpoints: " + " | ".join(errors)
+    )
 
 
 def _verify_and_decode(token: str) -> dict:
@@ -49,29 +78,58 @@ def _verify_and_decode(token: str) -> dict:
     try:
         header = jwt.get_unverified_header(token)
         kid = header.get("kid")
+        alg = header.get("alg")
         if not kid:
             raise AuthenticationFailed("JWT missing kid header.")
+        if not alg:
+            raise AuthenticationFailed("JWT missing alg header.")
+    except AuthenticationFailed:
+        raise
     except Exception as e:
         raise AuthenticationFailed(f"Invalid JWT header: {e}")
 
-    key = None
-    for jwk in jwks.get("keys", []):
-        if jwk.get("kid") == kid:
-            key = RSAAlgorithm.from_jwk(jwk)
-            break
-
-    if key is None:
+    jwk = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+    if not jwk:
         raise AuthenticationFailed("No matching JWKS key found for token.")
+
+    kty = jwk.get("kty")
+
+    # Build the correct public key object from the JWK
+    try:
+        if kty == "RSA":
+            key = RSAAlgorithm.from_jwk(json.dumps(jwk))
+            allowed_algs = ["RS256"]
+        elif kty == "EC":
+            key = ECAlgorithm.from_jwk(json.dumps(jwk))
+            allowed_algs = ["ES256"]
+        else:
+            raise AuthenticationFailed(f"Unsupported JWKS key type kty={kty}.")
+    except AuthenticationFailed:
+        raise
+    except Exception as e:
+        raise AuthenticationFailed(f"Failed to parse JWKS key (kty={kty}): {e}")
+
+    # Extra safety: ensure token alg matches what the key type implies
+    if alg not in allowed_algs:
+        raise AuthenticationFailed(
+            f"JWT alg={alg} does not match key type kty={kty} (expected one of {allowed_algs})."
+        )
+
+    options = {
+        "verify_signature": True,
+        "verify_exp": True,
+        "verify_aud": True,
+        "verify_iss": bool(SUPABASE_JWT_ISS),  # only enforce if set
+    }
 
     try:
         payload = jwt.decode(
             token,
             key=key,
-            algorithms=["RS256"],
+            algorithms=allowed_algs,
             audience=SUPABASE_JWT_AUD,
-            options={
-                "verify_iss": False,  # can enforce later if you want
-            },
+            issuer=SUPABASE_JWT_ISS if SUPABASE_JWT_ISS else None,
+            options=options,
         )
         return payload
     except Exception as e:
