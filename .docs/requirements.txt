@@ -1,3 +1,10 @@
 Django==6.0.1
 python-dotenv==1.0.0
 djangorestframework==3.15.2
+django-cors-headers==4.9.0
+dj-database-url==3.1.0
+requests==2.32.5
+PyJWT==2.10.1
+cryptography==46.0.5
+psycopg2-binary==2.9.11
+Faker==40.4.0

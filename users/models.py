@@ -1,7 +1,12 @@
 from __future__ import annotations
+import uuid
+from django.contrib.auth.models import AbstractUser
 
 from django.conf import settings
 from django.db import models
+
+class User(AbstractUser):
+    supabase_uid = models.UUIDField(unique=True, null=True, blank=True, db_index=True)
 
 
 # ----------------------------
