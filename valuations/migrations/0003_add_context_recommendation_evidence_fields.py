@@ -20,7 +20,7 @@ class Migration(migrations.Migration):
             name='recommendation',
             field=models.CharField(blank=True, choices=[('buy', 'Buy'), ('wait', 'Wait'), ('skip', 'Skip'), ('alternative', 'Alternative')], help_text='Buy/Wait/Skip/Alternative recommendation', max_length=16),
         ),
-        migrations.AlterField(
+        migrations.AddField(
             model_name='subscriptionvaluation',
             name='confidence',
             field=models.FloatField(default=1.0, help_text='0-1 confidence score for this valuation'),
