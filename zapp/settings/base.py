@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     'subscriptions',
     'valuations',
     'transactions',
+    'gamification',
 ]
 
 MIDDLEWARE = [
