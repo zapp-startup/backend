@@ -44,6 +44,62 @@ def _fetch_jwks(jwks_url: str):
 
     return resp.json()
 
+def _fetch_supabase_user_profile(token: str) -> dict:
+    """
+    Fetch Supabase user profile for fallback identity fields.
+    """
+    if not SUPABASE_URL:
+        return {}
+
+    headers = {"Authorization": f"Bearer {token}"}
+    if SUPABASE_ANON_KEY:
+        headers["apikey"] = SUPABASE_ANON_KEY
+
+    try:
+        resp = requests.get(f"{SUPABASE_URL}/auth/v1/user", timeout=5, headers=headers)
+        resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "")
+        if "application/json" not in content_type:
+            return {}
+        return resp.json()
+    except Exception:
+        return {}
+
+def _extract_email(payload: dict, token: str) -> str:
+    """
+    Resolve email with fallbacks: payload.email -> user_metadata.email -> /auth/v1/user.
+    """
+    email = payload.get("email")
+    if email:
+        return str(email).strip().lower()
+
+    user_meta = payload.get("user_metadata") or {}
+    if isinstance(user_meta, dict) and user_meta.get("email"):
+        return str(user_meta["email"]).strip().lower()
+
+    profile = _fetch_supabase_user_profile(token)
+    profile_email = profile.get("email") if isinstance(profile, dict) else None
+    if profile_email:
+        return str(profile_email).strip().lower()
+
+    return None
+
+def build_unique_username(base: str) -> str:
+    """
+    Build a unique username from an email-like base.
+    """
+    candidate = (base or "").strip().lower() or f"user-{uuid.uuid4().hex[:8]}"
+    if not User.objects.filter(username=candidate).exists():
+        return candidate
+
+    stem = candidate.split("@", 1)[0] if "@" in candidate else candidate
+    for i in range(1, 1000):
+        next_candidate = f"{stem}-{i}"
+        if not User.objects.filter(username=next_candidate).exists():
+            return next_candidate
+
+    return f"{stem}-{uuid.uuid4().hex[:8]}"
+
 
 
 def _get_jwks():
@@ -153,7 +209,7 @@ class SupabaseJWTAuthentication(BaseAuthentication):
         payload = _verify_and_decode(token)
 
         sub = payload.get("sub")
-        email = payload.get("email")
+        email = _extract_email(payload, token)  # with fallbacks
 
         if not sub:
             raise AuthenticationFailed("Supabase token missing sub.")
@@ -165,26 +221,33 @@ class SupabaseJWTAuthentication(BaseAuthentication):
         except Exception:
             raise AuthenticationFailed("Supabase sub is not a valid UUID.")
 
-        email_norm = str(email).strip().lower()
 
         # Primary lookup by supabase_uid
         user = User.objects.filter(supabase_uid=supabase_uid).first()
 
         if user is None:
             # Secondary: if a user exists by email, link it
-            user = User.objects.filter(email__iexact=email_norm).first()
+            user = User.objects.filter(email__iexact=email).first()
             if user is not None:
-                user.supabase_uid = supabase_uid
-                user.email = user.email or email_norm
-                user.save(update_fields=["supabase_uid", "email"])
+                fields_to_update = []
+                if user.supabase_uid != supabase_uid:
+                    user.supabase_uid = supabase_uid
+                    fields_to_update.append("supabase_uid")
+                if not user.email:
+                    user.email = email
+                    fields_to_update.append("email")
+                if fields_to_update:
+                    user.save(update_fields=fields_to_update)
             else:
                 # Create a new Django user row
                 # username must be unique; use email if possible
-                username = email_norm
                 user = User.objects.create(
-                    username=username,
-                    email=email_norm,
+                    username=build_unique_username(email),
+                    email = email,
                     supabase_uid=supabase_uid,
                 )
+        elif not user.email:
+            user.email = email
+            user.save(update_fields=["email"])
 
         return (user, None)

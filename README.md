@@ -60,6 +60,7 @@ Authorization: Bearer <supabase_access_token>
 ```
 
 Backend behavior:
+
 - validates the token via Supabase JWKS;
 - reads the `sub` claim as the Supabase user id;
 - creates or links a Django `users.User` row (`supabase_uid`) on first request.
