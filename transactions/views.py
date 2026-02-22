@@ -28,6 +28,10 @@ class TransactionViewSet(ModelViewSet):
             qs = qs.filter(occurred_at__date__gte=date_from)
         if date_to:
             qs = qs.filter(occurred_at__date__lte=date_to)
+
+        limit = self.request.query_params.get("limit")
+        if limit:
+            qs = qs[:int(limit)]
         return qs
 
     def perform_create(self, serializer):
