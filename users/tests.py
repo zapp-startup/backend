@@ -1,4 +1,5 @@
 import uuid
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.urls import reverse
@@ -30,3 +31,27 @@ class SupabaseUserSyncViewTests(APITestCase):
     def test_sync_requires_authentication(self):
         response = self.client.post(reverse("supabase-user-sync"))
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class SupabaseEmailExtractionTests(APITestCase):
+    @patch("users.supabase_auth._fetch_supabase_user_profile")
+    def test_extracts_email_from_payload_metadata(self, mock_profile):
+        from users.supabase_auth import _extract_email
+
+        mock_profile.return_value = {}
+        payload = {"metadata": {"email": "MetaDataUser@Example.com"}}
+
+        email = _extract_email(payload, "token")
+
+        self.assertEqual(email, "metadatauser@example.com")
+
+    @patch("users.supabase_auth._fetch_supabase_user_profile")
+    def test_extracts_email_from_profile_metadata(self, mock_profile):
+        from users.supabase_auth import _extract_email
+
+        mock_profile.return_value = {"metadata": {"email": "ProfileUser@Example.com"}}
+        payload = {}
+
+        email = _extract_email(payload, "token")
+
+        self.assertEqual(email, "profileuser@example.com")

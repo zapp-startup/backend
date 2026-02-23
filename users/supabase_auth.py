@@ -65,22 +65,42 @@ def _fetch_supabase_user_profile(token: str) -> dict:
     except Exception:
         return {}
 
+def _extract_email_from_metadata(metadata: dict):
+    if isinstance(metadata, dict) and metadata.get("email"):
+        return str(metadata["email"]).strip().lower()
+    return None
+
+
 def _extract_email(payload: dict, token: str) -> str:
     """
-    Resolve email with fallbacks: payload.email -> user_metadata.email -> /auth/v1/user.
+    Resolve email with fallbacks:
+    payload.email -> payload.user_metadata.email -> payload.metadata.email
+    -> /auth/v1/user email -> /auth/v1/user user_metadata.email -> /auth/v1/user metadata.email.
     """
     email = payload.get("email")
     if email:
         return str(email).strip().lower()
 
-    user_meta = payload.get("user_metadata") or {}
-    if isinstance(user_meta, dict) and user_meta.get("email"):
-        return str(user_meta["email"]).strip().lower()
+    payload_user_meta_email = _extract_email_from_metadata(payload.get("user_metadata") or {})
+    if payload_user_meta_email:
+        return payload_user_meta_email
+
+    payload_meta_email = _extract_email_from_metadata(payload.get("metadata") or {})
+    if payload_meta_email:
+        return payload_meta_email
 
     profile = _fetch_supabase_user_profile(token)
     profile_email = profile.get("email") if isinstance(profile, dict) else None
     if profile_email:
         return str(profile_email).strip().lower()
+
+    profile_user_meta_email = _extract_email_from_metadata(profile.get("user_metadata") or {}) if isinstance(profile, dict) else None
+    if profile_user_meta_email:
+        return profile_user_meta_email
+
+    profile_meta_email = _extract_email_from_metadata(profile.get("metadata") or {}) if isinstance(profile, dict) else None
+    if profile_meta_email:
+        return profile_meta_email
 
     return None
 
