@@ -1,12 +1,12 @@
 # backend/users/supabase_auth.py
 
+import json
 import os
 import uuid
-import requests
-import jwt  # PyJWT
-from jwt.algorithms import RSAAlgorithm, ECAlgorithm
-import json
 
+import jwt  # PyJWT
+import requests
+from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 from django.contrib.auth import get_user_model
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
@@ -44,65 +44,19 @@ def _fetch_jwks(jwks_url: str):
 
     return resp.json()
 
-def _fetch_supabase_user_profile(token: str) -> dict:
-    """
-    Fetch Supabase user profile for fallback identity fields.
-    """
-    if not SUPABASE_URL:
-        return {}
 
-    headers = {"Authorization": f"Bearer {token}"}
-    if SUPABASE_ANON_KEY:
-        headers["apikey"] = SUPABASE_ANON_KEY
-
-    try:
-        resp = requests.get(f"{SUPABASE_URL}/auth/v1/user", timeout=5, headers=headers)
-        resp.raise_for_status()
-        content_type = resp.headers.get("content-type", "")
-        if "application/json" not in content_type:
-            return {}
-        return resp.json()
-    except Exception:
-        return {}
-
-def _extract_email_from_metadata(metadata: dict):
-    if isinstance(metadata, dict) and metadata.get("email"):
-        return str(metadata["email"]).strip().lower()
-    return None
-
-
-def _extract_email(payload: dict, token: str) -> str:
-    """
-    Resolve email with fallbacks:
-    payload.email -> payload.user_metadata.email -> payload.metadata.email
-    -> /auth/v1/user email -> /auth/v1/user user_metadata.email -> /auth/v1/user metadata.email.
-    """
+def _extract_email(payload: dict) -> str | None:
+    """Read only the canonical top-level email claim from the signed JWT payload."""
     email = payload.get("email")
-    if email:
-        return str(email).strip().lower()
+    if not email:
+        return None
+    return str(email).strip().lower()
 
-    payload_user_meta_email = _extract_email_from_metadata(payload.get("user_metadata") or {})
-    if payload_user_meta_email:
-        return payload_user_meta_email
 
-    payload_meta_email = _extract_email_from_metadata(payload.get("metadata") or {})
-    if payload_meta_email:
-        return payload_meta_email
+def _is_email_verified(payload: dict) -> bool:
+    """Supabase marks verified emails with a non-null `email_confirmed_at` timestamp."""
+    return bool(payload.get("email_confirmed_at"))
 
-    profile = _fetch_supabase_user_profile(token)
-    profile_email = profile.get("email") if isinstance(profile, dict) else None
-    if profile_email:
-        return str(profile_email).strip().lower()
-
-    profile_user_meta_email = _extract_email_from_metadata(profile.get("user_metadata") or {}) if isinstance(profile, dict) else None
-    if profile_user_meta_email:
-        return profile_user_meta_email
-
-    profile_meta_email = _extract_email_from_metadata(profile.get("metadata") or {}) if isinstance(profile, dict) else None
-    if profile_meta_email:
-        return profile_meta_email
-
-    return None
 
 def build_unique_username(base: str) -> str:
     """
@@ -229,12 +183,15 @@ class SupabaseJWTAuthentication(BaseAuthentication):
         payload = _verify_and_decode(token)
 
         sub = payload.get("sub")
-        email = _extract_email(payload, token)  # with fallbacks
+        email = _extract_email(payload)
+        email_verified = _is_email_verified(payload)
 
         if not sub:
             raise AuthenticationFailed("Supabase token missing sub.")
-        if not email:
-            raise AuthenticationFailed("Supabase token missing email.")
+        if not email or not email_verified:
+            raise AuthenticationFailed(
+                "Supabase token missing a verified top-level email claim."
+            )
 
         try:
             supabase_uid = uuid.UUID(str(sub))
@@ -263,7 +220,7 @@ class SupabaseJWTAuthentication(BaseAuthentication):
                 # username must be unique; use email if possible
                 user = User.objects.create(
                     username=build_unique_username(email),
-                    email = email,
+                    email=email,
                     supabase_uid=supabase_uid,
                 )
         elif not user.email:

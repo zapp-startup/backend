@@ -1,6 +1,4 @@
 import uuid
-from unittest.mock import patch
-
 from django.contrib.auth import get_user_model
 from django.urls import reverse
 from rest_framework import status
@@ -34,24 +32,36 @@ class SupabaseUserSyncViewTests(APITestCase):
 
 
 class SupabaseEmailExtractionTests(APITestCase):
-    @patch("users.supabase_auth._fetch_supabase_user_profile")
-    def test_extracts_email_from_payload_metadata(self, mock_profile):
+    def test_extracts_email_only_from_top_level_payload_claim(self):
         from users.supabase_auth import _extract_email
 
-        mock_profile.return_value = {}
-        payload = {"metadata": {"email": "MetaDataUser@Example.com"}}
+        payload = {
+            "email": "CanonicalUser@Example.com",
+            "metadata": {"email": "MetaDataUser@Example.com"},
+            "user_metadata": {"email": "UserMetaDataUser@Example.com"},
+        }
 
-        email = _extract_email(payload, "token")
+        email = _extract_email(payload)
 
-        self.assertEqual(email, "metadatauser@example.com")
+        self.assertEqual(email, "canonicaluser@example.com")
 
-    @patch("users.supabase_auth._fetch_supabase_user_profile")
-    def test_extracts_email_from_profile_metadata(self, mock_profile):
+    def test_does_not_extract_email_from_metadata_fallbacks(self):
         from users.supabase_auth import _extract_email
 
-        mock_profile.return_value = {"metadata": {"email": "ProfileUser@Example.com"}}
-        payload = {}
+        payload = {
+            "metadata": {"email": "MetaDataUser@Example.com"},
+            "user_metadata": {"email": "UserMetaDataUser@Example.com"},
+        }
 
-        email = _extract_email(payload, "token")
+        email = _extract_email(payload)
 
-        self.assertEqual(email, "profileuser@example.com")
+        self.assertIsNone(email)
+
+
+class SupabaseEmailVerificationTests(APITestCase):
+    def test_recognizes_email_confirmed_at_claim(self):
+        from users.supabase_auth import _is_email_verified
+
+        self.assertTrue(_is_email_verified({"email_confirmed_at": "2024-01-01T00:00:00Z"}))
+        self.assertFalse(_is_email_verified({"email_confirmed_at": None}))
+        self.assertFalse(_is_email_verified({}))
