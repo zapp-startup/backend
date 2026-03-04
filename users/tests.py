@@ -1,4 +1,5 @@
 import uuid
+from unittest.mock import Mock, patch
 from django.contrib.auth import get_user_model
 from django.urls import reverse
 from rest_framework import status
@@ -65,3 +66,95 @@ class SupabaseEmailVerificationTests(APITestCase):
         self.assertTrue(_is_email_verified({"email_confirmed_at": "2024-01-01T00:00:00Z"}))
         self.assertFalse(_is_email_verified({"email_confirmed_at": None}))
         self.assertFalse(_is_email_verified({}))
+
+
+class SupabaseUserLookupTests(APITestCase):
+    @patch("users.supabase_auth.SUPABASE_URL", "https://example.supabase.co")
+    @patch("users.supabase_auth.requests.get")
+    def test_fetch_supabase_user_returns_json_object(self, mock_get):
+        from users.supabase_auth import _fetch_supabase_user
+
+        response = Mock()
+        response.headers = {"content-type": "application/json; charset=utf-8"}
+        response.json.return_value = {"email_confirmed_at": "2024-01-01T00:00:00Z"}
+        response.raise_for_status.return_value = None
+        mock_get.return_value = response
+
+        user_data = _fetch_supabase_user("test-token")
+
+        self.assertEqual(
+            user_data["email_confirmed_at"],
+            "2024-01-01T00:00:00Z",
+        )
+
+    @patch("users.supabase_auth.SUPABASE_URL", "https://example.supabase.co")
+    @patch("users.supabase_auth.requests.get")
+    def test_fetch_supabase_user_rejects_non_json_response(self, mock_get):
+        from users.supabase_auth import _fetch_supabase_user
+        from rest_framework.exceptions import AuthenticationFailed
+
+        response = Mock()
+        response.headers = {"content-type": "text/html"}
+        response.raise_for_status.return_value = None
+        mock_get.return_value = response
+
+        with self.assertRaises(AuthenticationFailed):
+            _fetch_supabase_user("test-token")
+
+
+class SupabaseAuthenticationSecurityTests(APITestCase):
+    def tearDown(self):
+        from users import supabase_auth
+
+        supabase_auth._JWKS_CACHE = None
+        supabase_auth._JWKS_CACHE_EXPIRES_AT = 0.0
+
+    @patch("users.supabase_auth._fetch_supabase_user")
+    @patch("users.supabase_auth._verify_and_decode")
+    def test_rejects_implicit_email_account_claim(self, mock_verify_and_decode, mock_fetch_user):
+        from rest_framework.exceptions import AuthenticationFailed
+        from users.supabase_auth import SupabaseJWTAuthentication
+
+        User.objects.create_user(
+            username="existing-local-user",
+            email="jane@example.com",
+            password="testpass123",
+        )
+        mock_verify_and_decode.return_value = {
+            "sub": str(uuid.uuid4()),
+            "email": "jane@example.com",
+        }
+        mock_fetch_user.return_value = {"email_confirmed_at": "2024-01-01T00:00:00Z"}
+
+        request = Mock()
+        request.headers = {"Authorization": "Bearer test-token"}
+
+        with self.assertRaises(AuthenticationFailed):
+            SupabaseJWTAuthentication().authenticate(request)
+
+    @patch("users.supabase_auth.SUPABASE_JWT_ISS", "")
+    def test_verify_and_decode_requires_issuer_configuration(self):
+        from rest_framework.exceptions import AuthenticationFailed
+        from users.supabase_auth import _verify_and_decode
+
+        with self.assertRaises(AuthenticationFailed):
+            _verify_and_decode("test-token")
+
+    @patch("users.supabase_auth.SUPABASE_URL", "https://example.supabase.co")
+    @patch("users.supabase_auth.SUPABASE_JWKS_CACHE_TTL_SECONDS", 300)
+    @patch("users.supabase_auth._fetch_jwks")
+    def test_jwks_cache_expires_and_refreshes(self, mock_fetch_jwks):
+        from users import supabase_auth
+
+        mock_fetch_jwks.side_effect = [
+            {"keys": [{"kid": "old"}]},
+            {"keys": [{"kid": "new"}]},
+        ]
+
+        with patch("users.supabase_auth.time.time", side_effect=[100.0, 100.0, 401.0, 401.0]):
+            first_keys = supabase_auth._get_jwks()
+            second_keys = supabase_auth._get_jwks()
+
+        self.assertEqual(first_keys["keys"][0]["kid"], "old")
+        self.assertEqual(second_keys["keys"][0]["kid"], "new")
+        self.assertEqual(mock_fetch_jwks.call_count, 2)

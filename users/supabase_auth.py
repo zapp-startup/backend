@@ -1,7 +1,9 @@
 # backend/users/supabase_auth.py
 
 import json
+import logging
 import os
+import time
 import uuid
 
 import jwt  # PyJWT
@@ -12,13 +14,16 @@ from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")  # e.g. https://xxxx.supabase.co
 SUPABASE_JWT_AUD = os.getenv("SUPABASE_JWT_AUD", "authenticated")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_JWT_ISS = os.getenv("SUPABASE_JWT_ISS")  # e.g. https://xxxx.supabase.co/auth/v1
+SUPABASE_JWKS_CACHE_TTL_SECONDS = int(os.getenv("SUPABASE_JWKS_CACHE_TTL_SECONDS", "300"))
 
 _JWKS_CACHE = None  # simple in-process cache
+_JWKS_CACHE_EXPIRES_AT = 0.0
 
 
 def _get_bearer_token(request):
@@ -33,16 +38,27 @@ def _fetch_jwks(jwks_url: str):
     if SUPABASE_ANON_KEY:
         headers["apikey"] = SUPABASE_ANON_KEY
 
-    resp = requests.get(jwks_url, timeout=5, headers=headers or None)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(jwks_url, timeout=5, headers=headers or None)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        logger.warning("Failed to fetch Supabase JWKS from %s: %s", jwks_url, e)
+        raise AuthenticationFailed("Unable to validate Supabase token.")
 
     content_type = resp.headers.get("content-type", "")
     if "application/json" not in content_type:
-        raise AuthenticationFailed(
-            f"JWKS not JSON (content-type={content_type}) from {jwks_url}: {resp.text[:200]}"
+        logger.warning(
+            "Supabase JWKS endpoint %s returned unexpected content-type %s",
+            jwks_url,
+            content_type,
         )
+        raise AuthenticationFailed("Unable to validate Supabase token.")
 
-    return resp.json()
+    try:
+        return resp.json()
+    except ValueError as e:
+        logger.warning("Supabase JWKS endpoint %s returned invalid JSON: %s", jwks_url, e)
+        raise AuthenticationFailed("Unable to validate Supabase token.")
 
 
 def _extract_email(payload: dict) -> str | None:
@@ -56,6 +72,47 @@ def _extract_email(payload: dict) -> str | None:
 def _is_email_verified(payload: dict) -> bool:
     """Supabase marks verified emails with a non-null `email_confirmed_at` timestamp."""
     return bool(payload.get("email_confirmed_at"))
+
+
+def _fetch_supabase_user(token: str) -> dict:
+    if not SUPABASE_URL:
+        logger.error("SUPABASE_URL is missing while validating a Supabase user.")
+        raise AuthenticationFailed("Authentication is not configured.")
+
+    headers = {"Authorization": f"Bearer {token}"}
+    if SUPABASE_ANON_KEY:
+        headers["apikey"] = SUPABASE_ANON_KEY
+
+    try:
+        resp = requests.get(
+            f"{SUPABASE_URL}/auth/v1/user",
+            timeout=5,
+            headers=headers,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        logger.warning("Failed to fetch Supabase user profile: %s", e)
+        raise AuthenticationFailed("Unable to validate Supabase token.")
+
+    content_type = resp.headers.get("content-type", "")
+    if "application/json" not in content_type:
+        logger.warning(
+            "Supabase user endpoint returned unexpected content-type %s",
+            content_type,
+        )
+        raise AuthenticationFailed("Unable to validate Supabase token.")
+
+    try:
+        user_data = resp.json()
+    except ValueError as e:
+        logger.warning("Supabase user endpoint returned invalid JSON: %s", e)
+        raise AuthenticationFailed("Unable to validate Supabase token.")
+
+    if not isinstance(user_data, dict):
+        logger.warning("Supabase user endpoint returned a non-object payload.")
+        raise AuthenticationFailed("Unable to validate Supabase token.")
+
+    return user_data
 
 
 def build_unique_username(base: str) -> str:
@@ -77,32 +134,44 @@ def build_unique_username(base: str) -> str:
 
 
 def _get_jwks():
-    global _JWKS_CACHE
-    if _JWKS_CACHE is not None:
+    return _get_jwks_with_refresh(force_refresh=False)
+
+
+def _get_jwks_with_refresh(force_refresh: bool):
+    global _JWKS_CACHE, _JWKS_CACHE_EXPIRES_AT
+    if not force_refresh and _JWKS_CACHE is not None and time.time() < _JWKS_CACHE_EXPIRES_AT:
         return _JWKS_CACHE
 
     if not SUPABASE_URL:
-        raise AuthenticationFailed("SUPABASE_URL missing in environment.")
+        logger.error("SUPABASE_URL is missing while fetching Supabase JWKS.")
+        raise AuthenticationFailed("Authentication is not configured.")
 
     jwks_urls = [
         f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json",
         f"{SUPABASE_URL}/auth/v1/keys",
     ]
 
-    errors = []
     for jwks_url in jwks_urls:
         try:
             _JWKS_CACHE = _fetch_jwks(jwks_url)
+            _JWKS_CACHE_EXPIRES_AT = time.time() + SUPABASE_JWKS_CACHE_TTL_SECONDS
             return _JWKS_CACHE
-        except Exception as e:
-            errors.append(f"{jwks_url}: {e}")
+        except AuthenticationFailed:
+            continue
 
-    raise AuthenticationFailed(
-        "Failed to fetch Supabase JWKS from known endpoints: " + " | ".join(errors)
-    )
+    raise AuthenticationFailed("Unable to validate Supabase token.")
+
+
+def _require_supabase_issuer() -> str:
+    issuer = (SUPABASE_JWT_ISS or "").strip()
+    if not issuer:
+        logger.error("SUPABASE_JWT_ISS is not configured.")
+        raise AuthenticationFailed("Authentication is not configured.")
+    return issuer
 
 
 def _verify_and_decode(token: str) -> dict:
+    issuer = _require_supabase_issuer()
     jwks = _get_jwks()
 
     try:
@@ -116,11 +185,15 @@ def _verify_and_decode(token: str) -> dict:
     except AuthenticationFailed:
         raise
     except Exception as e:
-        raise AuthenticationFailed(f"Invalid JWT header: {e}")
+        logger.warning("Failed to parse Supabase JWT header: %s", e)
+        raise AuthenticationFailed("Unable to validate Supabase token.")
 
     jwk = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
     if not jwk:
-        raise AuthenticationFailed("No matching JWKS key found for token.")
+        jwks = _get_jwks_with_refresh(force_refresh=True)
+        jwk = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+        if not jwk:
+            raise AuthenticationFailed("Unable to validate Supabase token.")
 
     kty = jwk.get("kty")
 
@@ -137,7 +210,8 @@ def _verify_and_decode(token: str) -> dict:
     except AuthenticationFailed:
         raise
     except Exception as e:
-        raise AuthenticationFailed(f"Failed to parse JWKS key (kty={kty}): {e}")
+        logger.warning("Failed to parse JWKS key for Supabase token: %s", e)
+        raise AuthenticationFailed("Unable to validate Supabase token.")
 
     # Extra safety: ensure token alg matches what the key type implies
     if alg not in allowed_algs:
@@ -149,7 +223,7 @@ def _verify_and_decode(token: str) -> dict:
         "verify_signature": True,
         "verify_exp": True,
         "verify_aud": True,
-        "verify_iss": bool(SUPABASE_JWT_ISS),  # only enforce if set
+        "verify_iss": True,
     }
 
     try:
@@ -158,12 +232,13 @@ def _verify_and_decode(token: str) -> dict:
             key=key,
             algorithms=allowed_algs,
             audience=SUPABASE_JWT_AUD,
-            issuer=SUPABASE_JWT_ISS if SUPABASE_JWT_ISS else None,
+            issuer=issuer,
             options=options,
         )
         return payload
     except Exception as e:
-        raise AuthenticationFailed(f"Invalid Supabase token: {e}")
+        logger.warning("Supabase token validation failed: %s", e)
+        raise AuthenticationFailed("Unable to validate Supabase token.")
 
 
 class SupabaseJWTAuthentication(BaseAuthentication):
@@ -184,14 +259,15 @@ class SupabaseJWTAuthentication(BaseAuthentication):
 
         sub = payload.get("sub")
         email = _extract_email(payload)
-        email_verified = _is_email_verified(payload)
 
         if not sub:
             raise AuthenticationFailed("Supabase token missing sub.")
-        if not email or not email_verified:
-            raise AuthenticationFailed(
-                "Supabase token missing a verified top-level email claim."
-            )
+        if not email:
+            raise AuthenticationFailed("Supabase token missing top-level email claim.")
+
+        supabase_user = _fetch_supabase_user(token)
+        if not _is_email_verified(supabase_user):
+            raise AuthenticationFailed("Supabase user email is not verified.")
 
         try:
             supabase_uid = uuid.UUID(str(sub))
@@ -203,26 +279,18 @@ class SupabaseJWTAuthentication(BaseAuthentication):
         user = User.objects.filter(supabase_uid=supabase_uid).first()
 
         if user is None:
-            # Secondary: if a user exists by email, link it
-            user = User.objects.filter(email__iexact=email).first()
-            if user is not None:
-                fields_to_update = []
-                if user.supabase_uid != supabase_uid:
-                    user.supabase_uid = supabase_uid
-                    fields_to_update.append("supabase_uid")
-                if not user.email:
-                    user.email = email
-                    fields_to_update.append("email")
-                if fields_to_update:
-                    user.save(update_fields=fields_to_update)
-            else:
-                # Create a new Django user row
-                # username must be unique; use email if possible
-                user = User.objects.create(
-                    username=build_unique_username(email),
-                    email=email,
-                    supabase_uid=supabase_uid,
+            if User.objects.filter(email__iexact=email).exists():
+                raise AuthenticationFailed(
+                    "A local account with this email already exists and must be linked manually."
                 )
+
+            # Create a new Django user row with an unusable local password.
+            user = User.objects.create_user(
+                username=build_unique_username(email),
+                email=email,
+                supabase_uid=supabase_uid,
+                password=None,
+            )
         elif not user.email:
             user.email = email
             user.save(update_fields=["email"])
