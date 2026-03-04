@@ -265,9 +265,10 @@ class SupabaseJWTAuthentication(BaseAuthentication):
         if not email:
             raise AuthenticationFailed("Supabase token missing top-level email claim.")
 
-        supabase_user = _fetch_supabase_user(token)
-        if not _is_email_verified(supabase_user):
-            raise AuthenticationFailed("Supabase user email is not verified.")
+        if not _is_email_verified(payload):
+            raise AuthenticationFailed(
+                "Supabase token missing a verified top-level email claim."
+            )
 
         try:
             supabase_uid = uuid.UUID(str(sub))

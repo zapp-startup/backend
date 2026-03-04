@@ -109,9 +109,8 @@ class SupabaseAuthenticationSecurityTests(APITestCase):
         supabase_auth._JWKS_CACHE = None
         supabase_auth._JWKS_CACHE_EXPIRES_AT = 0.0
 
-    @patch("users.supabase_auth._fetch_supabase_user")
     @patch("users.supabase_auth._verify_and_decode")
-    def test_rejects_implicit_email_account_claim(self, mock_verify_and_decode, mock_fetch_user):
+    def test_rejects_implicit_email_account_claim(self, mock_verify_and_decode):
         from rest_framework.exceptions import AuthenticationFailed
         from users.supabase_auth import SupabaseJWTAuthentication
 
@@ -123,8 +122,25 @@ class SupabaseAuthenticationSecurityTests(APITestCase):
         mock_verify_and_decode.return_value = {
             "sub": str(uuid.uuid4()),
             "email": "jane@example.com",
+            "email_confirmed_at": "2024-01-01T00:00:00Z",
         }
-        mock_fetch_user.return_value = {"email_confirmed_at": "2024-01-01T00:00:00Z"}
+
+        request = Mock()
+        request.headers = {"Authorization": "Bearer test-token"}
+
+        with self.assertRaises(AuthenticationFailed):
+            SupabaseJWTAuthentication().authenticate(request)
+
+    @patch("users.supabase_auth._verify_and_decode")
+    def test_rejects_unverified_email_claim_in_token(self, mock_verify_and_decode):
+        from rest_framework.exceptions import AuthenticationFailed
+        from users.supabase_auth import SupabaseJWTAuthentication
+
+        mock_verify_and_decode.return_value = {
+            "sub": str(uuid.uuid4()),
+            "email": "jane@example.com",
+            "email_confirmed_at": None,
+        }
 
         request = Mock()
         request.headers = {"Authorization": "Bearer test-token"}
