@@ -73,17 +73,30 @@ def _fetch_jwks(jwks_url: str):
         raise AuthenticationFailed("Unable to validate Supabase token.")
 
 
-def _extract_email(payload: dict) -> str | None:
-    """Read only the canonical top-level email claim from the signed JWT payload."""
-    email = payload.get("email")
+def _extract_email(data: dict | None) -> str | None:
+    """Read the canonical top-level email claim from a JWT payload or Supabase user profile."""
+    if not data:
+        return None
+
+    email = data.get("email")
     if not email:
         return None
     return str(email).strip().lower()
 
 
-def _is_email_verified(payload: dict) -> bool:
+def _is_email_verified(data: dict | None) -> bool:
     """Supabase marks verified emails with a non-null `email_confirmed_at` timestamp."""
-    return bool(payload.get("email_confirmed_at"))
+    if not data:
+        return False
+    return bool(data.get("email_confirmed_at"))
+
+
+def _extract_subject(payload: dict | None, user_data: dict | None) -> str | None:
+    if payload and payload.get("sub"):
+        return str(payload["sub"])
+    if user_data and user_data.get("id"):
+        return str(user_data["id"])
+    return None
 
 
 def _fetch_supabase_user(token: str) -> dict:
@@ -323,17 +336,31 @@ class SupabaseJWTAuthentication(BaseAuthentication):
         if not token:
             return None  # DRF treats as unauthenticated
 
-        payload = _verify_and_decode(token)
+        payload = None
+        user_data = None
 
-        sub = payload.get("sub")
-        email = _extract_email(payload)
+        try:
+            payload = _verify_and_decode(token)
+        except AuthenticationFailed as e:
+            logger.warning(
+                "Supabase JWT local validation failed; falling back to /auth/v1/user lookup: %s",
+                e,
+            )
+
+        # Some valid Supabase access tokens omit claims this backend expects, so
+        # fall back to the canonical user endpoint to finish validation/profile resolution.
+        if payload is None or not _extract_email(payload) or not _is_email_verified(payload):
+            user_data = _fetch_supabase_user(token)
+
+        sub = _extract_subject(payload, user_data)
+        email = _extract_email(payload) or _extract_email(user_data)
 
         if not sub:
-            raise AuthenticationFailed("Supabase token missing sub.")
+            raise AuthenticationFailed("Supabase token missing sub/id.")
         if not email:
-            raise AuthenticationFailed("Supabase token missing top-level email claim.")
+            raise AuthenticationFailed("Supabase token missing a usable top-level email claim.")
 
-        if not _is_email_verified(payload):
+        if not (_is_email_verified(payload) or _is_email_verified(user_data)):
             raise AuthenticationFailed(
                 "Supabase token missing a verified top-level email claim."
             )
