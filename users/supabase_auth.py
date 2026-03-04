@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 
@@ -22,8 +23,19 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_JWT_ISS = os.getenv("SUPABASE_JWT_ISS")  # e.g. https://xxxx.supabase.co/auth/v1
 SUPABASE_JWKS_CACHE_TTL_SECONDS = int(os.getenv("SUPABASE_JWKS_CACHE_TTL_SECONDS", "300"))
 
+# How long (seconds) to suppress JWKS refreshes triggered by an unknown kid.
+MISSING_KID_CACHE_TTL = 60
+# Minimum seconds between outbound JWKS refresh attempts.
+JWKS_REFRESH_BACKOFF = 30
+
+_JWKS_LOCK = threading.Lock()
 _JWKS_CACHE = None  # simple in-process cache
 _JWKS_CACHE_EXPIRES_AT = 0.0
+_LAST_JWKS_REFRESH_ATTEMPT = 0.0
+
+# kid -> timestamp of first failed lookup; entries expire after MISSING_KID_CACHE_TTL.
+_MISSING_KID_LOCK = threading.Lock()
+_MISSING_KID_CACHE: dict = {}
 
 
 def _get_bearer_token(request):
@@ -138,28 +150,56 @@ def _get_jwks():
 
 
 def _get_jwks_with_refresh(force_refresh: bool):
-    global _JWKS_CACHE, _JWKS_CACHE_EXPIRES_AT
-    if not force_refresh and _JWKS_CACHE is not None and time.time() < _JWKS_CACHE_EXPIRES_AT:
-        return _JWKS_CACHE
+    global _JWKS_CACHE, _JWKS_CACHE_EXPIRES_AT, _LAST_JWKS_REFRESH_ATTEMPT
 
-    if not SUPABASE_URL:
-        logger.error("SUPABASE_URL is missing while fetching Supabase JWKS.")
-        raise AuthenticationFailed("Authentication is not configured.")
+    with _JWKS_LOCK:
+        now = time.time()
 
-    jwks_urls = [
-        f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json",
-        f"{SUPABASE_URL}/auth/v1/keys",
-    ]
-
-    for jwks_url in jwks_urls:
-        try:
-            _JWKS_CACHE = _fetch_jwks(jwks_url)
-            _JWKS_CACHE_EXPIRES_AT = time.time() + SUPABASE_JWKS_CACHE_TTL_SECONDS
+        # Return the cached keyset if it is still fresh and no forced refresh was requested.
+        if not force_refresh and _JWKS_CACHE is not None and now < _JWKS_CACHE_EXPIRES_AT:
             return _JWKS_CACHE
-        except AuthenticationFailed:
-            continue
 
-    raise AuthenticationFailed("Unable to validate Supabase token.")
+        # Backoff guard: do not hammer the JWKS endpoint if we recently tried.
+        if now - _LAST_JWKS_REFRESH_ATTEMPT < JWKS_REFRESH_BACKOFF:
+            if _JWKS_CACHE is not None:
+                logger.debug(
+                    "JWKS refresh skipped (backoff active, %.0fs remaining); using cached keys.",
+                    JWKS_REFRESH_BACKOFF - (now - _LAST_JWKS_REFRESH_ATTEMPT),
+                )
+                return _JWKS_CACHE
+            # No cache at all and backoff is active — we have nothing to serve.
+            raise AuthenticationFailed("Unable to validate Supabase token.")
+
+        if not SUPABASE_URL:
+            logger.error("SUPABASE_URL is missing while fetching Supabase JWKS.")
+            raise AuthenticationFailed("Authentication is not configured.")
+
+        jwks_urls = [
+            f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json",
+            f"{SUPABASE_URL}/auth/v1/keys",
+        ]
+
+        _LAST_JWKS_REFRESH_ATTEMPT = now
+        logger.info("JWKS refresh: attempting outbound fetch.")
+
+        for jwks_url in jwks_urls:
+            try:
+                new_jwks = _fetch_jwks(jwks_url)
+                _JWKS_CACHE = new_jwks
+                _JWKS_CACHE_EXPIRES_AT = time.time() + SUPABASE_JWKS_CACHE_TTL_SECONDS
+                logger.info("JWKS refresh succeeded from %s.", jwks_url)
+                return _JWKS_CACHE
+            except AuthenticationFailed:
+                continue
+
+        # Every URL failed.  Keep the last known-good keyset to avoid a full auth outage.
+        if _JWKS_CACHE is not None:
+            logger.warning(
+                "JWKS refresh failed for all endpoints; continuing with stale cached keys."
+            )
+            return _JWKS_CACHE
+
+        raise AuthenticationFailed("Unable to validate Supabase token.")
 
 
 def _require_supabase_issuer() -> str:
@@ -190,9 +230,35 @@ def _verify_and_decode(token: str) -> dict:
 
     jwk = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
     if not jwk:
-        jwks = _get_jwks_with_refresh(force_refresh=True)
-        jwk = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+        now = time.time()
+
+        # Negative-kid cache: if we recently confirmed this kid is not in the JWKS,
+        # reject immediately without any outbound request.
+        with _MISSING_KID_LOCK:
+            cached_at = _MISSING_KID_CACHE.get(kid)
+            if cached_at is not None and now - cached_at < MISSING_KID_CACHE_TTL:
+                logger.warning(
+                    "Rejected token: kid not in JWKS (negative cache hit, age=%.0fs).", now - cached_at
+                )
+                raise AuthenticationFailed("Unable to validate Supabase token.")
+
+        # Only attempt a refresh when the JWKS cache itself is stale.  If the cache is
+        # still fresh, the kid simply does not exist in the keyset — refresh would return
+        # the same keys, so skip it and go straight to rejection.
+        cache_is_stale = now >= _JWKS_CACHE_EXPIRES_AT
+        if cache_is_stale:
+            jwks = _get_jwks_with_refresh(force_refresh=True)
+            jwk = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+
         if not jwk:
+            # Record the kid as unknown so subsequent requests are rejected immediately.
+            with _MISSING_KID_LOCK:
+                _MISSING_KID_CACHE[kid] = now
+                # Prune stale negative-cache entries to keep memory bounded.
+                expired = [k for k, ts in list(_MISSING_KID_CACHE.items()) if now - ts >= MISSING_KID_CACHE_TTL]
+                for k in expired:
+                    del _MISSING_KID_CACHE[k]
+            logger.warning("Rejected token: kid not found in JWKS (cache_was_stale=%s).", cache_is_stale)
             raise AuthenticationFailed("Unable to validate Supabase token.")
 
     kty = jwk.get("kty")
