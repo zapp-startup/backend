@@ -1,3 +1,4 @@
+import time
 import uuid
 from unittest.mock import Mock, patch
 from django.contrib.auth import get_user_model
@@ -108,6 +109,7 @@ class SupabaseAuthenticationSecurityTests(APITestCase):
 
         supabase_auth._JWKS_CACHE = None
         supabase_auth._JWKS_CACHE_EXPIRES_AT = 0.0
+        supabase_auth._LAST_JWKS_REFRESH_ATTEMPT = 0.0
 
     @patch("users.supabase_auth._verify_and_decode")
     def test_rejects_implicit_email_account_claim(self, mock_verify_and_decode):
@@ -174,3 +176,36 @@ class SupabaseAuthenticationSecurityTests(APITestCase):
         self.assertEqual(first_keys["keys"][0]["kid"], "old")
         self.assertEqual(second_keys["keys"][0]["kid"], "new")
         self.assertEqual(mock_fetch_jwks.call_count, 2)
+
+    @patch("users.supabase_auth.SUPABASE_URL", "https://example.supabase.co")
+    @patch("users.supabase_auth._fetch_jwks")
+    def test_jwks_retries_immediately_on_cold_start_after_failure(self, mock_fetch_jwks):
+        from rest_framework.exceptions import AuthenticationFailed
+        from users import supabase_auth
+
+        mock_fetch_jwks.side_effect = [
+            AuthenticationFailed("Unable to validate Supabase token."),
+            {"keys": [{"kid": "new"}]},
+        ]
+
+        with self.assertRaises(AuthenticationFailed):
+            supabase_auth._get_jwks_with_refresh(force_refresh=True)
+
+        keys = supabase_auth._get_jwks_with_refresh(force_refresh=True)
+
+        self.assertEqual(keys["keys"][0]["kid"], "new")
+        self.assertEqual(mock_fetch_jwks.call_count, 2)
+
+    @patch("users.supabase_auth.SUPABASE_URL", "https://example.supabase.co")
+    @patch("users.supabase_auth._fetch_jwks")
+    def test_jwks_backoff_only_applies_when_cache_exists(self, mock_fetch_jwks):
+        from users import supabase_auth
+
+        supabase_auth._JWKS_CACHE = {"keys": [{"kid": "cached"}]}
+        supabase_auth._JWKS_CACHE_EXPIRES_AT = 0.0
+        supabase_auth._LAST_JWKS_REFRESH_ATTEMPT = time.time()
+
+        keys = supabase_auth._get_jwks_with_refresh(force_refresh=True)
+
+        self.assertEqual(keys["keys"][0]["kid"], "cached")
+        mock_fetch_jwks.assert_not_called()

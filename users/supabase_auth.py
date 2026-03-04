@@ -159,16 +159,16 @@ def _get_jwks_with_refresh(force_refresh: bool):
         if not force_refresh and _JWKS_CACHE is not None and now < _JWKS_CACHE_EXPIRES_AT:
             return _JWKS_CACHE
 
-        # Backoff guard: do not hammer the JWKS endpoint if we recently tried.
-        if now - _LAST_JWKS_REFRESH_ATTEMPT < JWKS_REFRESH_BACKOFF:
+        # Backoff guard: only suppress refreshes when a prior JWKS cache exists.
+        if _JWKS_CACHE is not None and now - _LAST_JWKS_REFRESH_ATTEMPT < JWKS_REFRESH_BACKOFF:
             if _JWKS_CACHE is not None:
                 logger.debug(
                     "JWKS refresh skipped (backoff active, %.0fs remaining); using cached keys.",
                     JWKS_REFRESH_BACKOFF - (now - _LAST_JWKS_REFRESH_ATTEMPT),
                 )
                 return _JWKS_CACHE
-            # No cache at all and backoff is active — we have nothing to serve.
-            raise AuthenticationFailed("Unable to validate Supabase token.")
+        elif _JWKS_CACHE is None and _LAST_JWKS_REFRESH_ATTEMPT:
+            logger.info("JWKS refresh retrying immediately because no cache is available.")
 
         if not SUPABASE_URL:
             logger.error("SUPABASE_URL is missing while fetching Supabase JWKS.")
@@ -179,8 +179,8 @@ def _get_jwks_with_refresh(force_refresh: bool):
             f"{SUPABASE_URL}/auth/v1/keys",
         ]
 
-        _LAST_JWKS_REFRESH_ATTEMPT = now
         logger.info("JWKS refresh: attempting outbound fetch.")
+        _LAST_JWKS_REFRESH_ATTEMPT = now
 
         for jwks_url in jwks_urls:
             try:
@@ -198,6 +198,8 @@ def _get_jwks_with_refresh(force_refresh: bool):
                 "JWKS refresh failed for all endpoints; continuing with stale cached keys."
             )
             return _JWKS_CACHE
+
+        logger.warning("JWKS refresh failed for all endpoints and no cached keys are available.")
 
         raise AuthenticationFailed("Unable to validate Supabase token.")
 
