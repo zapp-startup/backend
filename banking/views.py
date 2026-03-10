@@ -27,7 +27,7 @@ class LinkTokenView(APIView):
     Frontend uses this to initialize Plaid Link.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         try:
@@ -82,7 +82,7 @@ class BankConnectionsView(APIView):
     List user's bank connections.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         connections = BankConnection.objects.filter(user=request.user).order_by(
@@ -97,7 +97,7 @@ class BankAccountsView(APIView):
     List user's linked bank accounts from our DB.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         accounts = BankAccount.objects.filter(
@@ -113,7 +113,7 @@ class BankTransactionsView(APIView):
     Supports filtering by account_id, date_from, date_to, pending, removed.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         qs = (
@@ -160,7 +160,7 @@ class ManualSyncView(APIView):
     Manually trigger transactions/sync for a bank connection.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, connection_id):
         try:
