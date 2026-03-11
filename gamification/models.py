@@ -11,13 +11,17 @@ class GroupRole(models.TextChoices):
 class GroupInviteStatus(models.TextChoices):
     PENDING = "pending", "Pending"
     ACCEPTED = "accepted", "Accepted"
+    DECLINED = "declined", "Declined"
     REVOKED = "revoked", "Revoked"
 
 
 class PointAction(models.TextChoices):
     LOG_PURCHASE = "log_purchase", "Log purchase"
+    LOG_PURCHASE_NEW_DAY = "log_purchase_new_day", "Log purchase on a new day"
     REFLECT_SAME_DAY = "reflect_same_day", "Reflect same day"
+    REFLECT_RISKY_PURCHASE = "reflect_risky_purchase", "Reflect on risky purchase"
     USE_ADVISOR = "use_advisor", "Use advisor"
+    FIRST_ADVISOR_USE = "first_advisor_use", "First advisor use"
     WEEKLY_REVIEW = "weekly_review", "Complete weekly review"
     ADD_SUBSCRIPTION = "add_subscription", "Add subscription"
     CANCEL_SUBSCRIPTION = "cancel_subscription", "Cancel subscription"
@@ -26,19 +30,30 @@ class PointAction(models.TextChoices):
     SET_MONTHLY_TARGET = "set_monthly_target", "Set monthly target"
     COMPLETE_MONTHLY_TARGET = "complete_monthly_target", "Complete monthly target"
     COMPLETE_MONTHLY_REVIEW = "complete_monthly_review", "Complete monthly review"
+    REVIEW_UPCOMING_RENEWAL = "review_upcoming_renewal", "Review upcoming renewal"
+    COMPLETE_SUBSCRIPTION_AUDIT = "complete_subscription_audit", "Complete subscription audit"
     RUN_SUBSCRIPTION_VALUATION = "run_subscription_valuation", "Run subscription valuation"
     RUN_ITEM_VALUATION = "run_item_valuation", "Run item valuation"
+    FOLLOW_WAIT_RECOMMENDATION = "follow_wait_recommendation", "Follow wait or skip recommendation"
     JOIN_GROUP = "join_group", "Join group"
     CREATE_GROUP = "create_group", "Create group"
+    LEADERBOARD_TOP_THREE = "leaderboard_top_three", "Finish in weekly top 3"
+    LEADERBOARD_WINNER = "leaderboard_winner", "Finish first in weekly leaderboard"
+    STREAK_7_BONUS = "streak_7_bonus", "7-day streak bonus"
+    STREAK_14_BONUS = "streak_14_bonus", "14-day streak bonus"
+    STREAK_30_BONUS = "streak_30_bonus", "30-day streak bonus"
 
 
 class BadgeCategory(models.TextChoices):
-    PURCHASE = "purchase", "Purchase"
-    REFLECTION = "reflection", "Reflection"
+    ONBOARDING = "onboarding", "Onboarding"
+    TRANSACTIONS = "transactions", "Transactions"
+    REFLECTIONS = "reflections", "Reflections"
     ADVISOR = "advisor", "Advisor"
-    SUBSCRIPTION = "subscription", "Subscription"
+    SUBSCRIPTIONS = "subscriptions", "Subscriptions"
     SOCIAL = "social", "Social"
-    STREAK = "streak", "Streak"
+    STREAKS = "streaks", "Streaks"
+    MONTHLY_GOALS = "monthly_goals", "Monthly goals"
+    IMPROVEMENT = "improvement", "Improvement"
 
 
 class Group(models.Model):
@@ -150,6 +165,46 @@ class GroupInvite(models.Model):
 
     def __str__(self) -> str:
         return f"{self.group} invite {self.invite_code}"
+
+
+class MonthlyTargetStatus(models.TextChoices):
+    ACTIVE = "active", "Active"
+    COMPLETED = "completed", "Completed"
+    EXPIRED = "expired", "Expired"
+
+
+class MonthlyTarget(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="monthly_targets",
+    )
+    target_type = models.CharField(max_length=64)
+    title = models.CharField(max_length=128)
+    month_start = models.DateField()
+    target_value = models.PositiveIntegerField()
+    current_value = models.PositiveIntegerField(default=0)
+    status = models.CharField(
+        max_length=16,
+        choices=MonthlyTargetStatus.choices,
+        default=MonthlyTargetStatus.ACTIVE,
+    )
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "target_type", "month_start"], name="uniq_user_target_month"),
+        ]
+        indexes = [
+            models.Index(fields=["user", "month_start", "status"]),
+            models.Index(fields=["target_type", "month_start"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user} {self.target_type} {self.month_start}"
 
 
 class PointEvent(models.Model):

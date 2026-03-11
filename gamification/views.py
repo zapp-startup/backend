@@ -11,16 +11,36 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 
-from .models import Badge, Group, GroupInvite, GroupInviteStatus, GroupMember, GroupRole, PointEvent, UserBadge, UserStreak
+from .models import (
+    Badge,
+    Group,
+    GroupInvite,
+    GroupInviteStatus,
+    GroupMember,
+    GroupRole,
+    MonthlyTarget,
+    MonthlyTargetStatus,
+    PointEvent,
+    UserBadge,
+    UserStreak,
+)
 from .serializers import (
     BadgeSerializer,
     GroupInviteSerializer,
+    GroupMemberSerializer,
     GroupSerializer,
+    MonthlyTargetSerializer,
     PointEventSerializer,
     UserBadgeSerializer,
     UserStreakSerializer,
 )
-from .services import award_points_for_group_create, award_points_for_group_join, leaderboard_for_group
+from .services import (
+    award_points_for_group_create,
+    award_points_for_group_join,
+    award_points_for_monthly_target,
+    complete_monthly_target,
+    leaderboard_for_group,
+)
 
 
 def _generate_invite_code() -> str:
@@ -70,6 +90,10 @@ def _join_group_from_invite(request_user, group: Group, invite: GroupInvite | No
 
     award_points_for_group_join(request_user, group)
     return membership
+
+
+def _is_last_admin(group: Group, membership: GroupMember) -> bool:
+    return membership.role == GroupRole.ADMIN and GroupMember.objects.filter(group=group, role=GroupRole.ADMIN).count() == 1
 
 
 class GroupViewSet(ModelViewSet):
@@ -132,6 +156,51 @@ class GroupViewSet(ModelViewSet):
         result = _leave_group(request.user, group)
         return Response(result, status=200)
 
+    @action(detail=True, methods=["get"])
+    def members(self, request, pk=None):
+        group = self.get_object()
+        memberships = GroupMember.objects.filter(group=group).select_related("user").order_by("joined_at")
+        return Response(GroupMemberSerializer(memberships, many=True).data)
+
+    @action(detail=True, methods=["post"])
+    def update_member_role(self, request, pk=None):
+        group = self.get_object()
+        if not _is_group_admin(request.user, group):
+            raise PermissionDenied("Only group admins can update member roles.")
+
+        membership_id = request.data.get("membership_id")
+        role = request.data.get("role")
+        if role not in {GroupRole.ADMIN, GroupRole.MEMBER}:
+            return Response({"detail": "role must be admin or member"}, status=400)
+
+        membership = get_object_or_404(GroupMember, id=membership_id, group=group)
+        if group.created_by_id == membership.user_id and role != GroupRole.ADMIN:
+            return Response({"detail": "The group owner must remain an admin."}, status=400)
+        if membership.user_id == request.user.id and _is_last_admin(group, membership) and role != GroupRole.ADMIN:
+            return Response({"detail": "The last admin cannot demote themselves."}, status=400)
+
+        membership.role = role
+        membership.save(update_fields=["role"])
+        return Response(GroupMemberSerializer(membership).data)
+
+    @action(detail=True, methods=["post"])
+    def remove_member(self, request, pk=None):
+        group = self.get_object()
+        if not _is_group_admin(request.user, group):
+            raise PermissionDenied("Only group admins can remove members.")
+
+        membership_id = request.data.get("membership_id")
+        membership = get_object_or_404(GroupMember, id=membership_id, group=group)
+        if membership.user_id == request.user.id:
+            return Response({"detail": "Use leave to remove yourself."}, status=400)
+        if group.created_by_id == membership.user_id:
+            return Response({"detail": "Use owner transfer or leave flow for the group owner."}, status=400)
+        if _is_last_admin(group, membership):
+            return Response({"detail": "Cannot remove the last admin."}, status=400)
+
+        membership.delete()
+        return Response(status=204)
+
 
 class GroupInviteViewSet(ModelViewSet):
     serializer_class = GroupInviteSerializer
@@ -192,6 +261,49 @@ class GroupInviteViewSet(ModelViewSet):
 
         _join_group_from_invite(request.user, invite.group, invite=invite)
         return Response({"detail": "Invite accepted", "group_id": invite.group_id}, status=200)
+
+    @action(detail=True, methods=["post"])
+    def decline(self, request, pk=None):
+        invite = self.get_object()
+        if invite.status != GroupInviteStatus.PENDING:
+            return Response({"detail": "Invite is not pending."}, status=400)
+        if invite.invited_user_id and invite.invited_user_id != request.user.id:
+            return Response({"detail": "This invite is not for you"}, status=403)
+        invite.status = GroupInviteStatus.DECLINED
+        invite.save(update_fields=["status"])
+        return Response({"detail": "Invite declined."}, status=200)
+
+
+class MonthlyTargetViewSet(ModelViewSet):
+    serializer_class = MonthlyTargetSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return MonthlyTarget.objects.filter(user=self.request.user).order_by("-month_start", "-created_at")
+
+    def perform_create(self, serializer):
+        month_start = serializer.validated_data["month_start"].replace(day=1)
+        target = serializer.save(user=self.request.user, month_start=month_start)
+        award_points_for_monthly_target(target)
+
+    def perform_update(self, serializer):
+        target = serializer.save()
+        if target.current_value >= target.target_value and target.status != MonthlyTargetStatus.COMPLETED:
+            complete_monthly_target(target)
+
+    @action(detail=True, methods=["post"])
+    def progress(self, request, pk=None):
+        target = self.get_object()
+        amount = int(request.data.get("amount", 0))
+        if amount <= 0:
+            return Response({"detail": "amount must be positive"}, status=400)
+        target.current_value += amount
+        if target.current_value >= target.target_value and target.status != MonthlyTargetStatus.COMPLETED:
+            complete_monthly_target(target)
+        else:
+            target.save(update_fields=["current_value", "updated_at"])
+        target.refresh_from_db()
+        return Response(MonthlyTargetSerializer(target).data)
 
 
 class PointEventViewSet(ReadOnlyModelViewSet):

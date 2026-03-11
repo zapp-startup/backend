@@ -5,7 +5,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from gamification.models import Badge, Group, GroupInvite, GroupInviteStatus, GroupMember, PointAction, PointEvent, UserBadge, UserStreak
+from gamification.models import Badge, Group, GroupInvite, GroupInviteStatus, GroupMember, MonthlyTarget, PointAction, PointEvent, UserBadge, UserStreak
 from gamification.services import award_points, award_points_for_transaction, sync_badge_catalog
 from subscriptions.models import Merchant, Subscription
 from transactions.models import Transaction
@@ -88,8 +88,8 @@ class GamificationServiceTests(TestCase):
             award_points_for_transaction(txn)
 
         badge_codes = set(UserBadge.objects.filter(user=self.user).values_list("badge__code", flat=True))
-        self.assertIn("first_purchase", badge_codes)
-        self.assertIn("purchase_5", badge_codes)
+        self.assertIn("first_log", badge_codes)
+        self.assertIn("money_tracker_1", badge_codes)
 
 
 class GamificationApiTests(TestCase):
@@ -172,6 +172,68 @@ class GamificationApiTests(TestCase):
         self.assertEqual(response.status_code, 204)
         invite.refresh_from_db()
         self.assertEqual(invite.status, GroupInviteStatus.REVOKED)
+
+    def test_group_invite_can_be_declined(self):
+        newcomer = User.objects.create_user(username="charlie", password="pw")
+        invite = GroupInvite.objects.create(
+            group=self.group,
+            invited_by=self.user,
+            invited_user=newcomer,
+            invite_code="invitecharlie",
+        )
+
+        newcomer_client = APIClient()
+        newcomer_client.force_authenticate(newcomer)
+        response = newcomer_client.post(f"/api/gamification/group-invites/{invite.id}/decline/")
+
+        self.assertEqual(response.status_code, 200)
+        invite.refresh_from_db()
+        self.assertEqual(invite.status, GroupInviteStatus.DECLINED)
+
+    def test_group_admin_can_list_members_and_promote_member(self):
+        response = self.client.get(f"/api/gamification/groups/{self.group.id}/members/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()), 2)
+
+        membership = GroupMember.objects.get(group=self.group, user=self.peer)
+        promote = self.client.post(
+            f"/api/gamification/groups/{self.group.id}/update_member_role/",
+            {"membership_id": membership.id, "role": "admin"},
+            format="json",
+        )
+
+        self.assertEqual(promote.status_code, 200)
+        membership.refresh_from_db()
+        self.assertEqual(membership.role, "admin")
+
+    def test_monthly_target_create_and_progress_complete(self):
+        create = self.client.post(
+            "/api/gamification/monthly-targets/",
+            {
+                "target_type": "transactions_logged",
+                "title": "Log 10 purchases",
+                "month_start": "2026-03-12",
+                "target_value": 10,
+            },
+            format="json",
+        )
+        self.assertEqual(create.status_code, 201)
+        target_id = create.json()["id"]
+        target = MonthlyTarget.objects.get(id=target_id)
+        self.assertEqual(str(target.month_start), "2026-03-01")
+
+        progress = self.client.post(
+            f"/api/gamification/monthly-targets/{target.id}/progress/",
+            {"amount": 10},
+            format="json",
+        )
+        self.assertEqual(progress.status_code, 200)
+        target.refresh_from_db()
+        self.assertEqual(target.status, "completed")
+        self.assertEqual(
+            PointEvent.objects.filter(user=self.user, action=PointAction.COMPLETE_MONTHLY_TARGET).count(),
+            1,
+        )
 
     def test_leaderboard_aggregates_rolling_points(self):
         award_points(

@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Badge, Group, GroupInvite, GroupMember, PointEvent, UserBadge, UserStreak
+from .models import Badge, Group, GroupInvite, GroupMember, MonthlyTarget, PointEvent, UserBadge, UserStreak
 
 
 class GroupSerializer(serializers.ModelSerializer):
@@ -16,6 +16,8 @@ class GroupSerializer(serializers.ModelSerializer):
 
 
 class GroupMemberSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source="user.username", read_only=True)
+
     class Meta:
         model = GroupMember
         fields = "__all__"
@@ -84,3 +86,10 @@ class UserBadgeSerializer(serializers.ModelSerializer):
             "source_object_id",
             "trigger_event",
         )
+
+
+class MonthlyTargetSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MonthlyTarget
+        fields = "__all__"
+        read_only_fields = ("user", "current_value", "status", "completed_at", "created_at", "updated_at")
