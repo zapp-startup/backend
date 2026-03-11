@@ -1,0 +1,470 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, timedelta
+
+from django.contrib.auth import get_user_model
+from django.db import transaction
+from django.db.models import Count, Sum
+from django.utils import timezone
+
+from transactions.models import TransactionReflection
+
+from .badges import ACTION_POINTS, BADGE_CATALOG
+from .models import Badge, Group, PointAction, PointEvent, UserBadge, UserStreak
+
+User = get_user_model()
+
+
+@dataclass(frozen=True)
+class AwardResult:
+    event: PointEvent
+    created: bool
+    badges_awarded: list[UserBadge]
+
+
+def sync_badge_catalog() -> None:
+    for badge in BADGE_CATALOG:
+        Badge.objects.update_or_create(
+            code=badge["code"],
+            defaults={
+                "name": badge["name"],
+                "description": badge["description"],
+                "icon": badge["icon"],
+                "category": badge["category"],
+                "is_active": True,
+            },
+        )
+
+
+def build_weekly_review_event_key(user: User, window_start: date) -> str:
+    return f"weekly_review:user:{user.id}:{window_start.isoformat()}"
+
+
+def build_monthly_review_event_key(user: User, month_key: str) -> str:
+    return f"monthly_review:user:{user.id}:{month_key}"
+
+
+def build_complete_monthly_target_event_key(user: User, target_type: str, month_key: str) -> str:
+    return f"complete_monthly_target:user:{user.id}:{target_type}:{month_key}"
+
+
+def _normalize_event_key(event_key: str | None) -> str | None:
+    if event_key is None:
+        return None
+    event_key = event_key.strip()
+    return event_key or None
+
+
+def _rolling_window(days: int, now=None):
+    now = now or timezone.now()
+    start = now - timedelta(days=days)
+    return start, now
+
+
+def _get_or_create_streak(user: User) -> UserStreak:
+    streak, _ = UserStreak.objects.get_or_create(user=user)
+    return streak
+
+
+def _update_streak(user: User, streak_date: date | None = None) -> UserStreak:
+    streak_date = streak_date or timezone.now().date()
+    streak = _get_or_create_streak(user)
+
+    if streak.last_checkin_date == streak_date:
+        return streak
+
+    if streak.last_checkin_date == streak_date - timedelta(days=1):
+        streak.current_streak_days += 1
+    else:
+        streak.current_streak_days = 1
+
+    streak.last_checkin_date = streak_date
+    if streak.current_streak_days > streak.best_streak_days:
+        streak.best_streak_days = streak.current_streak_days
+    streak.save(update_fields=["current_streak_days", "best_streak_days", "last_checkin_date", "updated_at"])
+    return streak
+
+
+def _ensure_badge(user: User, code: str, trigger_event: PointEvent | None, source_object_type="", source_object_id=None) -> UserBadge | None:
+    try:
+        badge = Badge.objects.get(code=code, is_active=True)
+    except Badge.DoesNotExist:
+        return None
+
+    user_badge, created = UserBadge.objects.get_or_create(
+        user=user,
+        badge=badge,
+        defaults={
+            "source_object_type": source_object_type,
+            "source_object_id": source_object_id,
+            "trigger_event": trigger_event,
+        },
+    )
+    return user_badge if created else None
+
+
+def _award_badges_for_event(event: PointEvent) -> list[UserBadge]:
+    user = event.user
+    awarded: list[UserBadge] = []
+
+    def maybe_award(code: str, *, source_object_type: str = "", source_object_id=None):
+        user_badge = _ensure_badge(
+            user=user,
+            code=code,
+            trigger_event=event,
+            source_object_type=source_object_type,
+            source_object_id=source_object_id,
+        )
+        if user_badge:
+            awarded.append(user_badge)
+
+    if event.action == PointAction.LOG_PURCHASE:
+        purchase_count = PointEvent.objects.filter(user=user, action=PointAction.LOG_PURCHASE).count()
+        if purchase_count >= 1:
+            maybe_award("first_purchase", source_object_type=event.source_object_type, source_object_id=event.source_object_id)
+        if purchase_count >= 5:
+            maybe_award("purchase_5")
+        if purchase_count >= 25:
+            maybe_award("purchase_25")
+        if purchase_count >= 100:
+            maybe_award("purchase_100")
+
+    if event.action == PointAction.REFLECT_SAME_DAY:
+        same_day_count = PointEvent.objects.filter(user=user, action=PointAction.REFLECT_SAME_DAY).count()
+        reflection_count = TransactionReflection.objects.filter(user=user).count()
+        if reflection_count >= 1:
+            maybe_award("first_reflection", source_object_type=event.source_object_type, source_object_id=event.source_object_id)
+        if reflection_count >= 5:
+            maybe_award("reflection_5")
+        if reflection_count >= 20:
+            maybe_award("reflection_20")
+        if same_day_count >= 1:
+            maybe_award("first_same_day_reflection")
+        if same_day_count >= 7:
+            maybe_award("same_day_reflection_7")
+
+    if event.action == PointAction.USE_ADVISOR:
+        advisor_count = PointEvent.objects.filter(user=user, action=PointAction.USE_ADVISOR).count()
+        if advisor_count >= 1:
+            maybe_award("first_advisor_use", source_object_type=event.source_object_type, source_object_id=event.source_object_id)
+
+    if event.action == PointAction.RUN_ITEM_VALUATION:
+        count = PointEvent.objects.filter(user=user, action=PointAction.RUN_ITEM_VALUATION).count()
+        if count >= 5:
+            maybe_award("item_valuation_5")
+        if count >= 20:
+            maybe_award("item_valuation_20")
+
+    if event.action == PointAction.ADD_SUBSCRIPTION:
+        count = PointEvent.objects.filter(user=user, action=PointAction.ADD_SUBSCRIPTION).count()
+        if count >= 1:
+            maybe_award("first_subscription_added", source_object_type=event.source_object_type, source_object_id=event.source_object_id)
+        if count >= 5:
+            maybe_award("subscription_added_5")
+
+    if event.action in {PointAction.CANCEL_SUBSCRIPTION, PointAction.PAUSE_SUBSCRIPTION}:
+        count = PointEvent.objects.filter(
+            user=user,
+            action__in=[PointAction.CANCEL_SUBSCRIPTION, PointAction.PAUSE_SUBSCRIPTION],
+        ).count()
+        if count >= 1:
+            maybe_award("first_subscription_cleanup", source_object_type=event.source_object_type, source_object_id=event.source_object_id)
+
+    if event.action == PointAction.JOIN_GROUP:
+        maybe_award("joined_group", source_object_type="group", source_object_id=event.group_id)
+
+    if event.action == PointAction.CREATE_GROUP:
+        maybe_award("created_group", source_object_type="group", source_object_id=event.group_id)
+
+    streak = getattr(user, "streak", None)
+    if streak:
+        if streak.best_streak_days >= 7:
+            maybe_award("streak_7")
+        if streak.best_streak_days >= 14:
+            maybe_award("streak_14")
+        if streak.best_streak_days >= 30:
+            maybe_award("streak_30")
+
+    return awarded
+
+
+@transaction.atomic
+def award_points(
+    *,
+    user: User,
+    action: str,
+    points: int | None = None,
+    group: Group | None = None,
+    source_object_type: str = "",
+    source_object_id=None,
+    event_key: str | None = None,
+    metadata_json: dict | None = None,
+    window_date: date | None = None,
+    streak_date: date | None = None,
+) -> AwardResult:
+    sync_badge_catalog()
+
+    event_key = _normalize_event_key(event_key)
+    defaults = {
+        "user": user,
+        "group": group,
+        "action": action,
+        "points": ACTION_POINTS[action] if points is None else points,
+        "source_object_type": source_object_type,
+        "source_object_id": source_object_id,
+        "metadata_json": metadata_json or {},
+        "window_date": window_date or timezone.now().date(),
+    }
+
+    if event_key:
+        event, created = PointEvent.objects.get_or_create(event_key=event_key, defaults=defaults)
+    else:
+        event = PointEvent.objects.create(**defaults)
+        created = True
+
+    if not created:
+        return AwardResult(event=event, created=False, badges_awarded=[])
+
+    _update_streak(user, streak_date=streak_date or event.window_date)
+    badges = _award_badges_for_event(event)
+    return AwardResult(event=event, created=True, badges_awarded=badges)
+
+
+def award_points_for_transaction(transaction, *, group: Group | None = None) -> AwardResult:
+    return award_points(
+        user=transaction.user,
+        action=PointAction.LOG_PURCHASE,
+        group=group,
+        source_object_type="transaction",
+        source_object_id=transaction.id,
+        event_key=f"log_purchase:txn:{transaction.id}",
+        metadata_json={"transaction_id": transaction.id, "category": transaction.category},
+        window_date=transaction.occurred_at.date(),
+        streak_date=transaction.occurred_at.date(),
+    )
+
+
+def award_points_for_same_day_reflection(reflection, *, group: Group | None = None) -> AwardResult | None:
+    if not reflection.reflected_same_day:
+        return None
+    return award_points(
+        user=reflection.user,
+        action=PointAction.REFLECT_SAME_DAY,
+        group=group,
+        source_object_type="transaction_reflection",
+        source_object_id=reflection.id,
+        event_key=f"reflect_same_day:txn:{reflection.transaction_id}",
+        metadata_json={"transaction_id": reflection.transaction_id, "reflection_id": reflection.id},
+        window_date=reflection.reflected_at.date(),
+        streak_date=reflection.reflected_at.date(),
+    )
+
+
+def award_points_for_subscription_added(subscription, *, group: Group | None = None) -> AwardResult:
+    return award_points(
+        user=subscription.user,
+        action=PointAction.ADD_SUBSCRIPTION,
+        group=group,
+        source_object_type="subscription",
+        source_object_id=subscription.id,
+        event_key=f"add_subscription:sub:{subscription.id}",
+        metadata_json={"subscription_id": subscription.id, "status": subscription.status},
+        window_date=timezone.now().date(),
+    )
+
+
+def award_points_for_subscription_cancelled(subscription, *, group: Group | None = None) -> AwardResult:
+    return award_points(
+        user=subscription.user,
+        action=PointAction.CANCEL_SUBSCRIPTION,
+        group=group,
+        source_object_type="subscription",
+        source_object_id=subscription.id,
+        event_key=f"cancel_subscription:sub:{subscription.id}",
+        metadata_json={"subscription_id": subscription.id, "status": subscription.status},
+        window_date=timezone.now().date(),
+    )
+
+
+def award_points_for_subscription_paused(subscription, *, group: Group | None = None) -> AwardResult:
+    return award_points(
+        user=subscription.user,
+        action=PointAction.PAUSE_SUBSCRIPTION,
+        group=group,
+        source_object_type="subscription",
+        source_object_id=subscription.id,
+        event_key=f"pause_subscription:sub:{subscription.id}",
+        metadata_json={"subscription_id": subscription.id, "status": subscription.status},
+        window_date=timezone.now().date(),
+    )
+
+
+def award_points_for_item_valuation(item_valuation, *, group: Group | None = None) -> AwardResult:
+    award_points(
+        user=item_valuation.user,
+        action=PointAction.USE_ADVISOR,
+        group=group,
+        source_object_type="item_valuation",
+        source_object_id=item_valuation.id,
+        event_key=f"use_advisor:item_valuation:{item_valuation.id}",
+        metadata_json={"item_valuation_id": item_valuation.id, "item_name": item_valuation.item_name},
+        window_date=timezone.now().date(),
+    )
+    return award_points(
+        user=item_valuation.user,
+        action=PointAction.RUN_ITEM_VALUATION,
+        group=group,
+        source_object_type="item_valuation",
+        source_object_id=item_valuation.id,
+        event_key=f"run_item_valuation:item_valuation:{item_valuation.id}",
+        metadata_json={"item_valuation_id": item_valuation.id, "item_name": item_valuation.item_name},
+        window_date=timezone.now().date(),
+    )
+
+
+def award_points_for_subscription_valuation(subscription_valuation, *, group: Group | None = None) -> AwardResult:
+    return award_points(
+        user=subscription_valuation.user,
+        action=PointAction.RUN_SUBSCRIPTION_VALUATION,
+        group=group,
+        source_object_type="subscription_valuation",
+        source_object_id=subscription_valuation.id,
+        event_key=f"run_subscription_valuation:subval:{subscription_valuation.id}",
+        metadata_json={"subscription_valuation_id": subscription_valuation.id},
+        window_date=subscription_valuation.period_end,
+        streak_date=subscription_valuation.period_end,
+    )
+
+
+def award_points_for_group_join(user: User, group: Group) -> AwardResult:
+    return award_points(
+        user=user,
+        group=group,
+        action=PointAction.JOIN_GROUP,
+        source_object_type="group",
+        source_object_id=group.id,
+        event_key=f"join_group:group:{group.id}:user:{user.id}",
+        metadata_json={"group_id": group.id},
+    )
+
+
+def award_points_for_group_create(user: User, group: Group) -> AwardResult:
+    return award_points(
+        user=user,
+        group=group,
+        action=PointAction.CREATE_GROUP,
+        source_object_type="group",
+        source_object_id=group.id,
+        event_key=f"create_group:group:{group.id}:owner:{user.id}",
+        metadata_json={"group_id": group.id},
+    )
+
+
+def award_points_for_onboarding(user: User) -> AwardResult:
+    return award_points(
+        user=user,
+        action=PointAction.COMPLETE_ONBOARDING,
+        source_object_type="user",
+        source_object_id=user.id,
+        event_key=f"complete_onboarding:user:{user.id}",
+        metadata_json={"user_id": user.id},
+    )
+
+
+def award_points_for_weekly_review(user: User, *, window_start: date | None = None) -> AwardResult:
+    window_start = window_start or timezone.now().date()
+    return award_points(
+        user=user,
+        action=PointAction.WEEKLY_REVIEW,
+        source_object_type="user",
+        source_object_id=user.id,
+        event_key=build_weekly_review_event_key(user, window_start),
+        window_date=window_start,
+        metadata_json={"window_start": window_start.isoformat()},
+    )
+
+
+def award_points_for_monthly_review(user: User, *, month_key: str) -> AwardResult:
+    month_date = date.fromisoformat(f"{month_key}-01")
+    return award_points(
+        user=user,
+        action=PointAction.COMPLETE_MONTHLY_REVIEW,
+        source_object_type="user",
+        source_object_id=user.id,
+        event_key=build_monthly_review_event_key(user, month_key),
+        window_date=month_date,
+        metadata_json={"month": month_key},
+    )
+
+
+def award_points_for_monthly_target_set(user: User, *, target_type: str, month_key: str) -> AwardResult:
+    month_date = date.fromisoformat(f"{month_key}-01")
+    return award_points(
+        user=user,
+        action=PointAction.SET_MONTHLY_TARGET,
+        source_object_type="monthly_target",
+        source_object_id=user.id,
+        event_key=f"set_monthly_target:user:{user.id}:{target_type}:{month_key}",
+        window_date=month_date,
+        metadata_json={"target_type": target_type, "month": month_key},
+    )
+
+
+def award_points_for_monthly_target_completed(user: User, *, target_type: str, month_key: str) -> AwardResult:
+    month_date = date.fromisoformat(f"{month_key}-01")
+    return award_points(
+        user=user,
+        action=PointAction.COMPLETE_MONTHLY_TARGET,
+        source_object_type="monthly_target",
+        source_object_id=user.id,
+        event_key=build_complete_monthly_target_event_key(user, target_type, month_key),
+        window_date=month_date,
+        metadata_json={"target_type": target_type, "month": month_key},
+    )
+
+
+def leaderboard_for_group(*, group: Group, days: int = 7):
+    start, end = _rolling_window(days)
+    qs = PointEvent.objects.filter(group=group, created_at__gte=start, created_at__lte=end)
+
+    totals = (
+        qs.values("user__id", "user__username")
+        .annotate(points_total=Sum("points"))
+        .order_by("-points_total", "user__username")
+    )
+    active_days = (
+        qs.values("user__id", "window_date")
+        .exclude(window_date__isnull=True)
+        .distinct()
+        .values("user__id")
+        .annotate(active_days_count=Count("window_date"))
+    )
+    reflections = (
+        qs.filter(action=PointAction.REFLECT_SAME_DAY)
+        .values("user__id")
+        .annotate(reflections_count=Count("id"))
+    )
+
+    active_days_map = {row["user__id"]: row["active_days_count"] for row in active_days}
+    reflections_map = {row["user__id"]: row["reflections_count"] for row in reflections}
+
+    rows = []
+    for row in totals:
+        user_id = row["user__id"]
+        rows.append(
+            {
+                "user_id": user_id,
+                "username": row["user__username"],
+                "points_total": row["points_total"] or 0,
+                "active_days_count": active_days_map.get(user_id, 0),
+                "reflections_count": reflections_map.get(user_id, 0),
+            }
+        )
+
+    return {
+        "start": start,
+        "end": end,
+        "days": days,
+        "rows": rows,
+    }

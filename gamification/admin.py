@@ -1,5 +1,6 @@
 from django.contrib import admin
-from .models import Group, GroupMember, Season, PointEvent, UserStreak
+
+from .models import Badge, Group, GroupInvite, GroupMember, PointEvent, UserBadge, UserStreak
 
 
 @admin.register(Group)
@@ -17,17 +18,19 @@ class GroupMemberAdmin(admin.ModelAdmin):
     autocomplete_fields = ("group", "user")
 
 
-@admin.register(Season)
-class SeasonAdmin(admin.ModelAdmin):
-    list_display = ("season_type", "start_at", "end_at", "created_at")
-    list_filter = ("season_type",)
+@admin.register(GroupInvite)
+class GroupInviteAdmin(admin.ModelAdmin):
+    list_display = ("group", "invited_by", "invited_user", "invite_code", "status", "expires_at", "created_at")
+    search_fields = ("group__name", "invite_code", "invited_by__username", "invited_user__username")
+    list_filter = ("status",)
+    autocomplete_fields = ("group", "invited_by", "invited_user", "accepted_by")
 
 
 @admin.register(PointEvent)
 class PointEventAdmin(admin.ModelAdmin):
-    list_display = ("user", "group", "action", "points", "created_at")
-    search_fields = ("user__username", "action", "source_object_type")
-    list_filter = ("action",)
+    list_display = ("user", "group", "action", "points", "event_key", "window_date", "created_at")
+    search_fields = ("user__username", "action", "source_object_type", "event_key")
+    list_filter = ("action", "group")
     autocomplete_fields = ("user", "group")
 
 
@@ -35,3 +38,17 @@ class PointEventAdmin(admin.ModelAdmin):
 class UserStreakAdmin(admin.ModelAdmin):
     list_display = ("user", "current_streak_days", "best_streak_days", "last_checkin_date", "updated_at")
     search_fields = ("user__username",)
+
+
+@admin.register(Badge)
+class BadgeAdmin(admin.ModelAdmin):
+    list_display = ("code", "name", "category", "is_active", "created_at")
+    search_fields = ("code", "name")
+    list_filter = ("category", "is_active")
+
+
+@admin.register(UserBadge)
+class UserBadgeAdmin(admin.ModelAdmin):
+    list_display = ("user", "badge", "awarded_at", "source_object_type", "source_object_id")
+    search_fields = ("user__username", "badge__code", "badge__name")
+    autocomplete_fields = ("user", "badge", "trigger_event")

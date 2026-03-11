@@ -8,32 +8,49 @@ class GroupRole(models.TextChoices):
     MEMBER = "member", "Member"
 
 
-class SeasonType(models.TextChoices):
-    WEEKLY = "weekly", "Weekly"
+class GroupInviteStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    ACCEPTED = "accepted", "Accepted"
+    REVOKED = "revoked", "Revoked"
 
 
 class PointAction(models.TextChoices):
     LOG_PURCHASE = "log_purchase", "Log purchase"
     REFLECT_SAME_DAY = "reflect_same_day", "Reflect same day"
-    USE_ADVISOR = "use_advisor", "Use buy advisor"
+    USE_ADVISOR = "use_advisor", "Use advisor"
     WEEKLY_REVIEW = "weekly_review", "Complete weekly review"
     ADD_SUBSCRIPTION = "add_subscription", "Add subscription"
-    CANCEL_SUBSCRIPTION = "cancel_subscription", "Cancel/pause subscription"
+    CANCEL_SUBSCRIPTION = "cancel_subscription", "Cancel subscription"
+    PAUSE_SUBSCRIPTION = "pause_subscription", "Pause subscription"
+    COMPLETE_ONBOARDING = "complete_onboarding", "Complete onboarding"
+    SET_MONTHLY_TARGET = "set_monthly_target", "Set monthly target"
+    COMPLETE_MONTHLY_TARGET = "complete_monthly_target", "Complete monthly target"
+    COMPLETE_MONTHLY_REVIEW = "complete_monthly_review", "Complete monthly review"
+    RUN_SUBSCRIPTION_VALUATION = "run_subscription_valuation", "Run subscription valuation"
+    RUN_ITEM_VALUATION = "run_item_valuation", "Run item valuation"
+    JOIN_GROUP = "join_group", "Join group"
+    CREATE_GROUP = "create_group", "Create group"
+
+
+class BadgeCategory(models.TextChoices):
+    PURCHASE = "purchase", "Purchase"
+    REFLECTION = "reflection", "Reflection"
+    ADVISOR = "advisor", "Advisor"
+    SUBSCRIPTION = "subscription", "Subscription"
+    SOCIAL = "social", "Social"
+    STREAK = "streak", "Streak"
 
 
 class Group(models.Model):
     id = models.BigAutoField(primary_key=True)
-
     name = models.CharField(max_length=64)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="created_groups",
     )
-
     invite_code = models.CharField(max_length=12, unique=True)
     is_private = models.BooleanField(default=True)
-
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -48,7 +65,6 @@ class Group(models.Model):
 
 class GroupMember(models.Model):
     id = models.BigAutoField(primary_key=True)
-
     group = models.ForeignKey(
         Group,
         on_delete=models.CASCADE,
@@ -67,7 +83,9 @@ class GroupMember(models.Model):
     joined_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ("group", "user")
+        constraints = [
+            models.UniqueConstraint(fields=["group", "user"], name="uniq_group_member"),
+        ]
         indexes = [
             models.Index(fields=["group", "joined_at"]),
             models.Index(fields=["user", "joined_at"]),
@@ -77,39 +95,69 @@ class GroupMember(models.Model):
         return f"{self.user} in {self.group}"
 
 
-class Season(models.Model):
-    """
-    Defines a competition window. MVP: weekly seasons only.
-    """
+class GroupInvite(models.Model):
     id = models.BigAutoField(primary_key=True)
-
-    season_type = models.CharField(
-        max_length=16,
-        choices=SeasonType.choices,
-        default=SeasonType.WEEKLY,
+    group = models.ForeignKey(
+        Group,
+        on_delete=models.CASCADE,
+        related_name="invites",
     )
-    start_at = models.DateTimeField()
-    end_at = models.DateTimeField()
-
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="group_invites_sent",
+    )
+    invited_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="group_invites_received",
+        null=True,
+        blank=True,
+    )
+    invite_code = models.CharField(max_length=32, unique=True)
+    status = models.CharField(
+        max_length=16,
+        choices=GroupInviteStatus.choices,
+        default=GroupInviteStatus.PENDING,
+    )
+    note = models.CharField(max_length=255, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    accepted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="accepted_group_invites",
+        null=True,
+        blank=True,
+    )
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ("season_type", "start_at", "end_at")
         indexes = [
-            models.Index(fields=["season_type", "start_at"]),
-            models.Index(fields=["end_at"]),
+            models.Index(fields=["group", "status", "created_at"]),
+            models.Index(fields=["invited_user", "status", "created_at"]),
+            models.Index(fields=["invite_code"]),
         ]
 
+    def is_active(self, now=None) -> bool:
+        now = now or timezone.now()
+        if self.status != GroupInviteStatus.PENDING:
+            return False
+        if self.expires_at is None:
+            return True
+        return self.expires_at > now
+
     def __str__(self) -> str:
-        return f"{self.season_type} {self.start_at.date()}→{self.end_at.date()}"
+        return f"{self.group} invite {self.invite_code}"
 
 
 class PointEvent(models.Model):
     """
-    Single source of truth for points. Everything aggregates from here.
+    Backend-owned point ledger. Business logic should create every row.
     """
-    id = models.BigAutoField(primary_key=True)
 
+    id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -120,27 +168,32 @@ class PointEvent(models.Model):
         on_delete=models.CASCADE,
         related_name="point_events",
         null=True,
-        blank=True,  # null group = self-only points (still counts for streak)
+        blank=True,
     )
-
-    action = models.CharField(
-        max_length=32,
-        choices=PointAction.choices,
-    )
+    action = models.CharField(max_length=48, choices=PointAction.choices)
     points = models.IntegerField()
-
-    # Optional linkage to what triggered this (transaction/subscription/etc.)
     source_object_type = models.CharField(max_length=32, blank=True)
     source_object_id = models.BigIntegerField(null=True, blank=True)
-
+    event_key = models.CharField(max_length=255, null=True, blank=True, unique=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    window_date = models.DateField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         indexes = [
             models.Index(fields=["user", "created_at"]),
-            models.Index(fields=["group", "created_at"]),
             models.Index(fields=["user", "action", "created_at"]),
+            models.Index(fields=["group", "created_at"]),
+            models.Index(fields=["group", "action", "created_at"]),
+            models.Index(fields=["user", "window_date"]),
+            models.Index(fields=["group", "window_date"]),
+            models.Index(fields=["event_key"]),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.event_key == "":
+            self.event_key = None
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"{self.user} +{self.points} ({self.action})"
@@ -148,21 +201,75 @@ class PointEvent(models.Model):
 
 class UserStreak(models.Model):
     """
-    ONE streak only: Daily check-in streak.
-    A check-in occurs if user performs any points action that day.
+    Single daily streak updated from backend-awarded point events.
     """
+
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="streak",
         primary_key=True,
     )
-
     current_streak_days = models.PositiveIntegerField(default=0)
     best_streak_days = models.PositiveIntegerField(default=0)
     last_checkin_date = models.DateField(null=True, blank=True)
-
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self) -> str:
         return f"{self.user} streak {self.current_streak_days}"
+
+
+class Badge(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=128)
+    description = models.TextField()
+    icon = models.CharField(max_length=64, blank=True)
+    category = models.CharField(max_length=32, choices=BadgeCategory.choices)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["category", "is_active"]),
+            models.Index(fields=["code"]),
+        ]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class UserBadge(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="badges",
+    )
+    badge = models.ForeignKey(
+        Badge,
+        on_delete=models.CASCADE,
+        related_name="user_badges",
+    )
+    awarded_at = models.DateTimeField(auto_now_add=True)
+    source_object_type = models.CharField(max_length=32, blank=True)
+    source_object_id = models.BigIntegerField(null=True, blank=True)
+    trigger_event = models.ForeignKey(
+        PointEvent,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="triggered_badges",
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "badge"], name="uniq_user_badge"),
+        ]
+        indexes = [
+            models.Index(fields=["user", "awarded_at"]),
+            models.Index(fields=["badge", "awarded_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user} earned {self.badge.code}"

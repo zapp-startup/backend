@@ -2,6 +2,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 from rest_framework.exceptions import PermissionDenied
 
+from gamification.services import award_points_for_onboarding
+
 from .models import UserRawExplicit, UserRawInferred, UserComputed, UserPreference
 from .serializers import (
     UserRawExplicitSerializer,
@@ -22,7 +24,8 @@ class UserRawExplicitViewSet(ModelViewSet):
         return UserRawExplicit.objects.filter(user=self.request.user)
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        profile = serializer.save(user=self.request.user)
+        award_points_for_onboarding(profile.user)
 
     def get_object(self):
         obj = super().get_object()

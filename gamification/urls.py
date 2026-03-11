@@ -1,11 +1,12 @@
-from django.urls import include, path
 from rest_framework.routers import DefaultRouter
-from .views import GroupViewSet, PointEventViewSet
+from .views import BadgeViewSet, GroupInviteViewSet, GroupViewSet, PointEventViewSet, UserBadgeViewSet
 
 router = DefaultRouter()
+router.include_format_suffixes = False
 router.register(r"groups", GroupViewSet, basename="groups")
+router.register(r"group-invites", GroupInviteViewSet, basename="group-invites")
 router.register(r"points", PointEventViewSet, basename="points")
+router.register(r"badges", BadgeViewSet, basename="badges")
+router.register(r"user-badges", UserBadgeViewSet, basename="user-badges")
 
-urlpatterns = [
-    path("", include(router.urls)),
-]
+urlpatterns = router.urls

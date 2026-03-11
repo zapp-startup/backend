@@ -1,4 +1,3 @@
-from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from .views import (
     ValuationModelVersionViewSet,
@@ -7,10 +6,9 @@ from .views import (
 )
 
 router = DefaultRouter()
+router.include_format_suffixes = False
 router.register(r"valuation-model-versions", ValuationModelVersionViewSet, basename="valuation-model-versions")
 router.register(r"subscription-valuations", SubscriptionValuationViewSet, basename="subscription-valuations")
 router.register(r"item-valuations", ItemValuationViewSet, basename="item-valuations")
 
-urlpatterns = [
-    path("", include(router.urls)),
-]
+urlpatterns = router.urls

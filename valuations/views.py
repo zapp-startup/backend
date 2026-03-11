@@ -1,4 +1,8 @@
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.viewsets import ModelViewSet
+
+from gamification.services import award_points_for_item_valuation, award_points_for_subscription_valuation
+
 from .models import ValuationModelVersion, SubscriptionValuation, ItemValuation
 from .serializers import (
     ValuationModelVersionSerializer,
@@ -13,10 +17,24 @@ class ValuationModelVersionViewSet(ModelViewSet):
 
 
 class SubscriptionValuationViewSet(ModelViewSet):
-    queryset = SubscriptionValuation.objects.all()
     serializer_class = SubscriptionValuationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return SubscriptionValuation.objects.filter(user=self.request.user).select_related("subscription", "model_version")
+
+    def perform_create(self, serializer):
+        valuation = serializer.save(user=self.request.user)
+        award_points_for_subscription_valuation(valuation)
 
 
 class ItemValuationViewSet(ModelViewSet):
-    queryset = ItemValuation.objects.all()
     serializer_class = ItemValuationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return ItemValuation.objects.filter(user=self.request.user).select_related("model_version")
+
+    def perform_create(self, serializer):
+        valuation = serializer.save(user=self.request.user)
+        award_points_for_item_valuation(valuation)

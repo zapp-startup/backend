@@ -12,9 +12,11 @@ class SubscriptionValuationSerializer(serializers.ModelSerializer):
     class Meta:
         model = SubscriptionValuation
         fields = "__all__"
+        read_only_fields = ("user",)
 
 
 class ItemValuationSerializer(serializers.ModelSerializer):
     class Meta:
         model = ItemValuation
         fields = "__all__"
+        read_only_fields = ("user",)
