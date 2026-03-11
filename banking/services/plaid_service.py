@@ -20,6 +20,7 @@ from plaid.model.products import Products
 from plaid.model.transactions_sync_request import TransactionsSyncRequest
 
 from banking.models import BankAccount, BankConnection, BankTransaction
+from banking.services.categorization_service import run_categorization_on_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +330,8 @@ def _upsert_single_transaction(
             "raw_payload": _json_safe(txn),
         },
     )
+    # Run Zapp categorization (merchant overrides, Plaid->Zapp mapping)
+    run_categorization_on_transaction(obj)
     return obj
 
 

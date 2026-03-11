@@ -69,6 +69,7 @@ class BankTransactionSerializer(serializers.ModelSerializer):
     """Serializer for BankTransaction."""
 
     account = BankAccountListSerializer(read_only=True)
+    effective_category = serializers.ReadOnlyField()
 
     class Meta:
         model = BankTransaction
@@ -86,6 +87,10 @@ class BankTransactionSerializer(serializers.ModelSerializer):
             "removed",
             "category_primary",
             "category_detailed",
+            "zapp_primary_category",
+            "zapp_subcategory",
+            "user_override_category",
+            "effective_category",
             "created_at",
             "updated_at",
         ]

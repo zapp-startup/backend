@@ -1,9 +1,14 @@
 """
 Banking models for Plaid-based bank connections, accounts, and transactions.
 Stores raw Plaid data; frontend reads from our DB, not directly from Plaid.
+
+Zapp categorization: BankTransaction has zapp_primary_category, zapp_subcategory,
+user_override_category. Plaid raw fields (category_primary, category_detailed) are preserved.
 """
 from django.conf import settings
 from django.db import models
+
+from banking.categories import ZappPrimaryCategory, ZappSubcategory
 
 
 class BankConnection(models.Model):
@@ -131,8 +136,39 @@ class BankTransaction(models.Model):
         default=False,
         help_text="Soft-delete: transaction was removed in Plaid sync",
     )
+    # --- Plaid raw category (preserved, never overwritten by Zapp) ---
     category_primary = models.CharField(max_length=128, blank=True)
     category_detailed = models.CharField(max_length=256, blank=True)
+
+    # --- Zapp categorization layer ---
+    zapp_primary_category = models.CharField(
+        max_length=64,
+        choices=ZappPrimaryCategory.choices,
+        blank=True,
+        db_index=True,
+    )
+    zapp_subcategory = models.CharField(
+        max_length=64,
+        choices=ZappSubcategory.choices,
+        blank=True,
+    )
+    user_override_category = models.CharField(
+        max_length=128,
+        blank=True,
+        help_text="User-assigned category; takes precedence over Zapp categories",
+    )
+    category_source = models.CharField(
+        max_length=32,
+        blank=True,
+        help_text="Source of assigned category: plaid, merchant_override, zapp_mapping, user_override",
+    )
+    behavioral_tags = models.ManyToManyField(
+        "TransactionBehavioralTag",
+        through="BankTransactionBehavioralTag",
+        related_name="bank_transactions",
+        blank=True,
+    )
+
     raw_payload = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -153,3 +189,98 @@ class BankTransaction(models.Model):
 
     def __str__(self) -> str:
         return f"{self.name} {self.amount} {self.date}"
+
+    @property
+    def effective_category(self) -> str:
+        """
+        Resolved category per precedence:
+        user_override_category > zapp_subcategory > zapp_primary_category > plaid category
+        """
+        if self.user_override_category:
+            return self.user_override_category
+        if self.zapp_subcategory and self.zapp_primary_category:
+            try:
+                sub = ZappSubcategory(self.zapp_subcategory)
+                prim = ZappPrimaryCategory(self.zapp_primary_category)
+                return f"{prim.label} / {sub.label}"
+            except (ValueError, KeyError):
+                pass
+        if self.zapp_primary_category:
+            try:
+                return ZappPrimaryCategory(self.zapp_primary_category).label
+            except (ValueError, KeyError):
+                pass
+        return self.category_primary or self.category_detailed or ""
+
+
+class MerchantCategoryRule(models.Model):
+    """
+    Merchant-to-Zapp-category override rules.
+    When a transaction matches a rule (by merchant pattern), use the rule's
+    primary/subcategory instead of Plaid-derived Zapp category.
+    """
+
+    match_pattern = models.CharField(
+        max_length=256,
+        help_text="Substring or pattern to match against normalized merchant/name",
+    )
+    zapp_primary_category = models.CharField(
+        max_length=64,
+        choices=ZappPrimaryCategory.choices,
+    )
+    zapp_subcategory = models.CharField(
+        max_length=64,
+        choices=ZappSubcategory.choices,
+        blank=True,
+    )
+    priority = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Higher = applied first; use for more specific overrides",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-priority", "match_pattern"]
+        indexes = [models.Index(fields=["is_active", "priority"])]
+
+    def __str__(self) -> str:
+        return f"{self.match_pattern} -> {self.zapp_primary_category}"
+
+
+class TransactionBehavioralTag(models.Model):
+    """
+    Behavioral tags for BankTransaction (e.g. Essential, Recurring, Impulse).
+    Many-to-many: one transaction can have multiple tags.
+    """
+
+    name = models.CharField(max_length=64, unique=True)
+    slug = models.SlugField(max_length=64, unique=True)
+    description = models.CharField(max_length=256, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class BankTransactionBehavioralTag(models.Model):
+    """Through model for BankTransaction <-> TransactionBehavioralTag."""
+
+    transaction = models.ForeignKey(
+        BankTransaction,
+        on_delete=models.CASCADE,
+        related_name="behavioral_tags_link",
+    )
+    tag = models.ForeignKey(
+        TransactionBehavioralTag,
+        on_delete=models.CASCADE,
+        related_name="transactions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [["transaction", "tag"]]
