@@ -359,7 +359,17 @@ ITEM_VALUE_WEIGHTS = {
 }
 
 SUBSCRIPTION_REC_THRESHOLDS = {"keep": 0.10, "cancel": -0.10}
-ITEM_REC_THRESHOLDS = {"buy": 60, "wait": 35}
+# Thresholds for 0-150 score range: underused <80, match 85-105, extremely useful >105
+ITEM_REC_THRESHOLDS = {"buy": 105, "wait": 85}
+
+# Valuation score bands: underused <80, match ~100, extremely useful >100 (up to 150)
+VALUATION_SCORE_BANDS = {
+    "underused_max": 80,
+    "match_lo": 85,
+    "match_hi": 105,
+    "extremely_useful_min": 105,
+    "extremely_useful_max": 150,
+}
 
 # ---------------------------------------------------------------------------
 # Section 18  State transition: liquidity thresholds

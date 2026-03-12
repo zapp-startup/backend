@@ -294,6 +294,9 @@ def _generate_one_user(
     db_txns = _persist_transactions(user, all_txn_dicts, merchant_db_map)
     stats["transactions"] = len(db_txns)
 
+    # === Compute subscription-level feedback from charge transactions ===
+    _compute_subscription_feedback(db_txns, db_subs)
+
     # === Persist subscription valuations ===
     db_sub_vals = _persist_subscription_valuations(
         user, valuation_result.get("subscription_valuations", []),
@@ -490,6 +493,8 @@ def _persist_transactions(user, txn_dicts: list[dict], merchant_db_map: dict):
             self_report_researched=td.get("self_report_researched"),
             impulse_score=td.get("impulse_score"),
             regret_score=td.get("regret_score"),
+            feedback_value_score=td.get("feedback_value_score"),
+            feedback_confidence=td.get("feedback_confidence"),
         )
         objs.append(obj)
 
@@ -529,6 +534,7 @@ def _persist_subscription_valuations(user, val_dicts: list[dict],
             total_cost=vd["total_cost"],
             estimated_value=vd["estimated_value"],
             net_value=vd["net_value"],
+            personal_value_score=vd.get("personal_value_score"),
             recommendation=vd.get("recommendation", ""),
             confidence=vd.get("confidence", 0.7),
             evidence_json=vd.get("evidence_json", {}),
@@ -740,6 +746,41 @@ def _persist_preferences(user, state: UserState, rng):
     if to_update:
         UserPreference.objects.bulk_update(
             to_update, ["value_type", "value_json", "confidence"], batch_size=10
+        )
+
+
+def _compute_subscription_feedback(db_txns: list, db_subs: list) -> None:
+    """Aggregate feedback_value_score and feedback_confidence from subscription charge txns."""
+    from subscriptions.models import Subscription
+
+    # Group subscription charge transactions by subscription_id
+    sub_feedback: dict[int, list[tuple[float, float]]] = {}
+    for txn in db_txns:
+        if txn.subscription_id is None:
+            continue
+        fvs = txn.feedback_value_score
+        fc = txn.feedback_confidence
+        if fvs is not None or fc is not None:
+            sub_feedback.setdefault(txn.subscription_id, []).append((fvs or 0.5, fc or 0.5))
+
+    if not sub_feedback:
+        return
+
+    # Compute avg per subscription and bulk_update
+    to_update = []
+    for sub in db_subs:
+        pairs = sub_feedback.get(sub.pk, [])
+        if not pairs:
+            continue
+        avg_fvs = sum(p[0] for p in pairs) / len(pairs)
+        avg_fc = sum(p[1] for p in pairs) / len(pairs)
+        sub.feedback_value_score = round(max(0, min(1, avg_fvs)), 4)
+        sub.feedback_confidence = round(max(0, min(1, avg_fc)), 4)
+        to_update.append(sub)
+
+    if to_update:
+        Subscription.objects.bulk_update(
+            to_update, ["feedback_value_score", "feedback_confidence"], batch_size=50
         )
 
 

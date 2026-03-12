@@ -126,10 +126,11 @@ class AuditAgent(BaseAgent):
             score = val.get("personal_value_score", 50)
             rec = val.get("recommendation", "")
 
-            if score >= 75 and rec == "skip":
+            # 0-150 scale: buy >= 105, skip < 80 (underused)
+            if score >= 105 and rec == "skip":
                 val["recommendation"] = "buy"
                 repairs.append(f"Fixed item valuation: high score ({score}) had 'skip' -> 'buy'")
-            elif score < 25 and rec == "buy":
+            elif score < 80 and rec == "buy":
                 val["recommendation"] = "skip"
                 repairs.append(f"Fixed item valuation: low score ({score}) had 'buy' -> 'skip'")
 

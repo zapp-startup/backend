@@ -128,6 +128,31 @@ class BehaviorAgent(BaseAgent):
             if use_llm_this:
                 llm_reflection_count += 1
 
+            # feedback_value_score (0-1): derived from reflection_text + ratings
+            feedback_value = (
+                (satisfaction / 10.0) * 0.4
+                + (1.0 - regret_score) * 0.4
+                + (repurchase / 100.0) * 0.2
+            )
+            # reflection sentiment: high_regret templates imply lower value
+            if impulse_score > 0.6 and regret_score > 0.5:
+                feedback_value -= 0.08
+            elif regret_score > 0.5:
+                feedback_value -= 0.05
+            elif impulse_score < 0.4 and regret_score < 0.4:
+                feedback_value += 0.05
+            feedback_value_score = clip01(feedback_value + float(rng.normal(0, 0.02)))
+
+            # feedback_confidence: higher when more signals present
+            signals = 1  # satisfaction always present
+            if repurchase is not None:
+                signals += 1
+            if regret_rating is not None:
+                signals += 1
+            if reflection:
+                signals += 1
+            feedback_confidence = clip01(0.55 + 0.1 * signals + float(rng.normal(0, 0.03)))
+
             # Store annotations on the transaction dict
             txn["impulse_score"] = round(impulse_score, 4)
             txn["regret_score"] = round(regret_score, 4)
@@ -139,6 +164,8 @@ class BehaviorAgent(BaseAgent):
             txn["considered_at"] = considered_at
             txn["used_buy_advisor"] = used_advisor
             txn["self_report_researched"] = researched
+            txn["feedback_value_score"] = round(feedback_value_score, 4)
+            txn["feedback_confidence"] = round(feedback_confidence, 4)
 
             impulse_scores.append(impulse_score)
             regret_scores.append(regret_score)

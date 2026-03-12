@@ -110,6 +110,17 @@ class Subscription(models.Model):
         help_text="Number of times this subscription has been reactivated",
     )
 
+    feedback_value_score = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 derived from reflection_text + ratings (user feedback on value)",
+    )
+    feedback_confidence = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 confidence in feedback_value_score",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -121,6 +132,14 @@ class Subscription(models.Model):
             models.Index(fields=["user", "renewal_date"]),
         ]
         constraints = [
+            models.CheckConstraint(
+                condition=models.Q(feedback_value_score__gte=0, feedback_value_score__lte=1) | models.Q(feedback_value_score__isnull=True),
+                name="valid_subscription_feedback_value_score",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(feedback_confidence__gte=0, feedback_confidence__lte=1) | models.Q(feedback_confidence__isnull=True),
+                name="valid_subscription_feedback_confidence",
+            ),
             # Prevent duplicate active subscriptions to the same merchant for a user.
             # If you later want multiple (e.g., multiple Netflix profiles), loosen this.
             models.UniqueConstraint(
