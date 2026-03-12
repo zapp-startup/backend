@@ -1,6 +1,9 @@
+from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet
 
+from .feedback_candidates import get_feedback_candidates
 from .models import Transaction
 from .serializers import TransactionSerializer
 
@@ -33,6 +36,29 @@ class TransactionViewSet(ModelViewSet):
         if limit:
             qs = qs[:int(limit)]
         return qs
+
+    @action(detail=False, methods=["get"], url_path="feedback-candidates")
+    def feedback_candidates(self, request):
+        """
+        Return the top N transaction candidates for feedback.
+        Prioritizes high-signal discretionary purchases over routine expenses.
+        """
+        top_n = request.query_params.get("n", "2")
+        try:
+            top_n = min(max(1, int(top_n)), 10)
+        except ValueError:
+            top_n = 2
+        days = request.query_params.get("days", "90")
+        try:
+            days = min(max(1, int(days)), 365)
+        except ValueError:
+            days = 90
+        candidates = get_feedback_candidates(
+            user=request.user,
+            days_window=days,
+            top_n=top_n,
+        )
+        return Response(candidates)
 
     def perform_create(self, serializer):
         # Force ownership
