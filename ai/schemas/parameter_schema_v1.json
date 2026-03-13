@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "zapp/ai/parameter_schema_v1",
+  "title": "Zapp AI Parameter Schema v1",
+  "type": "object",
+  "required": ["schema_version", "conversation", "profile", "spending", "subscriptions", "policy"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "zapp_prompt_v1"
+    },
+    "conversation": {
+      "type": "object",
+      "required": ["conversation_id", "context_type", "user_message"],
+      "properties": {
+        "conversation_id": { "type": "integer" },
+        "context_type": {
+          "type": "string",
+          "enum": ["general", "subscription", "product", "budgeting"]
+        },
+        "user_message": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "profile": {
+      "type": "object",
+      "properties": {
+        "monthly_income": { "type": ["number", "null"] },
+        "monthly_fixed_expenses": { "type": ["number", "null"] },
+        "financial_goal": { "type": ["string", "null"] },
+        "risk_tolerance": { "type": ["string", "null"] },
+        "budget_style": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "spending": {
+      "type": "object",
+      "required": ["category_spend_30d"],
+      "properties": {
+        "category_spend_30d": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["category", "amount"],
+            "properties": {
+              "category": { "type": "string" },
+              "amount": { "type": "number" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "subscriptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "status", "billing_cycle", "price", "currency"],
+        "properties": {
+          "name": { "type": "string" },
+          "status": { "type": "string" },
+          "billing_cycle": { "type": "string" },
+          "price": { "type": "number" },
+          "currency": { "type": "string", "minLength": 3, "maxLength": 3 },
+          "renewal_date": { "type": ["string", "null"] },
+          "usage_frequency": { "type": ["integer", "null"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "policy": {
+      "type": "object",
+      "required": ["must_not_fabricate_data", "ask_clarifying_question_when_missing_data"],
+      "properties": {
+        "must_not_fabricate_data": { "type": "boolean" },
+        "ask_clarifying_question_when_missing_data": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

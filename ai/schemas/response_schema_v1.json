@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "zapp/ai/response_schema_v1",
+  "title": "Zapp AI Response Schema v1",
+  "type": "object",
+  "required": ["recommendation", "reasoning", "next_steps", "confidence", "missing_data_questions"],
+  "properties": {
+    "recommendation": {
+      "type": "string",
+      "enum": ["keep", "pause", "cancel", "defer", "investigate"]
+    },
+    "reasoning": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "next_steps": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "missing_data_questions": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": false
+}
