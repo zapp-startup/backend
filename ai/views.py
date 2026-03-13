@@ -7,7 +7,7 @@ from rest_framework.viewsets import ModelViewSet
 
 from .models import Conversation, Message, UserFact, MessageRole, ConversationContext
 from .serializers import ConversationSerializer, MessageSerializer, UserFactSerializer
-
+from .openai_config import get_openai_api_key
 
 def get_dev_user(request):
     """
@@ -89,8 +89,13 @@ class ConversationViewSet(ModelViewSet):
             metadata_json={},
         )
 
-        # placeholder assistant response for now (Step 4 will call OpenAI)
-        assistant_text = "✅ Got it — I saved that. (LLM not connected yet.)"
+        openai_configured = bool(get_openai_api_key())
+
+        # placeholder assistant response for now (OpenAI integration still pending)
+        if openai_configured:
+            assistant_text = "✅ Got it — I saved that. (OpenAI call wiring is the next step.)"
+        else:
+            assistant_text = "✅ Got it — I saved that. (OpenAI key is not configured yet.)"
 
         assistant_msg = Message.objects.create(
             conversation=convo,
@@ -98,6 +103,7 @@ class ConversationViewSet(ModelViewSet):
             content=assistant_text,
             metadata_json={
                 "mode": "placeholder",
+                "openai_configured": "openai_configured",
             },
         )
 

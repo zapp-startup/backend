@@ -34,6 +34,9 @@ if not SECRET_KEY:
 ALLOWED_HOSTS = []
 AUTH_USER_MODEL = "users.User"
 
+OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip() or None
+OPENAI_MODEL = (os.getenv("OPENAI_MODEL") or "gpt-4.1-mini").strip()
+
 
 # Application definition
 
