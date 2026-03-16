@@ -5,8 +5,9 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from ai.intents import classify_intent
 from ai.models import Conversation, ConversationContext, MessageRole
-from ai.views import build_financial_context
+from ai.views import build_assistant_placeholder_response, build_financial_context
 from subscriptions.models import BillingCycle, Merchant, Subscription, SubscriptionStatus
 from transactions.models import Transaction, TransactionCategory, TransactionDirection
 from users.models import User
@@ -135,7 +136,36 @@ class ConversationMessagesTests(TestCase):
         assistant_message = response.data["assistant_message"]
         self.assertEqual(assistant_message["role"], MessageRole.ASSISTANT)
         self.assertIn("financial_context", assistant_message["metadata_json"])
+        self.assertIn("intent_detection", assistant_message["metadata_json"])
+        self.assertEqual(assistant_message["metadata_json"]["intent_detection"]["intent"], "ask")
+        self.assertEqual(assistant_message["metadata_json"]["response_style"], "direct_answer")
+        self.assertIn("question", assistant_message["content"].lower())
 
         financial_context = assistant_message["metadata_json"]["financial_context"]
         self.assertEqual(financial_context["summary"]["transaction_count"], 1)
         self.assertEqual(financial_context["summary"]["active_subscription_count"], 1)
+
+
+class IntentClassificationTests(TestCase):
+    def test_classify_intent_supports_requested_labels(self):
+        self.assertEqual(classify_intent("Can you help me budget?")["intent"], "ask")
+        self.assertEqual(classify_intent("Please rewrite this response in a friendly tone.")["intent"], "edit")
+        self.assertEqual(classify_intent("What do you recommend I cut first?")["intent"], "recommend")
+        self.assertEqual(classify_intent("Summarize this chat into 3 bullets.")["intent"], "summarize")
+
+
+class AssistantPlaceholderResponseTests(TestCase):
+    def test_placeholder_response_changes_by_intent(self):
+        expected_styles = {
+            "ask": "direct_answer",
+            "edit": "transformation",
+            "recommend": "ranked_recommendations",
+            "summarize": "summary",
+        }
+
+        for intent, expected_style in expected_styles.items():
+            with self.subTest(intent=intent):
+                payload = build_assistant_placeholder_response(intent, openai_configured=False)
+                self.assertEqual(payload["response_style"], expected_style)
+                self.assertTrue(payload["assistant_text"].startswith("✅"))
+                self.assertIn("OpenAI key is not configured yet", payload["assistant_text"])
