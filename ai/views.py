@@ -10,6 +10,7 @@ from rest_framework.viewsets import ModelViewSet
 from .models import Conversation, Message, UserFact, MessageRole, ConversationContext
 from .serializers import ConversationSerializer, MessageSerializer, UserFactSerializer
 from .openai_config import get_openai_api_key
+from .intents import classify_intent
 
 
 def _format_recent_transaction(transaction):
@@ -66,6 +67,57 @@ def build_financial_context(user, *, transaction_limit=5, subscription_limit=5):
         },
     }
 
+
+def build_assistant_placeholder_response(intent: str, openai_configured: bool) -> dict:
+    base_suffix = (
+        "OpenAI call wiring is the next step."
+        if openai_configured
+        else "OpenAI key is not configured yet."
+    )
+
+    intent_templates = {
+        "ask": {
+            "message": (
+                "✅ I understand this as a question. "
+                "I can answer directly and ask one follow-up only if critical details are missing."
+            ),
+            "response_style": "direct_answer",
+            "frontend_hint": "Render a normal assistant reply view.",
+        },
+        "edit": {
+            "message": (
+                "✅ I understand this as an edit request. "
+                "I should return a revised version of the user-provided text with minimal extra commentary."
+            ),
+            "response_style": "transformation",
+            "frontend_hint": "Offer side-by-side/original-vs-rewrite UI.",
+        },
+        "recommend": {
+            "message": (
+                "✅ I understand this as a recommendation request. "
+                "I should provide ranked options, the reasoning behind each option, and a best next action."
+            ),
+            "response_style": "ranked_recommendations",
+            "frontend_hint": "Show recommendation cards with rationale and confidence.",
+        },
+        "summarize": {
+            "message": (
+                "✅ I understand this as a summarization request. "
+                "I should return concise key points and optional action items."
+            ),
+            "response_style": "summary",
+            "frontend_hint": "Use compact bullets and collapse long source text by default.",
+        },
+    }
+
+    template = intent_templates.get(intent, intent_templates["ask"])
+    return {
+        "assistant_text": f"{template['message']} ({base_suffix})",
+        "response_style": template["response_style"],
+        "frontend_hint": template["frontend_hint"],
+    }
+
+
 def get_dev_user(request):
     """
     Temporary dev auth:
@@ -79,6 +131,7 @@ def get_dev_user(request):
         return User.objects.get(username=username)
     except User.DoesNotExist:
         return None
+
 
 class ConversationViewSet(ModelViewSet):
     serializer_class = ConversationSerializer
@@ -113,7 +166,6 @@ class ConversationViewSet(ModelViewSet):
 
         return Response({"conversation_id": convo.id}, status=status.HTTP_201_CREATED)
 
-
     @action(detail=True, methods=["get", "post"], url_path="messages")
     def messages(self, request, pk=None):
         """
@@ -139,21 +191,22 @@ class ConversationViewSet(ModelViewSet):
         if not content:
             return Response({"detail": "content is required"}, status=status.HTTP_400_BAD_REQUEST)
 
+        intent_detection = classify_intent(content)
+
         user_msg = Message.objects.create(
             conversation=convo,
             role=MessageRole.USER,
             content=content,
-            metadata_json={},
+            metadata_json={"intent_detection": intent_detection},
         )
 
         openai_configured = bool(get_openai_api_key())
         financial_context = build_financial_context(user)
+        intent = intent_detection["intent"]
+        assistant_placeholder = build_assistant_placeholder_response(intent, openai_configured)
 
         # placeholder assistant response for now (OpenAI integration still pending)
-        if openai_configured:
-            assistant_text = "✅ Got it — I saved that and fetched your recent transactions/subscriptions for context. (OpenAI call wiring is the next step.)"
-        else:
-            assistant_text = "✅ Got it — I saved that and fetched your recent transactions/subscriptions for context. (OpenAI key is not configured yet.)"
+        assistant_text = assistant_placeholder["assistant_text"]
 
         assistant_msg = Message.objects.create(
             conversation=convo,
@@ -163,6 +216,9 @@ class ConversationViewSet(ModelViewSet):
                 "mode": "placeholder",
                 "openai_configured": openai_configured,
                 "financial_context": financial_context,
+                "intent_detection": intent_detection,
+                "response_style": assistant_placeholder["response_style"],
+                "frontend_hint": assistant_placeholder["frontend_hint"],
             },
         )
 
