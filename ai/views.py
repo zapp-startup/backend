@@ -1,5 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
+from subscriptions.models import Subscription
+from transactions.models import Transaction, TransactionDirection
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -8,6 +10,61 @@ from rest_framework.viewsets import ModelViewSet
 from .models import Conversation, Message, UserFact, MessageRole, ConversationContext
 from .serializers import ConversationSerializer, MessageSerializer, UserFactSerializer
 from .openai_config import get_openai_api_key
+
+
+def _format_recent_transaction(transaction):
+    merchant_name = transaction.merchant.name if transaction.merchant else None
+    return {
+        "id": transaction.id,
+        "amount": str(transaction.amount),
+        "currency": transaction.currency,
+        "direction": transaction.direction,
+        "occurred_at": transaction.occurred_at.isoformat(),
+        "category": transaction.category,
+        "merchant": merchant_name,
+        "description": transaction.description_raw,
+    }
+
+
+def _format_subscription(subscription):
+    return {
+        "id": subscription.id,
+        "merchant": subscription.merchant.name,
+        "status": subscription.status,
+        "price": str(subscription.price),
+        "currency": subscription.currency,
+        "billing_cycle": subscription.billing_cycle,
+        "renewal_date": subscription.renewal_date.isoformat() if subscription.renewal_date else None,
+    }
+
+
+def build_financial_context(user, *, transaction_limit=5, subscription_limit=5):
+    recent_transactions = list(
+        Transaction.objects.filter(user=user)
+        .select_related("merchant")
+        .order_by("-occurred_at")[:transaction_limit]
+    )
+    active_subscriptions = list(
+        Subscription.objects.filter(user=user, status="active")
+        .select_related("merchant")
+        .order_by("renewal_date", "id")[:subscription_limit]
+    )
+
+    spend_amount = sum(
+        transaction.amount
+        for transaction in recent_transactions
+        if transaction.direction == TransactionDirection.SPEND
+    )
+
+    return {
+        "recent_transactions": [_format_recent_transaction(tx) for tx in recent_transactions],
+        "active_subscriptions": [_format_subscription(sub) for sub in active_subscriptions],
+        "summary": {
+            "transaction_count": len(recent_transactions),
+            "active_subscription_count": len(active_subscriptions),
+            "recent_spend_total": str(spend_amount),
+        },
+    }
 
 def get_dev_user(request):
     """
@@ -90,12 +147,13 @@ class ConversationViewSet(ModelViewSet):
         )
 
         openai_configured = bool(get_openai_api_key())
+        financial_context = build_financial_context(user)
 
         # placeholder assistant response for now (OpenAI integration still pending)
         if openai_configured:
-            assistant_text = "✅ Got it — I saved that. (OpenAI call wiring is the next step.)"
+            assistant_text = "✅ Got it — I saved that and fetched your recent transactions/subscriptions for context. (OpenAI call wiring is the next step.)"
         else:
-            assistant_text = "✅ Got it — I saved that. (OpenAI key is not configured yet.)"
+            assistant_text = "✅ Got it — I saved that and fetched your recent transactions/subscriptions for context. (OpenAI key is not configured yet.)"
 
         assistant_msg = Message.objects.create(
             conversation=convo,
@@ -103,7 +161,8 @@ class ConversationViewSet(ModelViewSet):
             content=assistant_text,
             metadata_json={
                 "mode": "placeholder",
-                "openai_configured": "openai_configured",
+                "openai_configured": openai_configured,
+                "financial_context": financial_context,
             },
         )
 
