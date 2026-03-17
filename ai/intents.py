@@ -4,9 +4,14 @@ INTENT_ASK = "ask"
 INTENT_EDIT = "edit"
 INTENT_RECOMMEND = "recommend"
 INTENT_SUMMARIZE = "summarize"
+INTENT_RECORD_TRANSACTION = "record_transaction"
 
 
 _INTENT_PATTERNS = {
+    INTENT_RECORD_TRANSACTION: [
+        r"\b(i\s+)?(bought|purchased|spent|paid|ordered|got)\b",
+        r"\b(add|log|record|track)\b.{0,20}\b(transaction|purchase|expense|spend)\b",
+    ],
     INTENT_SUMMARIZE: [
         r"\bsummar(?:y|ize|ise|ized|ised|izing|ising)\b",
         r"\btl;dr\b",
@@ -23,7 +28,7 @@ _INTENT_PATTERNS = {
 }
 
 
-_PRIORITY = [INTENT_SUMMARIZE, INTENT_EDIT, INTENT_RECOMMEND]
+_PRIORITY = [INTENT_RECORD_TRANSACTION, INTENT_SUMMARIZE, INTENT_EDIT, INTENT_RECOMMEND]
 
 
 def _normalize(text: str) -> str:
@@ -55,5 +60,12 @@ def classify_intent(content: str) -> dict:
             "matched_patterns": matches[intent] if intent != INTENT_ASK else [],
             "question_like": question_like,
         },
-        "supported_intents": [INTENT_ASK, INTENT_EDIT, INTENT_RECOMMEND, INTENT_SUMMARIZE],
+        "supported_intents": [
+            INTENT_ASK,
+            INTENT_EDIT,
+            INTENT_RECOMMEND,
+            INTENT_SUMMARIZE,
+            INTENT_RECORD_TRANSACTION,
+        ],
     }
+

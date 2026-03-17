@@ -152,6 +152,7 @@ class IntentClassificationTests(TestCase):
         self.assertEqual(classify_intent("Please rewrite this response in a friendly tone.")["intent"], "edit")
         self.assertEqual(classify_intent("What do you recommend I cut first?")["intent"], "recommend")
         self.assertEqual(classify_intent("Summarize this chat into 3 bullets.")["intent"], "summarize")
+        self.assertEqual(classify_intent("I bought shoes for $80 today")["intent"], "record_transaction")
 
 
 class AssistantPlaceholderResponseTests(TestCase):
@@ -169,3 +170,33 @@ class AssistantPlaceholderResponseTests(TestCase):
                 self.assertEqual(payload["response_style"], expected_style)
                 self.assertTrue(payload["assistant_text"].startswith("✅"))
                 self.assertIn("OpenAI key is not configured yet", payload["assistant_text"])
+
+
+class ChatNavigationOptionsTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="seed_user_1", password="testpass")
+        self.conversation = Conversation.objects.create(
+            user=self.user,
+            context_type=ConversationContext.BUDGETING,
+        )
+
+    def test_purchase_message_returns_navigation_options_without_db_write(self):
+        response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/",
+            {"content": "I bought coffee at Starbucks for $6.50 today"},
+            format="json",
+            HTTP_X_DEV_USER="seed_user_1",
+        )
+
+        self.assertEqual(response.status_code, 201)
+
+        assistant_message = response.data["assistant_message"]
+        metadata = assistant_message["metadata_json"]
+
+        self.assertEqual(metadata["intent_detection"]["intent"], "record_transaction")
+        self.assertEqual(metadata["action"], "navigate_to_data_entry")
+        self.assertEqual(metadata["action_status"], "routing_options")
+        self.assertIsNone(metadata["created_transaction_id"])
+        self.assertGreaterEqual(len(metadata["quick_actions"]), 3)
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
