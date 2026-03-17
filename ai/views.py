@@ -68,6 +68,26 @@ def build_financial_context(user, *, transaction_limit=5, subscription_limit=5):
     }
 
 
+def _build_record_transaction_response() -> dict:
+    return {
+        "assistant_text": (
+            "I can route you to the right page to save this directly. "
+            "Choose where you want to update your data:"
+        ),
+        "response_style": "navigation_options",
+        "frontend_hint": "Render quick action buttons for transaction/subscription/item update flows.",
+        "action": "navigate_to_data_entry",
+        "status": "routing_options",
+        "created_transaction_id": None,
+        "quick_actions": [
+            {"label": "Add Transaction", "route": "/transactions/new"},
+            {"label": "Manage Subscriptions", "route": "/subscriptions"},
+            {"label": "Add Subscription", "route": "/subscriptions/new"},
+            {"label": "Add Item Valuation", "route": "/valuations/new"},
+        ],
+    }
+
+
 def build_assistant_placeholder_response(intent: str, openai_configured: bool) -> dict:
     base_suffix = (
         "OpenAI call wiring is the next step."
@@ -76,6 +96,14 @@ def build_assistant_placeholder_response(intent: str, openai_configured: bool) -
     )
 
     intent_templates = {
+        "record_transaction": {
+            "message": (
+                "✅ I understand this as a transaction logging request. "
+                "I can route the user to the correct data-entry page instead of writing directly from chat."
+            ),
+            "response_style": "navigation_options",
+            "frontend_hint": "Display page navigation actions for transactions, subscriptions, and item valuations.",
+        },
         "ask": {
             "message": (
                 "✅ I understand this as a question. "
@@ -203,7 +231,10 @@ class ConversationViewSet(ModelViewSet):
         openai_configured = bool(get_openai_api_key())
         financial_context = build_financial_context(user)
         intent = intent_detection["intent"]
-        assistant_placeholder = build_assistant_placeholder_response(intent, openai_configured)
+        if intent == "record_transaction":
+            assistant_placeholder = _build_record_transaction_response()
+        else:
+            assistant_placeholder = build_assistant_placeholder_response(intent, openai_configured)
 
         # placeholder assistant response for now (OpenAI integration still pending)
         assistant_text = assistant_placeholder["assistant_text"]
@@ -219,6 +250,10 @@ class ConversationViewSet(ModelViewSet):
                 "intent_detection": intent_detection,
                 "response_style": assistant_placeholder["response_style"],
                 "frontend_hint": assistant_placeholder["frontend_hint"],
+                "action": assistant_placeholder.get("action"),
+                "action_status": assistant_placeholder.get("status"),
+                "created_transaction_id": assistant_placeholder.get("created_transaction_id"),
+                "quick_actions": assistant_placeholder.get("quick_actions", []),
             },
         )
 
