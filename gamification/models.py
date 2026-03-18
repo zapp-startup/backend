@@ -265,6 +265,7 @@ class UserStreak(models.Model):
         related_name="streak",
         primary_key=True,
     )
+    total_points_earned = models.PositiveIntegerField(default=0)
     current_streak_days = models.PositiveIntegerField(default=0)
     best_streak_days = models.PositiveIntegerField(default=0)
     last_checkin_date = models.DateField(null=True, blank=True)

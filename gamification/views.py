@@ -1,4 +1,5 @@
 import secrets
+from datetime import date
 from datetime import timedelta
 
 from django.db import transaction
@@ -7,6 +8,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
@@ -38,6 +40,8 @@ from .services import (
     award_points_for_group_create,
     award_points_for_group_join,
     award_points_for_monthly_target,
+    award_points_for_monthly_review,
+    award_points_for_weekly_review,
     complete_monthly_target,
     leaderboard_for_group,
 )
@@ -96,6 +100,12 @@ def _is_last_admin(group: Group, membership: GroupMember) -> bool:
     return membership.role == GroupRole.ADMIN and GroupMember.objects.filter(group=group, role=GroupRole.ADMIN).count() == 1
 
 
+class CircleLeaderboardPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = "page_size"
+    max_page_size = 50
+
+
 class GroupViewSet(ModelViewSet):
     serializer_class = GroupSerializer
     permission_classes = [IsAuthenticated]
@@ -104,7 +114,7 @@ class GroupViewSet(ModelViewSet):
         return Group.objects.filter(memberships__user=self.request.user).distinct()
 
     def perform_create(self, serializer):
-        invite_code = secrets.token_hex(4)
+        invite_code = _generate_invite_code()
         group = serializer.save(created_by=self.request.user, invite_code=invite_code)
         GroupMember.objects.get_or_create(group=group, user=self.request.user, defaults={"role": GroupRole.ADMIN})
         award_points_for_group_create(self.request.user, group)
@@ -318,19 +328,67 @@ class PointEventViewSet(ReadOnlyModelViewSet):
         streak, _ = UserStreak.objects.get_or_create(user=request.user)
         return Response(UserStreakSerializer(streak).data)
 
+    @action(detail=False, methods=["post"])
+    def complete_weekly_review(self, request):
+        review_date_raw = request.data.get("review_date")
+        try:
+            review_date = date.fromisoformat(review_date_raw) if review_date_raw else timezone.now().date()
+        except (TypeError, ValueError):
+            return Response({"detail": "review_date must be YYYY-MM-DD"}, status=400)
+
+        result = award_points_for_weekly_review(request.user, window_start=review_date)
+        serializer = self.get_serializer(result.event)
+        return Response(serializer.data, status=201 if result.created else 200)
+
+    @action(detail=False, methods=["post"])
+    def complete_monthly_review(self, request):
+        month_key = request.data.get("month")
+        if month_key:
+            try:
+                month_key = date.fromisoformat(f"{month_key}-01").strftime("%Y-%m")
+            except (TypeError, ValueError):
+                return Response({"detail": "month must be YYYY-MM"}, status=400)
+        else:
+            month_key = timezone.now().strftime("%Y-%m")
+
+        result = award_points_for_monthly_review(request.user, month_key=month_key)
+        serializer = self.get_serializer(result.event)
+        return Response(serializer.data, status=201 if result.created else 200)
+
     @action(detail=False, methods=["get"])
     def leaderboard(self, request):
         group_id = request.query_params.get("group_id")
-        days = int(request.query_params.get("days", 7))
         if not group_id:
             return Response({"detail": "group_id required"}, status=400)
+        try:
+            days = int(request.query_params.get("days", 7))
+        except (TypeError, ValueError):
+            return Response({"detail": "days must be an integer"}, status=400)
         if days <= 0 or days > 90:
             return Response({"detail": "days must be between 1 and 90"}, status=400)
         if not GroupMember.objects.filter(group_id=group_id, user=request.user).exists():
             return Response({"detail": "Not a member of this group"}, status=403)
 
-        group = Group.objects.get(id=group_id)
-        return Response(leaderboard_for_group(group=group, days=days))
+        group = get_object_or_404(Group, id=group_id)
+        payload = leaderboard_for_group(group=group, days=days)
+        paginator = CircleLeaderboardPagination()
+        page = paginator.paginate_queryset(payload["rows"], request, view=self)
+        current_user_rank = next((row["rank"] for row in payload["rows"] if row["user_id"] == request.user.id), None)
+        return Response(
+            {
+                "count": len(payload["rows"]),
+                "next": paginator.get_next_link(),
+                "previous": paginator.get_previous_link(),
+                "group_id": group.id,
+                "group_name": group.name,
+                "days": payload["days"],
+                "window_start": payload["start"].isoformat(),
+                "window_end": payload["end"].isoformat(),
+                "member_count": payload["member_count"],
+                "current_user_rank": current_user_rank,
+                "results": page,
+            }
+        )
 
 
 class BadgeViewSet(ReadOnlyModelViewSet):

@@ -36,7 +36,7 @@ class PointEventAdmin(admin.ModelAdmin):
 
 @admin.register(UserStreak)
 class UserStreakAdmin(admin.ModelAdmin):
-    list_display = ("user", "current_streak_days", "best_streak_days", "last_checkin_date", "updated_at")
+    list_display = ("user", "total_points_earned", "current_streak_days", "best_streak_days", "last_checkin_date", "updated_at")
     search_fields = ("user__username",)
 
 

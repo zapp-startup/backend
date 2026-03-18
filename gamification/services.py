@@ -11,7 +11,7 @@ from django.utils import timezone
 from transactions.models import TransactionReflection
 
 from .badges import ACTION_POINTS, BADGE_CATALOG
-from .models import Badge, Group, MonthlyTarget, MonthlyTargetStatus, PointAction, PointEvent, UserBadge, UserStreak
+from .models import Badge, Group, GroupMember, MonthlyTarget, MonthlyTargetStatus, PointAction, PointEvent, UserBadge, UserStreak
 
 User = get_user_model()
 
@@ -20,6 +20,9 @@ STREAK_QUALIFYING_ACTIONS = {
     PointAction.REFLECT_SAME_DAY,
     PointAction.USE_ADVISOR,
 }
+
+LEVEL_BASE_POINTS = 50
+LEVEL_STEP_POINTS = 25
 
 
 @dataclass(frozen=True)
@@ -62,10 +65,37 @@ def _normalize_event_key(event_key: str | None) -> str | None:
     return event_key or None
 
 
+def normalize_week_start(window_date: date) -> date:
+    return window_date - timedelta(days=window_date.weekday())
+
+
 def _rolling_window(days: int, now=None):
     now = now or timezone.now()
     start = now - timedelta(days=days)
     return start, now
+
+
+def _points_required_for_level(level: int) -> int:
+    if level <= 1:
+        return 0
+    steps_completed = level - 1
+    return (steps_completed * LEVEL_BASE_POINTS) + ((steps_completed - 1) * steps_completed // 2 * LEVEL_STEP_POINTS)
+
+
+def build_level_progress(total_points: int) -> dict[str, int]:
+    level = 1
+    while total_points >= _points_required_for_level(level + 1):
+        level += 1
+
+    level_floor_points = _points_required_for_level(level)
+    next_level_points = _points_required_for_level(level + 1)
+    return {
+        "level": level,
+        "level_floor_points": level_floor_points,
+        "next_level_points": next_level_points,
+        "points_into_level": total_points - level_floor_points,
+        "points_to_next_level": next_level_points - total_points,
+    }
 
 
 def _get_or_create_streak(user: User) -> UserStreak:
@@ -252,6 +282,12 @@ def _award_badges_for_event(event: PointEvent) -> list[UserBadge]:
         maybe_award("monthly_momentum")
         if total_completed_targets >= 3:
             maybe_award("target_taker")
+        month_key = event.metadata_json.get("month")
+        if month_key:
+            month_start = date.fromisoformat(f"{month_key}-01")
+            month_targets = MonthlyTarget.objects.filter(user=user, month_start=month_start)
+            if month_targets.exists() and not month_targets.exclude(status=MonthlyTargetStatus.COMPLETED).exists():
+                maybe_award("month_master")
         distinct_months = (
             PointEvent.objects
             .filter(user=user, action=PointAction.COMPLETE_MONTHLY_TARGET)
@@ -316,7 +352,11 @@ def award_points(
         return AwardResult(event=event, created=False, badges_awarded=[])
 
     if action in STREAK_QUALIFYING_ACTIONS:
-        _update_streak(user, streak_date=streak_date or event.window_date)
+        streak = _update_streak(user, streak_date=streak_date or event.window_date)
+    else:
+        streak = _get_or_create_streak(user)
+    streak.total_points_earned = max(streak.total_points_earned + event.points, 0)
+    streak.save(update_fields=["total_points_earned", "updated_at"])
     badges = _award_badges_for_event(event)
     return AwardResult(event=event, created=True, badges_awarded=badges)
 
@@ -538,7 +578,7 @@ def award_points_for_onboarding(user: User) -> AwardResult:
 
 
 def award_points_for_weekly_review(user: User, *, window_start: date | None = None) -> AwardResult:
-    window_start = window_start or timezone.now().date()
+    window_start = normalize_week_start(window_start or timezone.now().date())
     return award_points(
         user=user,
         action=PointAction.WEEKLY_REVIEW,
@@ -627,23 +667,47 @@ def leaderboard_for_group(*, group: Group, days: int = 7):
 
     active_days_map = {row["user__id"]: row["active_days_count"] for row in active_days}
     reflections_map = {row["user__id"]: row["reflections_count"] for row in reflections}
+    totals_map = {row["user__id"]: row["points_total"] or 0 for row in totals}
+    memberships = list(
+        GroupMember.objects.filter(group=group)
+        .select_related("user")
+        .order_by("user__username")
+    )
+    streaks_map = {
+        streak.user_id: streak
+        for streak in UserStreak.objects.filter(user_id__in=[membership.user_id for membership in memberships])
+    }
 
     rows = []
-    for row in totals:
-        user_id = row["user__id"]
+    for membership in memberships:
+        user = membership.user
+        user_id = user.id
+        total_points = totals_map.get(user_id, 0)
+        streak = streaks_map.get(user_id)
+        level_progress = build_level_progress(streak.total_points_earned if streak else 0)
         rows.append(
             {
                 "user_id": user_id,
-                "username": row["user__username"],
-                "points_total": row["points_total"] or 0,
+                "username": user.username,
+                "role": membership.role,
+                "points_total": total_points,
                 "active_days_count": active_days_map.get(user_id, 0),
                 "reflections_count": reflections_map.get(user_id, 0),
+                "current_streak_days": streak.current_streak_days if streak else 0,
+                "best_streak_days": streak.best_streak_days if streak else 0,
+                "lifetime_points_total": streak.total_points_earned if streak else 0,
+                "level": level_progress["level"],
             }
         )
+
+    rows.sort(key=lambda row: (-row["points_total"], row["username"]))
+    for rank, row in enumerate(rows, start=1):
+        row["rank"] = rank
 
     return {
         "start": start,
         "end": end,
         "days": days,
+        "member_count": len(rows),
         "rows": rows,
     }

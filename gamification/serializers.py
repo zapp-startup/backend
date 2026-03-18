@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from .models import Badge, Group, GroupInvite, GroupMember, MonthlyTarget, PointEvent, UserBadge, UserStreak
+from .services import build_level_progress
 
 
 class GroupSerializer(serializers.ModelSerializer):
@@ -58,10 +59,43 @@ class PointEventSerializer(serializers.ModelSerializer):
 
 
 class UserStreakSerializer(serializers.ModelSerializer):
+    level = serializers.SerializerMethodField()
+    level_floor_points = serializers.SerializerMethodField()
+    next_level_points = serializers.SerializerMethodField()
+    points_into_level = serializers.SerializerMethodField()
+    points_to_next_level = serializers.SerializerMethodField()
+
+    def _level_progress(self, obj):
+        return build_level_progress(obj.total_points_earned)
+
+    def get_level(self, obj):
+        return self._level_progress(obj)["level"]
+
+    def get_level_floor_points(self, obj):
+        return self._level_progress(obj)["level_floor_points"]
+
+    def get_next_level_points(self, obj):
+        return self._level_progress(obj)["next_level_points"]
+
+    def get_points_into_level(self, obj):
+        return self._level_progress(obj)["points_into_level"]
+
+    def get_points_to_next_level(self, obj):
+        return self._level_progress(obj)["points_to_next_level"]
+
     class Meta:
         model = UserStreak
         fields = "__all__"
-        read_only_fields = ("user", "updated_at")
+        read_only_fields = (
+            "user",
+            "total_points_earned",
+            "updated_at",
+            "level",
+            "level_floor_points",
+            "next_level_points",
+            "points_into_level",
+            "points_to_next_level",
+        )
 
 
 class BadgeSerializer(serializers.ModelSerializer):

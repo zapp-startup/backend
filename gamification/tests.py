@@ -34,6 +34,21 @@ class GamificationServiceTests(TestCase):
         self.assertFalse(result_two.created)
         self.assertEqual(PointEvent.objects.count(), 1)
 
+    def test_total_points_progression_updates_level(self):
+        award_points(
+            user=self.user,
+            action=PointAction.WEEKLY_REVIEW,
+            event_key="weekly_review:user:alice:2026-03-01",
+        )
+        award_points(
+            user=self.user,
+            action=PointAction.COMPLETE_MONTHLY_REVIEW,
+            event_key="monthly_review:user:alice:2026-03",
+        )
+
+        streak = UserStreak.objects.get(user=self.user)
+        self.assertEqual(streak.total_points_earned, 55)
+
     def test_streak_only_increments_once_per_day(self):
         yesterday = timezone.now() - timedelta(days=1)
         today = timezone.now()
@@ -235,6 +250,58 @@ class GamificationApiTests(TestCase):
             1,
         )
 
+    def test_my_streak_returns_level_progression(self):
+        award_points(
+            user=self.user,
+            action=PointAction.WEEKLY_REVIEW,
+            event_key="weekly_review:user:alice:2026-03-04",
+        )
+        award_points(
+            user=self.user,
+            action=PointAction.COMPLETE_MONTHLY_REVIEW,
+            event_key="monthly_review:user:alice:2026-03-04",
+        )
+
+        response = self.client.get("/api/gamification/points/my_streak/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["total_points_earned"], 55)
+        self.assertEqual(payload["level"], 2)
+        self.assertEqual(payload["points_to_next_level"], 70)
+
+    def test_weekly_review_endpoint_is_idempotent_within_same_week(self):
+        first = self.client.post(
+            "/api/gamification/points/complete_weekly_review/",
+            {"review_date": "2026-03-18"},
+            format="json",
+        )
+        second = self.client.post(
+            "/api/gamification/points/complete_weekly_review/",
+            {"review_date": "2026-03-20"},
+            format="json",
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(PointEvent.objects.filter(user=self.user, action=PointAction.WEEKLY_REVIEW).count(), 1)
+
+    def test_monthly_review_endpoint_is_idempotent_within_same_month(self):
+        first = self.client.post(
+            "/api/gamification/points/complete_monthly_review/",
+            {"month": "2026-03"},
+            format="json",
+        )
+        second = self.client.post(
+            "/api/gamification/points/complete_monthly_review/",
+            {"month": "2026-03"},
+            format="json",
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(PointEvent.objects.filter(user=self.user, action=PointAction.COMPLETE_MONTHLY_REVIEW).count(), 1)
+
     def test_leaderboard_aggregates_rolling_points(self):
         award_points(
             user=self.user,
@@ -264,10 +331,36 @@ class GamificationApiTests(TestCase):
         response = self.client.get(f"/api/gamification/points/leaderboard/?group_id={self.group.id}&days=7")
 
         self.assertEqual(response.status_code, 200)
-        rows = response.json()["rows"]
+        rows = response.json()["results"]
         self.assertEqual(rows[0]["username"], "alice")
         self.assertEqual(rows[0]["points_total"], 25)
         self.assertEqual(rows[0]["reflections_count"], 1)
+        self.assertEqual(rows[0]["rank"], 1)
+        self.assertEqual(response.json()["current_user_rank"], 1)
+
+    def test_leaderboard_is_paginated(self):
+        for idx in range(12):
+            member = User.objects.create_user(username=f"user{idx}", password="pw")
+            GroupMember.objects.create(group=self.group, user=member, role="member")
+            award_points(
+                user=member,
+                group=self.group,
+                action=PointAction.LOG_PURCHASE,
+                points=idx + 1,
+                event_key=f"leaderboard:user:{idx}",
+                window_date=timezone.now().date(),
+            )
+
+        response = self.client.get(
+            f"/api/gamification/points/leaderboard/?group_id={self.group.id}&days=7&page=2&page_size=5"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["count"], 14)
+        self.assertEqual(len(payload["results"]), 5)
+        self.assertIsNotNone(payload["next"])
+        self.assertIsNotNone(payload["previous"])
 
     def test_subscription_status_changes_only_award_once(self):
         merchant = Merchant.objects.create(name="Netflix", category="streaming")
