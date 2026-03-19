@@ -7,7 +7,7 @@ from rest_framework.test import APIClient
 
 from ai.intents import classify_intent
 from ai.models import Conversation, ConversationContext, MessageRole
-from ai.views import build_assistant_placeholder_response, build_financial_context, build_purchase_advisor_report
+from ai.views import SAFETY_GUARDRAILS, build_assistant_placeholder_response, build_financial_context, build_purchase_advisor_report
 from subscriptions.models import BillingCycle, Merchant, Subscription, SubscriptionStatus
 from transactions.models import Transaction, TransactionCategory, TransactionDirection
 from users.models import User, UserComputed, UserRawExplicit
@@ -144,6 +144,7 @@ class ConversationMessagesTests(TestCase):
         financial_context = assistant_message["metadata_json"]["financial_context"]
         self.assertEqual(financial_context["summary"]["transaction_count"], 1)
         self.assertEqual(financial_context["summary"]["active_subscription_count"], 1)
+        self.assertEqual(assistant_message["metadata_json"]["safety_guardrails"], SAFETY_GUARDRAILS)
 
 
 class IntentClassificationTests(TestCase):
@@ -170,6 +171,8 @@ class AssistantPlaceholderResponseTests(TestCase):
                 self.assertEqual(payload["response_style"], expected_style)
                 self.assertTrue(payload["assistant_text"].startswith("✅"))
                 self.assertIn("OpenAI key is not configured yet", payload["assistant_text"])
+                self.assertIn(SAFETY_GUARDRAILS["disclaimer"], payload["assistant_text"])
+                self.assertEqual(payload["safety_guardrails"], SAFETY_GUARDRAILS)
 
 
 class ChatNavigationOptionsTests(TestCase):
@@ -199,6 +202,7 @@ class ChatNavigationOptionsTests(TestCase):
         self.assertEqual(metadata["action_status"], "routing_options")
         self.assertIsNone(metadata["created_transaction_id"])
         self.assertGreaterEqual(len(metadata["quick_actions"]), 3)
+        self.assertEqual(metadata["safety_guardrails"], SAFETY_GUARDRAILS)
         self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
 
 
