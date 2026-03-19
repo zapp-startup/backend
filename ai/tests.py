@@ -7,10 +7,10 @@ from rest_framework.test import APIClient
 
 from ai.intents import classify_intent
 from ai.models import Conversation, ConversationContext, MessageRole
-from ai.views import build_assistant_placeholder_response, build_financial_context
+from ai.views import build_assistant_placeholder_response, build_financial_context, build_purchase_advisor_report
 from subscriptions.models import BillingCycle, Merchant, Subscription, SubscriptionStatus
 from transactions.models import Transaction, TransactionCategory, TransactionDirection
-from users.models import User
+from users.models import User, UserComputed, UserRawExplicit
 
 
 class FinancialContextTests(TestCase):
@@ -200,3 +200,109 @@ class ChatNavigationOptionsTests(TestCase):
         self.assertIsNone(metadata["created_transaction_id"])
         self.assertGreaterEqual(len(metadata["quick_actions"]), 3)
         self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
+
+
+class PurchaseAdvisorReportTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="advisor_user", password="testpass")
+        merchant = Merchant.objects.create(name="Starbucks")
+        now = timezone.now()
+
+        for days_ago, amount, category in [
+            (1, Decimal("28.00"), TransactionCategory.EATING_OUT),
+            (2, Decimal("22.00"), TransactionCategory.EATING_OUT),
+            (3, Decimal("15.00"), TransactionCategory.GROCERIES),
+        ]:
+            Transaction.objects.create(
+                user=self.user,
+                merchant=merchant,
+                amount=amount,
+                currency="USD",
+                direction=TransactionDirection.SPEND,
+                occurred_at=now - timedelta(days=days_ago),
+                category=category,
+                description_raw="Test transaction",
+            )
+
+        UserRawExplicit.objects.create(
+            user=self.user,
+            life_stage="early_career",
+            financial_goal="save_more",
+            budget_style="strict",
+        )
+        UserComputed.objects.create(
+            user=self.user,
+            spending_personality="Value Hunter",
+            budget_adherence_score=0.82,
+        )
+
+        self.user.preferences.create(
+            key="purchase_advisor_logic",
+            value_type="json",
+            value_json={
+                "enabled": True,
+                "lookback_days": 30,
+                "overspending_ratio_threshold": 1.2,
+                "focus_categories": ["food", "grocery"],
+            },
+        )
+
+    def test_build_purchase_advisor_report_flags_requested_category_overspending(self):
+        report = build_purchase_advisor_report(self.user, "Can you review my food spending?")
+
+        self.assertEqual(report["status"], "ready")
+        self.assertEqual(report["requested_category"], "food")
+        self.assertTrue(report["targeted_report"]["is_overspending"])
+        self.assertEqual(report["overspending_categories"][0]["category"], "food")
+        self.assertEqual(report["profile_context"]["life_stage"], "early_career")
+        self.assertEqual(report["profile_context"]["financial_goal"], "save_more")
+
+
+class PurchaseAdvisorChatMetadataTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="seed_user_2", password="testpass")
+        self.conversation = Conversation.objects.create(user=self.user, context_type=ConversationContext.BUDGETING)
+        merchant = Merchant.objects.create(name="Trader Joe's")
+        now = timezone.now()
+
+        self.user.preferences.create(
+            key="purchase_advisor_logic",
+            value_type="json",
+            value_json={"enabled": True, "lookback_days": 30, "overspending_ratio_threshold": 1.1},
+        )
+
+        Transaction.objects.create(
+            user=self.user,
+            merchant=merchant,
+            amount=Decimal("120.00"),
+            currency="USD",
+            direction=TransactionDirection.SPEND,
+            occurred_at=now - timedelta(days=1),
+            category=TransactionCategory.GROCERIES,
+            description_raw="Weekly groceries",
+        )
+        Transaction.objects.create(
+            user=self.user,
+            merchant=merchant,
+            amount=Decimal("30.00"),
+            currency="USD",
+            direction=TransactionDirection.SPEND,
+            occurred_at=now - timedelta(days=2),
+            category=TransactionCategory.EATING_OUT,
+            description_raw="Lunch",
+        )
+
+    def test_messages_post_includes_purchase_advisor_report_when_enabled(self):
+        response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/",
+            {"content": "Am I overspending on grocery right now?"},
+            format="json",
+            HTTP_X_DEV_USER="seed_user_2",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        report = response.data["assistant_message"]["metadata_json"]["purchase_advisor_report"]
+        self.assertEqual(report["status"], "ready")
+        self.assertEqual(report["requested_category"], "grocery")
+        self.assertTrue(report["targeted_report"]["is_overspending"])
