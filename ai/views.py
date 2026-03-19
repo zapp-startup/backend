@@ -1,5 +1,10 @@
+from collections import defaultdict
+from datetime import timedelta
+from decimal import Decimal
+
 from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from subscriptions.models import Subscription
 from transactions.models import Transaction, TransactionDirection
 from rest_framework import status
@@ -11,6 +16,7 @@ from .models import Conversation, Message, UserFact, MessageRole, ConversationCo
 from .serializers import ConversationSerializer, MessageSerializer, UserFactSerializer
 from .openai_config import get_openai_api_key
 from .intents import classify_intent
+from .purchase_advisor import ADVISOR_CATEGORY_ALIASES, LOCAL_TO_ADVISOR_CATEGORY
 
 
 def _format_recent_transaction(transaction):
@@ -38,6 +44,165 @@ def _format_subscription(subscription):
         "renewal_date": subscription.renewal_date.isoformat() if subscription.renewal_date else None,
     }
 
+
+
+
+def _normalize_preference_value(preference):
+    if not preference:
+        return None
+
+    value = preference.value_json
+    if isinstance(value, dict) and set(value.keys()) == {"value"}:
+        return value["value"]
+
+    return value
+
+
+def _get_purchase_advisor_logic(user):
+    preference = user.preferences.filter(key="purchase_advisor_logic").first()
+    value = _normalize_preference_value(preference)
+
+    if value is True:
+        return {
+            "enabled": True,
+            "lookback_days": 30,
+            "overspending_ratio_threshold": 1.2,
+        }
+
+    if not isinstance(value, dict) or not value.get("enabled"):
+        return None
+
+    return {
+        "enabled": True,
+        "lookback_days": int(value.get("lookback_days", 30)),
+        "overspending_ratio_threshold": float(value.get("overspending_ratio_threshold", 1.2)),
+        "focus_categories": value.get("focus_categories") or [],
+    }
+
+
+def _extract_requested_category(content: str):
+    normalized = (content or "").strip().lower()
+
+    for category, aliases in ADVISOR_CATEGORY_ALIASES.items():
+        if any(alias in normalized for alias in aliases):
+            return category
+    return None
+
+
+def _build_purchase_advisor_profile_context(user):
+    raw_explicit = getattr(user, "raw_explicit", None)
+    computed = getattr(user, "computed", None)
+
+    return {
+        "life_stage": getattr(raw_explicit, "life_stage", "") or None,
+        "financial_goal": getattr(raw_explicit, "financial_goal", "") or None,
+        "budget_style": getattr(raw_explicit, "budget_style", "") or None,
+        "spending_personality": getattr(computed, "spending_personality", "") or None,
+        "budget_adherence_score": getattr(computed, "budget_adherence_score", None),
+    }
+
+
+def _normalize_transaction_category(category: str) -> str:
+    return LOCAL_TO_ADVISOR_CATEGORY.get(category, "other")
+
+
+def build_purchase_advisor_report(user, request_content: str):
+    logic = _get_purchase_advisor_logic(user)
+    if not logic:
+        return None
+
+    lookback_days = max(logic["lookback_days"], 1)
+    overspending_ratio_threshold = max(logic["overspending_ratio_threshold"], 0.01)
+
+    window_start = timezone.now() - timedelta(days=lookback_days)
+    transactions = list(
+        Transaction.objects.filter(
+            user=user,
+            direction=TransactionDirection.SPEND,
+            occurred_at__gte=window_start,
+        )
+        .select_related("merchant")
+        .order_by("-occurred_at")
+    )
+    if not transactions:
+        return {
+            "enabled": True,
+            "status": "insufficient_data",
+            "message": "Purchase advisor logic is enabled, but there is no spend history to analyze yet.",
+            "lookback_days": lookback_days,
+        }
+
+    recent_transactions = transactions
+    total_spend = sum((tx.amount for tx in recent_transactions), Decimal("0.00"))
+    if total_spend <= 0:
+        return {
+            "enabled": True,
+            "status": "insufficient_data",
+            "message": "Purchase advisor logic is enabled, but there is no positive spend to compare yet.",
+            "lookback_days": lookback_days,
+        }
+
+    category_totals = defaultdict(lambda: Decimal("0.00"))
+    for tx in recent_transactions:
+        advisor_category = _normalize_transaction_category(tx.category)
+        category_totals[advisor_category] += tx.amount
+
+    baseline_category_count = max(len(category_totals), 1)
+    baseline_share = Decimal("1") / Decimal(str(baseline_category_count))
+    requested_category = _extract_requested_category(request_content)
+    focus_categories = set(logic.get("focus_categories") or [])
+
+    overspending_categories = []
+    for category, amount in sorted(category_totals.items(), key=lambda item: item[1], reverse=True):
+        if focus_categories and category not in focus_categories:
+            continue
+        share = amount / total_spend
+        overspend_ratio = float(share / baseline_share)
+        if overspend_ratio >= overspending_ratio_threshold:
+            overspending_categories.append({
+                "category": category,
+                "total_spend": str(amount.quantize(Decimal("0.01"))),
+                "share_of_spend": round(float(share), 4),
+                "overspend_ratio": round(overspend_ratio, 2),
+                "matches_request": category == requested_category,
+            })
+
+    targeted_report = None
+    if requested_category and requested_category in category_totals:
+        amount = category_totals[requested_category]
+        share = amount / total_spend
+        targeted_report = {
+            "category": requested_category,
+            "total_spend": str(amount.quantize(Decimal("0.01"))),
+            "share_of_spend": round(float(share), 4),
+            "overspend_ratio": round(float(share / baseline_share), 2),
+            "is_overspending": any(item["category"] == requested_category for item in overspending_categories),
+        }
+
+    if requested_category and not targeted_report:
+        targeted_report = {
+            "category": requested_category,
+            "total_spend": "0.00",
+            "share_of_spend": 0.0,
+            "overspend_ratio": 0.0,
+            "is_overspending": False,
+        }
+
+    return {
+        "enabled": True,
+        "status": "ready",
+        "lookback_days": lookback_days,
+        "overspending_ratio_threshold": overspending_ratio_threshold,
+        "requested_category": requested_category,
+        "profile_context": _build_purchase_advisor_profile_context(user),
+        "targeted_report": targeted_report,
+        "overspending_categories": overspending_categories,
+        "summary": {
+            "total_spend": str(total_spend.quantize(Decimal("0.01"))),
+            "category_count": len(category_totals),
+            "top_category": overspending_categories[0]["category"] if overspending_categories else None,
+        },
+    }
 
 def build_financial_context(user, *, transaction_limit=5, subscription_limit=5):
     recent_transactions = list(
@@ -230,6 +395,7 @@ class ConversationViewSet(ModelViewSet):
 
         openai_configured = bool(get_openai_api_key())
         financial_context = build_financial_context(user)
+        purchase_advisor_report = build_purchase_advisor_report(user, content)
         intent = intent_detection["intent"]
         if intent == "record_transaction":
             assistant_placeholder = _build_record_transaction_response()
@@ -248,6 +414,7 @@ class ConversationViewSet(ModelViewSet):
                 "openai_configured": openai_configured,
                 "financial_context": financial_context,
                 "intent_detection": intent_detection,
+                "purchase_advisor_report": purchase_advisor_report,
                 "response_style": assistant_placeholder["response_style"],
                 "frontend_hint": assistant_placeholder["frontend_hint"],
                 "action": assistant_placeholder.get("action"),
