@@ -7,6 +7,7 @@ from rest_framework.test import APIClient
 
 from ai.intents import classify_intent
 from ai.models import Conversation, ConversationContext, MessageRole
+from ai.purchase_advisor import extract_requested_category
 from ai.views import SAFETY_GUARDRAILS, build_assistant_placeholder_response, build_financial_context, build_purchase_advisor_report
 from subscriptions.models import BillingCycle, Merchant, Subscription, SubscriptionStatus
 from transactions.models import Transaction, TransactionCategory, TransactionDirection
@@ -260,6 +261,25 @@ class PurchaseAdvisorReportTests(TestCase):
         self.assertEqual(report["overspending_categories"][0]["category"], "food")
         self.assertEqual(report["profile_context"]["life_stage"], "early_career")
         self.assertEqual(report["profile_context"]["financial_goal"], "save_more")
+
+    def test_build_purchase_advisor_report_ignores_substring_false_positives(self):
+        report = build_purchase_advisor_report(self.user, "What happened to my budget this month?")
+
+        self.assertEqual(report["status"], "ready")
+        self.assertIsNone(report["requested_category"])
+        self.assertIsNone(report["targeted_report"])
+
+
+class PurchaseAdvisorCategoryExtractionTests(TestCase):
+    def test_extract_requested_category_matches_whole_aliases_only(self):
+        self.assertEqual(extract_requested_category("Can you check my app subscriptions?"), "software")
+        self.assertEqual(extract_requested_category("My rent bill is too high"), "utilities")
+        self.assertEqual(extract_requested_category("I signed up for a new class"), "education")
+
+    def test_extract_requested_category_avoids_common_substring_matches(self):
+        self.assertIsNone(extract_requested_category("What happened to my budget this month?"))
+        self.assertIsNone(extract_requested_category("Can you show my current spending?"))
+        self.assertIsNone(extract_requested_category("Let's classify this transaction later."))
 
 
 class PurchaseAdvisorChatMetadataTests(TestCase):
