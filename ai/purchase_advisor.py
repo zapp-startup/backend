@@ -1,3 +1,5 @@
+import re
+
 from transactions.models import TransactionCategory
 
 ADVISOR_CATEGORY_ALIASES = {
@@ -25,3 +27,21 @@ LOCAL_TO_ADVISOR_CATEGORY = {
 }
 
 ADVISOR_CATEGORIES = tuple(ADVISOR_CATEGORY_ALIASES.keys())
+
+_ALIAS_BOUNDARY = r"(?<!\w){alias}(?!\w)"
+ADVISOR_CATEGORY_ALIAS_PATTERNS = {
+    category: tuple(
+        re.compile(_ALIAS_BOUNDARY.format(alias=re.escape(alias)), re.IGNORECASE)
+        for alias in sorted(aliases, key=len, reverse=True)
+    )
+    for category, aliases in ADVISOR_CATEGORY_ALIASES.items()
+}
+
+
+def extract_requested_category(content: str):
+    normalized = (content or "").strip()
+
+    for category, patterns in ADVISOR_CATEGORY_ALIAS_PATTERNS.items():
+        if any(pattern.search(normalized) for pattern in patterns):
+            return category
+    return None

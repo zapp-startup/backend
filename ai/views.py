@@ -16,7 +16,7 @@ from .models import Conversation, Message, UserFact, MessageRole, ConversationCo
 from .serializers import ConversationSerializer, MessageSerializer, UserFactSerializer
 from .openai_config import get_openai_api_key
 from .intents import classify_intent
-from .purchase_advisor import ADVISOR_CATEGORY_ALIASES, LOCAL_TO_ADVISOR_CATEGORY
+from .purchase_advisor import LOCAL_TO_ADVISOR_CATEGORY, extract_requested_category
 
 SAFETY_GUARDRAILS = {
     "disclaimer": (
@@ -96,15 +96,6 @@ def _get_purchase_advisor_logic(user):
     }
 
 
-def _extract_requested_category(content: str):
-    normalized = (content or "").strip().lower()
-
-    for category, aliases in ADVISOR_CATEGORY_ALIASES.items():
-        if any(alias in normalized for alias in aliases):
-            return category
-    return None
-
-
 def _build_purchase_advisor_profile_context(user):
     raw_explicit = getattr(user, "raw_explicit", None)
     computed = getattr(user, "computed", None)
@@ -165,7 +156,7 @@ def build_purchase_advisor_report(user, request_content: str):
 
     baseline_category_count = max(len(category_totals), 1)
     baseline_share = Decimal("1") / Decimal(str(baseline_category_count))
-    requested_category = _extract_requested_category(request_content)
+    requested_category = extract_requested_category(request_content)
     focus_categories = set(logic.get("focus_categories") or [])
 
     overspending_categories = []
