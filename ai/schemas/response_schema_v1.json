@@ -48,12 +48,14 @@
         "type": "string"
       },
       "maxItems": 1
+      }
     },
     "disclaimer": {
       "type": "string"
     },
     "safe_bounds_acknowledged": {
       "const": true
+      "type": "boolean"
     }
   },
   "additionalProperties": false
