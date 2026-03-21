@@ -147,6 +147,44 @@ class ConversationMessagesTests(TestCase):
         self.assertEqual(financial_context["summary"]["active_subscription_count"], 1)
         self.assertEqual(assistant_message["metadata_json"]["safety_guardrails"], SAFETY_GUARDRAILS)
 
+    def test_messages_post_returns_backend_conversation_memory_snapshot(self):
+        response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/",
+            {"content": "Can you remind me about my subscription budget?"},
+            format="json",
+            HTTP_X_DEV_USER="seed_user_0",
+        )
+
+        self.assertEqual(response.status_code, 201)
+
+        assistant_message = response.data["assistant_message"]
+        conversation_memory = assistant_message["metadata_json"]["conversation_memory"]
+        self.assertEqual(conversation_memory["summary_text"], "")
+        self.assertEqual(conversation_memory["session_state"]["active_goal"], "general_guidance")
+        self.assertIn("budget", conversation_memory["session_state"]["mentioned_entities"])
+        self.assertEqual(len(conversation_memory["recent_messages"]), 2)
+        self.assertEqual(conversation_memory["recent_messages"][0]["role"], MessageRole.USER)
+        self.assertEqual(conversation_memory["recent_messages"][1]["role"], MessageRole.ASSISTANT)
+
+        self.conversation.refresh_from_db()
+        self.assertEqual(self.conversation.session_state_json["active_goal"], "general_guidance")
+        self.assertEqual(self.conversation.session_state_json["last_user_message"], "Can you remind me about my subscription budget?")
+
+    def test_messages_post_compacts_older_turns_into_summary(self):
+        for index in range(4):
+            self.client.post(
+                f"/api/ai/conversations/{self.conversation.id}/messages/",
+                {"content": f"Help me track budget item {index}?"},
+                format="json",
+                HTTP_X_DEV_USER="seed_user_0",
+            )
+
+        self.conversation.refresh_from_db()
+        self.assertTrue(self.conversation.summary_text.startswith("User: Help me track budget item 0?"))
+        self.assertIsNotNone(self.conversation.last_summarized_message_id)
+        self.assertEqual(self.conversation.session_state_json["active_goal"], "general_guidance")
+        self.assertLessEqual(len(self.conversation.session_state_json["open_loops"]), 3)
+
 
 class IntentClassificationTests(TestCase):
     def test_classify_intent_supports_requested_labels(self):

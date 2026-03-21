@@ -240,6 +240,99 @@ def build_financial_context(user, *, transaction_limit=5, subscription_limit=5):
     }
 
 
+SHORT_TERM_MEMORY_MESSAGE_LIMIT = 6
+SUMMARY_TRIGGER_MESSAGE_COUNT = 8
+SUMMARY_MAX_TURNS = 12
+
+
+def _summarize_messages(messages):
+    summary_lines = []
+    for message in messages[:SUMMARY_MAX_TURNS]:
+        role = message.role.capitalize()
+        content = " ".join(message.content.split())
+        if len(content) > 140:
+            content = f"{content[:137]}..."
+        summary_lines.append(f"{role}: {content}")
+    return "\n".join(summary_lines)
+
+
+def _extract_session_state(conversation, recent_messages):
+    open_loops = []
+    last_user_message = None
+    mentioned_entities = []
+
+    for message in recent_messages:
+        if message.role == MessageRole.USER:
+            last_user_message = message.content
+            content_lower = message.content.lower()
+            if "?" in message.content:
+                open_loops.append(message.content.strip())
+            for keyword in ("budget", "subscription", "transaction", "purchase"):
+                if keyword in content_lower and keyword not in mentioned_entities:
+                    mentioned_entities.append(keyword)
+
+    active_goal = "general_guidance"
+    if conversation.context_type == ConversationContext.BUDGETING:
+        active_goal = "budget_guidance"
+    elif conversation.context_type == ConversationContext.SUBSCRIPTION:
+        active_goal = "subscription_support"
+    elif conversation.context_type == ConversationContext.PRODUCT:
+        active_goal = "product_support"
+
+    if last_user_message:
+        detected_intent = classify_intent(last_user_message)["intent"]
+        if detected_intent == "record_transaction":
+            active_goal = "transaction_logging"
+        elif detected_intent == "summarize":
+            active_goal = "conversation_summary"
+        elif detected_intent == "recommend":
+            active_goal = "recommendation_support"
+
+    return {
+        "active_goal": active_goal,
+        "open_loops": open_loops[-3:],
+        "mentioned_entities": mentioned_entities,
+        "last_user_message": last_user_message,
+        "message_count": conversation.messages.count(),
+    }
+
+
+def build_conversation_memory(conversation, *, message_limit=SHORT_TERM_MEMORY_MESSAGE_LIMIT):
+    recent_messages = list(
+        conversation.messages.order_by("-created_at", "-id")[:message_limit]
+    )
+    recent_messages.reverse()
+    return {
+        "summary_text": conversation.summary_text,
+        "session_state": conversation.session_state_json or {},
+        "recent_messages": [
+            {
+                "id": message.id,
+                "role": message.role,
+                "content": message.content,
+                "created_at": message.created_at.isoformat(),
+            }
+            for message in recent_messages
+        ],
+    }
+
+
+def refresh_conversation_memory(conversation):
+    all_messages = list(conversation.messages.order_by("created_at", "id"))
+    update_fields = ["session_state_json", "updated_at"]
+
+    if len(all_messages) >= SUMMARY_TRIGGER_MESSAGE_COUNT:
+        messages_to_summarize = all_messages[:-SHORT_TERM_MEMORY_MESSAGE_LIMIT]
+        if messages_to_summarize:
+            conversation.summary_text = _summarize_messages(messages_to_summarize)
+            conversation.last_summarized_message_id = messages_to_summarize[-1].id
+            update_fields.extend(["summary_text", "last_summarized_message_id"])
+
+    conversation.session_state_json = _extract_session_state(conversation, all_messages[-SHORT_TERM_MEMORY_MESSAGE_LIMIT:])
+    conversation.save(update_fields=update_fields)
+    return build_conversation_memory(conversation)
+
+
 def _build_record_transaction_response() -> dict:
     return {
         "assistant_text": (
@@ -425,6 +518,7 @@ class ConversationViewSet(ModelViewSet):
                 "mode": "placeholder",
                 "openai_configured": openai_configured,
                 "financial_context": financial_context,
+                "conversation_memory": refresh_conversation_memory(convo),
                 "intent_detection": intent_detection,
                 "purchase_advisor_report": purchase_advisor_report,
                 "response_style": assistant_placeholder["response_style"],
@@ -436,8 +530,6 @@ class ConversationViewSet(ModelViewSet):
                 "safety_guardrails": assistant_placeholder.get("safety_guardrails", SAFETY_GUARDRAILS),
             },
         )
-
-        convo.save(update_fields=["updated_at"])
 
         return Response(
             {
