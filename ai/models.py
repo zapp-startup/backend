@@ -55,6 +55,21 @@ class Conversation(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    summary_text = models.TextField(
+        blank=True,
+        default="",
+        help_text="Rolling summary of older turns kept in the short-term memory store.",
+    )
+    session_state_json = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Structured short-term memory for active goals, entities, and open loops.",
+    )
+    last_summarized_message_id = models.BigIntegerField(
+        blank=True,
+        null=True,
+        help_text="Highest message id included in the rolling summary.",
+    )
 
     class Meta:
         ordering = ["-updated_at"]
