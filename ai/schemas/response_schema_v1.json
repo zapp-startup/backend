@@ -3,20 +3,38 @@
   "$id": "zapp/ai/response_schema_v1",
   "title": "Zapp AI Response Schema v1",
   "type": "object",
-  "required": ["recommendation", "reasoning", "next_steps", "confidence", "missing_data_questions"],
+  "required": [
+    "recommendation",
+    "reasoning",
+    "next_steps",
+    "confidence",
+    "missing_data_questions",
+    "disclaimer",
+    "safe_bounds_acknowledged"
+  ],
   "properties": {
     "recommendation": {
       "type": "string",
-      "enum": ["keep", "pause", "cancel", "defer", "investigate"]
+      "enum": [
+        "keep",
+        "pause",
+        "cancel",
+        "defer",
+        "investigate"
+      ]
     },
     "reasoning": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "minItems": 1
     },
     "next_steps": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "minItems": 1
     },
     "confidence": {
@@ -26,7 +44,16 @@
     },
     "missing_data_questions": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 1
+    },
+    "disclaimer": {
+      "type": "string"
+    },
+    "safe_bounds_acknowledged": {
+      "const": true
     }
   },
   "additionalProperties": false

@@ -18,6 +18,22 @@ from .openai_config import get_openai_api_key
 from .intents import classify_intent
 from .purchase_advisor import ADVISOR_CATEGORY_ALIASES, LOCAL_TO_ADVISOR_CATEGORY
 
+SAFETY_GUARDRAILS = {
+    "disclaimer": (
+        "Zapp provides general financial guidance only and does not offer medical, legal, or tax advice."
+    ),
+    "restricted_guarantees": [
+        "medical_outcomes",
+        "legal_outcomes",
+        "tax_outcomes",
+    ],
+    "safe_bounds": {
+        "confidence": {"min": 0.0, "max": 1.0},
+        "max_missing_data_questions": 1,
+        "advice_scope": "general_financial_guidance",
+    },
+}
+
 
 def _format_recent_transaction(transaction):
     merchant_name = transaction.merchant.name if transaction.merchant else None
@@ -241,6 +257,7 @@ def _build_record_transaction_response() -> dict:
         ),
         "response_style": "navigation_options",
         "frontend_hint": "Render quick action buttons for transaction/subscription/item update flows.",
+        "safety_guardrails": SAFETY_GUARDRAILS,
         "action": "navigate_to_data_entry",
         "status": "routing_options",
         "created_transaction_id": None,
@@ -258,6 +275,9 @@ def build_assistant_placeholder_response(intent: str, openai_configured: bool) -
         "OpenAI call wiring is the next step."
         if openai_configured
         else "OpenAI key is not configured yet."
+    )
+    safety_suffix = (
+        f" {SAFETY_GUARDRAILS['disclaimer']} Responses must stay within safe bounds and avoid guarantees."
     )
 
     intent_templates = {
@@ -305,9 +325,10 @@ def build_assistant_placeholder_response(intent: str, openai_configured: bool) -
 
     template = intent_templates.get(intent, intent_templates["ask"])
     return {
-        "assistant_text": f"{template['message']} ({base_suffix})",
+        "assistant_text": f"{template['message']} ({base_suffix}){safety_suffix}",
         "response_style": template["response_style"],
         "frontend_hint": template["frontend_hint"],
+        "safety_guardrails": SAFETY_GUARDRAILS,
     }
 
 
@@ -421,6 +442,7 @@ class ConversationViewSet(ModelViewSet):
                 "action_status": assistant_placeholder.get("status"),
                 "created_transaction_id": assistant_placeholder.get("created_transaction_id"),
                 "quick_actions": assistant_placeholder.get("quick_actions", []),
+                "safety_guardrails": assistant_placeholder.get("safety_guardrails", SAFETY_GUARDRAILS),
             },
         )
 
