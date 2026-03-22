@@ -26,6 +26,9 @@ class GroupMemberSerializer(serializers.ModelSerializer):
 
 
 class GroupInviteSerializer(serializers.ModelSerializer):
+    group_name = serializers.CharField(source="group.name", read_only=True)
+    inviter_username = serializers.CharField(source="invited_by.username", read_only=True)
+
     class Meta:
         model = GroupInvite
         fields = "__all__"
@@ -37,6 +40,8 @@ class GroupInviteSerializer(serializers.ModelSerializer):
             "accepted_at",
             "revoked_at",
             "created_at",
+            "group_name",
+            "inviter_username",
         )
 
 
