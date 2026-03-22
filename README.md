@@ -50,6 +50,29 @@ python manage.py runserver --settings=zapp.settings.development
 
 API will be avaliable on -> http://127.0.0.1:8000/
 
+## Supabase auth user sync flow
+
+When the frontend logs in with Supabase, include the Supabase access token on backend
+requests:
+
+```http
+Authorization: Bearer <supabase_access_token>
+```
+
+Backend behavior:
+
+- validates the token via Supabase JWKS;
+- reads the `sub` claim as the Supabase user id;
+- creates or links a Django `users.User` row (`supabase_uid`) on first request.
+
+Recommended first call after frontend login:
+
+```bash
+POST /api/auth/sync/
+```
+
+This endpoint confirms the backend user record exists and returns the mapped user payload.
+
 ## Project Settings
 
 This project uses environment-specific settings.

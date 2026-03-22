@@ -1,4 +1,3 @@
-from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from .models import (
@@ -8,8 +7,6 @@ from .models import (
     UserPreference,
     PreferenceValueType,
 )
-
-User = get_user_model()
 
 
 # ----------------------------
@@ -21,43 +18,32 @@ class UserRawExplicitSerializer(serializers.ModelSerializer):
         fields = [
             "user",
             "display_name",
-
             "dob",
             "age_range",
             "household_size",
             "location_zip",
-
             "life_stage",
             "employment_type",
             "dependents_count",
-
             "income_range",
             "monthly_income",
             "monthly_fixed_expenses",
-
             "financial_goal",
             "risk_tolerance",
             "budget_style",
-
             "value_priority_cost",
             "value_priority_quality",
             "value_priority_sustainability",
-
             "self_report_research_habit",
-
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["created_at", "updated_at"]
-        extra_kwargs = {
-            # Usually the authenticated user should be implicit
-            "user": {"read_only": True},
-        }
+        read_only_fields = ["user", "created_at", "updated_at"]
 
 
 # ----------------------------
 # 2) RAW INFERRED (behavior aggregates)
-# Usually read-only from client; server computes it.
+# Read-only from client; server computes it.
 # ----------------------------
 class UserRawInferredSerializer(serializers.ModelSerializer):
     class Meta:
@@ -65,63 +51,53 @@ class UserRawInferredSerializer(serializers.ModelSerializer):
         fields = [
             "user",
             "window_days",
-
             "avg_purchase_price",
             "purchase_price_variance",
             "category_distribution_json",
-
             "percent_impulsive_purchases",
             "regret_frequency",
             "brand_repetition_rate",
             "late_night_purchase_frequency",
             "avg_decision_time_minutes",
-
             "active_subscriptions_count",
             "total_subscription_cost",
             "percent_income_spent_on_subscriptions",
             "subscription_usage_frequency_json",
             "cancel_reactivation_frequency",
-
             "actual_monthly_spending",
-
             "computed_at",
         ]
-        read_only_fields = fields  # inferred snapshot should be read-only
-        # If you later want admin/internal writes only, loosen this for staff endpoints.
+        read_only_fields = fields
 
 
 # ----------------------------
 # 3) COMPUTED (processed traits/scores)
-# Also usually read-only to client.
+# Also read-only to client.
 # ----------------------------
 class UserComputedSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserComputed
         fields = [
             "user",
-
             "spending_personality",
             "product_spending_style",
             "subscription_behavior_type",
-
             "cost_weight",
             "quality_weight",
             "sustainability_weight",
-
             "impulse_susceptibility_score",
             "regret_sensitivity",
             "budget_adherence_score",
-
             "updated_at",
         ]
         read_only_fields = fields
 
 
 # ----------------------------
-# Preferences KV (keep)
+# 4) Preferences KV
 # ----------------------------
 class UserPreferenceSerializer(serializers.ModelSerializer):
-    # Provide "value" as the public field, backed by value_json in the model.
+    # Public alias: "value" <-> stored in value_json
     value = serializers.JSONField(required=False)
 
     class Meta:
@@ -137,9 +113,8 @@ class UserPreferenceSerializer(serializers.ModelSerializer):
             "confidence",
             "updated_at",
         ]
-        read_only_fields = ["id", "updated_at"]
+        read_only_fields = ["id", "user", "updated_at"]
         extra_kwargs = {
-            "user": {"read_only": True},
             "value_json": {"write_only": True},
         }
 
@@ -179,6 +154,7 @@ class UserPreferenceSerializer(serializers.ModelSerializer):
         else:
             raise serializers.ValidationError({"value_type": "Invalid value_type."})
 
+        # store into model field
         attrs["value_json"] = raw_value
         return attrs
 

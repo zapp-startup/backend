@@ -18,5 +18,5 @@ router.register(r"preferences", UserPreferenceViewSet, basename="preferences")
 
 urlpatterns = [
     path("auth/sync/", SupabaseUserSyncView.as_view(), name="supabase-user-sync"),
-    *router.urls,
+    path("", include(router.urls)),
 ]

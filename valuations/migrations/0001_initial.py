@@ -38,7 +38,6 @@ class Migration(migrations.Migration):
                 ('total_cost', models.DecimalField(decimal_places=2, max_digits=12)),
                 ('estimated_value', models.DecimalField(decimal_places=2, max_digits=12)),
                 ('net_value', models.DecimalField(decimal_places=2, max_digits=12)),
-                ('confidence', models.FloatField(default=1.0)),
                 ('explanation_json', models.JSONField(blank=True, default=dict)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('subscription', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='valuations', to='subscriptions.subscription')),

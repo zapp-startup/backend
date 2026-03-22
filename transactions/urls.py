@@ -6,4 +6,7 @@ router.include_format_suffixes = False
 router.register(r"transactions", TransactionViewSet, basename="transactions")
 router.register(r"transaction-reflections", TransactionReflectionViewSet, basename="transaction-reflections")
 
-urlpatterns = router.urls
+urlpatterns = [
+    path("", include(router.urls)),
+]
+ 

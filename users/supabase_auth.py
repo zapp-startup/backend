@@ -5,32 +5,35 @@ import threading
 import time
 import uuid
 
-import jwt
+import jwt  # PyJWT
 import requests
-from django.contrib.auth import get_user_model
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm
+from django.contrib.auth import get_user_model
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_URL = os.getenv("SUPABASE_URL")  # e.g. https://xxxx.supabase.co
 SUPABASE_JWT_AUD = os.getenv("SUPABASE_JWT_AUD", "authenticated")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
-SUPABASE_JWT_ISS = os.getenv("SUPABASE_JWT_ISS")
+SUPABASE_JWT_ISS = os.getenv("SUPABASE_JWT_ISS")  # e.g. https://xxxx.supabase.co/auth/v1
 SUPABASE_JWKS_CACHE_TTL_SECONDS = int(os.getenv("SUPABASE_JWKS_CACHE_TTL_SECONDS", "300"))
 
+# How long (seconds) to suppress JWKS refreshes triggered by an unknown kid.
 MISSING_KID_CACHE_TTL = 60
+# Minimum seconds between outbound JWKS refresh attempts.
 JWKS_REFRESH_BACKOFF = 30
 
 _JWKS_LOCK = threading.Lock()
-_JWKS_CACHE = None
+_JWKS_CACHE = None  # simple in-process cache
 _JWKS_CACHE_EXPIRES_AT = 0.0
 _LAST_JWKS_REFRESH_ATTEMPT = 0.0
 
+# kid -> timestamp of first failed lookup; entries expire after MISSING_KID_CACHE_TTL.
 _MISSING_KID_LOCK = threading.Lock()
-_MISSING_KID_CACHE = {}
+_MISSING_KID_CACHE: dict = {}
 
 
 def _get_bearer_token(request):
@@ -69,6 +72,7 @@ def _fetch_jwks(jwks_url: str):
 
 
 def _extract_email(data: dict | None) -> str | None:
+    """Read the canonical top-level email claim from a JWT payload or Supabase user profile."""
     if not data:
         return None
 
@@ -79,6 +83,7 @@ def _extract_email(data: dict | None) -> str | None:
 
 
 def _is_email_verified(data: dict | None) -> bool:
+    """Supabase marks verified emails with a non-null `email_confirmed_at` timestamp."""
     if not data:
         return False
     return bool(data.get("email_confirmed_at"))
@@ -130,6 +135,9 @@ def _fetch_supabase_user(token: str) -> dict:
 
 
 def build_unique_username(base: str) -> str:
+    """
+    Build a unique username from an email-like base.
+    """
     candidate = (base or "").strip().lower() or f"user-{uuid.uuid4().hex[:8]}"
     if not User.objects.filter(username=candidate).exists():
         return candidate
@@ -153,11 +161,20 @@ def _get_jwks_with_refresh(force_refresh: bool):
     with _JWKS_LOCK:
         now = time.time()
 
+        # Return the cached keyset if it is still fresh and no forced refresh was requested.
         if not force_refresh and _JWKS_CACHE is not None and now < _JWKS_CACHE_EXPIRES_AT:
             return _JWKS_CACHE
 
+        # Backoff guard: only suppress refreshes when a prior JWKS cache exists.
         if _JWKS_CACHE is not None and now - _LAST_JWKS_REFRESH_ATTEMPT < JWKS_REFRESH_BACKOFF:
-            return _JWKS_CACHE
+            if _JWKS_CACHE is not None:
+                logger.debug(
+                    "JWKS refresh skipped (backoff active, %.0fs remaining); using cached keys.",
+                    JWKS_REFRESH_BACKOFF - (now - _LAST_JWKS_REFRESH_ATTEMPT),
+                )
+                return _JWKS_CACHE
+        elif _JWKS_CACHE is None and _LAST_JWKS_REFRESH_ATTEMPT:
+            logger.info("JWKS refresh retrying immediately because no cache is available.")
 
         if not SUPABASE_URL:
             logger.error("SUPABASE_URL is missing while fetching Supabase JWKS.")
@@ -284,37 +301,57 @@ class SupabaseJWTAuthentication(BaseAuthentication):
     def authenticate(self, request):
         token = _get_bearer_token(request)
         if not token:
-            return None
+            return None  # DRF treats as unauthenticated
 
         payload = None
         user_data = None
 
         try:
             payload = _verify_and_decode(token)
-        except AuthenticationFailed as exc:
+        except AuthenticationFailed as e:
             logger.warning(
                 "Supabase JWT local validation failed; falling back to /auth/v1/user lookup: %s",
-                exc,
+                e,
             )
 
+        # Some valid Supabase access tokens omit claims this backend expects, so
+        # fall back to the canonical user endpoint to finish validation/profile resolution.
         if payload is None or not _extract_email(payload) or not _is_email_verified(payload):
             user_data = _fetch_supabase_user(token)
 
-        subject = _extract_subject(payload, user_data)
+        sub = _extract_subject(payload, user_data)
         email = _extract_email(payload) or _extract_email(user_data)
 
-        if not subject:
+        if not sub:
             raise AuthenticationFailed("Supabase token missing sub/id.")
         if not email:
             raise AuthenticationFailed("Supabase token missing a usable top-level email claim.")
-        if not (_is_email_verified(payload) or _is_email_verified(user_data)):
-            raise AuthenticationFailed("Supabase token missing a verified top-level email claim.")
 
-        user = User.objects.filter(email__iexact=email).first()
+        if not (_is_email_verified(payload) or _is_email_verified(user_data)):
+            raise AuthenticationFailed(
+                "Supabase token missing a verified top-level email claim."
+            )
+
+        try:
+            supabase_uid = uuid.UUID(str(sub))
+        except Exception:
+            raise AuthenticationFailed("Supabase sub is not a valid UUID.")
+
+
+        # Primary lookup by supabase_uid
+        user = User.objects.filter(supabase_uid=supabase_uid).first()
+
         if user is None:
+            if User.objects.filter(email__iexact=email).exists():
+                raise AuthenticationFailed(
+                    "A local account with this email already exists and must be linked manually."
+                )
+
+            # Create a new Django user row with an unusable local password.
             user = User.objects.create_user(
                 username=build_unique_username(email),
                 email=email,
+                supabase_uid=supabase_uid,
                 password=None,
             )
         elif not user.email:
