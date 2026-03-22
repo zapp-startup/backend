@@ -85,17 +85,23 @@ class ValuationAgent(BaseAgent):
         w = SUBSCRIPTION_VALUE_WEIGHTS
         valuations = []
 
-        # Generate one valuation per quarter
-        current = date(start.year, start.month, 1)
-        while current <= end:
+        started_on = sub.get("started_on") or start
+        lifecycle_end = sub.get("cancelled_on") or end
+        if lifecycle_end < started_on:
+            return valuations
+
+        current = max(start, started_on)
+        while current <= lifecycle_end:
             period_start = current
             period_end = min(
-                date(current.year, current.month, 1) + timedelta(days=89),
-                end,
+                current + timedelta(days=89),
+                lifecycle_end,
             )
 
             usage = clip01(float(rng.beta(2, 3)) * (1 + (sub.get("usage_frequency", 3) / 7.0)))
             price = float(sub.get("price", 10))
+            total_cost = self._period_cost(sub, period_start, period_end)
+            total_cost_float = float(total_cost)
             monthly_income = max(1, float(state.monthly_income))
 
             fit = clip01(
@@ -109,7 +115,8 @@ class ValuationAgent(BaseAgent):
                 + state.regret_sensitivity * 0.2
                 + float(rng.normal(0, 0.1))
             )
-            cost_ratio = min(1.0, price / (monthly_income * 0.05))
+            monthly_cost_equivalent = max(0.01, self._monthly_subscription_cost(sub))
+            cost_ratio = min(1.0, monthly_cost_equivalent / (monthly_income * 0.05))
 
             raw_value = (
                 w["w_usage"] * usage
@@ -120,8 +127,9 @@ class ValuationAgent(BaseAgent):
             )
 
             noise = float(rng.normal(0, 0.05))
-            estimated_value = Decimal(str(round(max(0, (raw_value + noise) * price * 3), 2)))
-            total_cost = Decimal(str(round(price * 3, 2)))  # quarterly
+            estimated_value = Decimal(str(round(
+                max(0, (0.5 + raw_value + noise) * total_cost_float), 2
+            )))
             net_value = estimated_value - total_cost
 
             # Section 15.6: Recommendation mapping
@@ -175,20 +183,40 @@ class ValuationAgent(BaseAgent):
                     "habit_score": round(habit, 3),
                     "friction_score": round(friction, 3),
                     "cost_ratio": round(cost_ratio, 3),
+                    "billing_cycle": sub.get("billing_cycle", "monthly"),
                 },
-                "context": "subscription_renewal",
+                "context": (
+                    "subscription_cancel"
+                    if sub.get("status") == "canceled" and period_end == lifecycle_end
+                    else "subscription_renewal"
+                ),
                 "_sub_ref": sub,
             })
 
-            # Advance by ~3 months
-            month = current.month + 3
-            year = current.year
-            if month > 12:
-                month -= 12
-                year += 1
-            current = date(year, month, 1)
+            current = period_end + timedelta(days=1)
 
         return valuations
+
+    def _monthly_subscription_cost(self, sub: dict) -> float:
+        price = float(sub.get("price", 0) or 0)
+        billing_cycle = sub.get("billing_cycle", "monthly")
+        if billing_cycle == "yearly":
+            return price / 12.0
+        if billing_cycle == "weekly":
+            return price * 52.0 / 12.0
+        return price
+
+    def _period_cost(self, sub: dict, period_start: date, period_end: date) -> Decimal:
+        price = float(sub.get("price", 0) or 0)
+        billing_cycle = sub.get("billing_cycle", "monthly")
+        days_in_period = max(1, (period_end - period_start).days + 1)
+        if billing_cycle == "yearly":
+            daily_cost = price / 365.0
+        elif billing_cycle == "weekly":
+            daily_cost = price / 7.0
+        else:
+            daily_cost = price / 30.0
+        return Decimal(str(round(daily_cost * days_in_period, 2)))
 
     def _valuate_spend_transaction(self, state: UserState, txn: dict) -> dict | None:
         """Create ItemValuation for a spend transaction using merchant + behavioral signals."""

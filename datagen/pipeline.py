@@ -31,7 +31,6 @@ from datagen.distributions import make_rng
 from datagen.state import UserState
 
 User = get_user_model()
-fake = Faker()
 
 
 def _raise_statement_timeout(seconds: int = 300) -> None:
@@ -109,6 +108,7 @@ def run_pipeline(
             user_stats = _generate_one_user(
                 idx=i,
                 rng=user_rng,
+                faker=_build_faker(user_seed),
                 prefix=prefix,
                 password=password,
                 use_llm=use_llm,
@@ -134,6 +134,7 @@ def run_pipeline(
 def _generate_one_user(
     idx: int,
     rng,
+    faker: Faker,
     prefix: str,
     password: str,
     use_llm: bool,
@@ -195,8 +196,8 @@ def _generate_one_user(
         username=username,
         defaults={
             "email": email,
-            "first_name": fake.first_name(),
-            "last_name": fake.last_name(),
+            "first_name": faker.first_name(),
+            "last_name": faker.last_name(),
         },
     )
     if created:
@@ -363,6 +364,14 @@ def _persist_merchants(catalog: list[dict]) -> dict:
         db_map[m["name"]] = obj
 
     return db_map
+
+
+def _build_faker(seed: int | None = None) -> Faker:
+    """Create a per-user Faker instance so seeded runs are reproducible."""
+    faker = Faker()
+    if seed is not None:
+        faker.seed_instance(seed)
+    return faker
 
 
 def _persist_subscriptions(user, sub_dicts: list[dict], merchant_db_map: dict):
@@ -622,6 +631,24 @@ def _persist_conversations(user, convo_dicts: list[dict],
 
     db_convos = Conversation.objects.bulk_create(convos_to_create, batch_size=50)
 
+    convo_updates = []
+    for i, cd in enumerate(convo_dicts):
+        convo = db_convos[i]
+        created_at = cd.get("created_at")
+        if created_at is None:
+            continue
+        last_message_at = created_at
+        messages = cd.get("messages", [])
+        if messages:
+            last_message_at = messages[-1].get("created_at") or created_at
+        convo.created_at = created_at
+        convo.updated_at = last_message_at
+        convo_updates.append(convo)
+    if convo_updates:
+        Conversation.objects.bulk_update(
+            convo_updates, ["created_at", "updated_at"], batch_size=50
+        )
+
     # Bulk-create all messages (conversations have PKs on PostgreSQL)
     all_messages = []
     for i, cd in enumerate(convo_dicts):
@@ -633,7 +660,18 @@ def _persist_conversations(user, convo_dicts: list[dict],
                 content=msg.get("content", ""),
             ))
     if all_messages:
-        Message.objects.bulk_create(all_messages, batch_size=500)
+        db_messages = Message.objects.bulk_create(all_messages, batch_size=500)
+        message_updates = []
+        msg_idx = 0
+        for cd in convo_dicts:
+            for msg in cd.get("messages", []):
+                created_at = msg.get("created_at")
+                if created_at is not None:
+                    db_messages[msg_idx].created_at = created_at
+                    message_updates.append(db_messages[msg_idx])
+                msg_idx += 1
+        if message_updates:
+            Message.objects.bulk_update(message_updates, ["created_at"], batch_size=500)
 
     return db_convos
 

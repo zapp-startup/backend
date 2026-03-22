@@ -176,9 +176,12 @@ class PersonaAgent(BaseAgent):
         employment_type = str(rng.choice(ARCHETYPE_EMPLOYMENT[arch]))
         life_stage = str(rng.choice(ARCHETYPE_LIFE_STAGE[arch]))
 
-        dob = date(date.today().year - state.age, 
-                    int(rng.integers(1, 13)), 
-                    int(rng.integers(1, 29)))
+        reference_year = context["end_date"].year
+        dob = date(
+            reference_year - state.age,
+            int(rng.integers(1, 13)),
+            int(rng.integers(1, 29)),
+        )
 
         # Value priority sliders (0-100) conditioned on traits
         vp_cost = int(max(10, min(95, state.budget_adherence * 60 + (1 - state.quality_preference) * 40 + rng.normal(0, 8))))

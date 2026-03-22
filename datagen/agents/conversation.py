@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 
 from datagen.agents.base import BaseAgent
 from datagen.config import CONVERSATION_LAMBDA_BASE, CONVERSATION_LAMBDA_ENGAGED, MESSAGE_COUNT_NU
-from datagen.distributions import sample_poisson
+from datagen.distributions import make_aware_dt, sample_poisson
 from datagen.state import UserState
 from datagen.text import generate_conversation_messages
 
@@ -51,10 +51,15 @@ class ConversationAgent(BaseAgent):
 
             # Conversation timestamp
             days_range = max(1, (end_date - start_date).days)
-            convo_start = datetime(
-                start_date.year, start_date.month, start_date.day,
-                int(rng.integers(8, 22)), int(rng.integers(0, 60))
-            ) + timedelta(days=int(rng.integers(0, days_range)))
+            convo_start = make_aware_dt(
+                datetime(
+                    start_date.year,
+                    start_date.month,
+                    start_date.day,
+                    int(rng.integers(8, 22)),
+                    int(rng.integers(0, 60)),
+                ) + timedelta(days=int(rng.integers(0, days_range)))
+            )
 
             # Linked entities
             linked_sub_idx = None
@@ -93,8 +98,11 @@ class ConversationAgent(BaseAgent):
             )
 
             # Add timestamps to messages
+            msg_time = convo_start
             for i, msg in enumerate(messages):
-                msg["created_at"] = convo_start + timedelta(minutes=i * int(rng.integers(1, 5)))
+                if i > 0:
+                    msg_time += timedelta(minutes=int(rng.integers(1, 5)))
+                msg["created_at"] = msg_time
 
             # Title
             title_map = {
