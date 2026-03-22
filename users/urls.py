@@ -1,6 +1,8 @@
+from django.urls import path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    SupabaseUserSyncView,
     UserRawExplicitViewSet,
     UserRawInferredViewSet,
     UserComputedViewSet,
@@ -14,4 +16,7 @@ router.register(r"raw-inferred", UserRawInferredViewSet, basename="raw-inferred"
 router.register(r"computed", UserComputedViewSet, basename="computed")
 router.register(r"preferences", UserPreferenceViewSet, basename="preferences")
 
-urlpatterns = router.urls
+urlpatterns = [
+    path("auth/sync/", SupabaseUserSyncView.as_view(), name="supabase-user-sync"),
+    *router.urls,
+]

@@ -1,4 +1,6 @@
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 from rest_framework.exceptions import PermissionDenied
 
@@ -86,3 +88,24 @@ class UserPreferenceViewSet(ModelViewSet):
         if obj.user_id != self.request.user.id:
             raise PermissionDenied("You can only access your own preferences.")
         return obj
+
+
+class SupabaseUserSyncView(APIView):
+    """
+    Sync the authenticated Supabase session into a backend user profile payload.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        auth_context = request.auth or {}
+
+        return Response(
+            {
+                "id": user.id,
+                "email": user.email,
+                "username": user.username,
+                "supabase_uid": auth_context.get("supabase_uid"),
+            }
+        )
