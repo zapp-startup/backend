@@ -36,6 +36,9 @@ AUTH_USER_MODEL = "users.User"
 
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip() or None
 OPENAI_MODEL = (os.getenv("OPENAI_MODEL") or "gpt-4.1-mini").strip()
+API_THROTTLE_ANON_RATE = (os.getenv("API_THROTTLE_ANON_RATE") or "30/minute").strip()
+API_THROTTLE_USER_RATE = (os.getenv("API_THROTTLE_USER_RATE") or "120/minute").strip()
+API_THROTTLE_AI_RATE = (os.getenv("API_THROTTLE_AI_RATE") or "20/minute").strip()
 
 
 # Application definition
@@ -121,6 +124,16 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "users.supabase_auth.SupabaseJWTAuthentication",
     ),
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.ScopedRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": API_THROTTLE_ANON_RATE,
+        "user": API_THROTTLE_USER_RATE,
+        "ai": API_THROTTLE_AI_RATE,
+    },
 }
 
 

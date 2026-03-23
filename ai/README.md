@@ -35,3 +35,13 @@ Expected metadata includes:
 - `action_status = "routing_options"`
 - `created_transaction_id = null`
 - `quick_actions` with routes like `/transactions/new`, `/subscriptions`, `/subscriptions/new`, `/valuations/new`
+
+## Rate limiting
+
+Django REST Framework throttling is enabled by default for the backend. You can tune the limits with these optional environment variables:
+
+- `API_THROTTLE_ANON_RATE` (default: `30/minute`)
+- `API_THROTTLE_USER_RATE` (default: `120/minute`)
+- `API_THROTTLE_AI_RATE` (default: `20/minute`)
+
+The AI conversation endpoints use the stricter `API_THROTTLE_AI_RATE` scope, while the rest of the API continues to use the general anonymous/authenticated API limits.
