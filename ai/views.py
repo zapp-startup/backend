@@ -433,6 +433,7 @@ def get_dev_user(request):
 
 class ConversationViewSet(ModelViewSet):
     serializer_class = ConversationSerializer
+    throttle_scope = "ai"
 
     def get_queryset(self):
         user = get_dev_user(self.request)
@@ -542,6 +543,7 @@ class ConversationViewSet(ModelViewSet):
 
 class MessageViewSet(ModelViewSet):
     serializer_class = MessageSerializer
+    throttle_scope = "ai"
 
     def get_queryset(self):
         # Optional: keep this for debugging, but still lock down by user
@@ -553,6 +555,7 @@ class MessageViewSet(ModelViewSet):
 
 class UserFactViewSet(ModelViewSet):
     serializer_class = UserFactSerializer
+    throttle_scope = "ai"
 
     def get_queryset(self):
         user = get_dev_user(self.request)

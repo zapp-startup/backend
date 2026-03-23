@@ -1,7 +1,9 @@
 from datetime import timedelta
 from decimal import Decimal
 
-from django.test import TestCase
+from django.conf import settings
+from django.core.cache import cache
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -184,6 +186,50 @@ class ConversationMessagesTests(TestCase):
         self.assertIsNotNone(self.conversation.last_summarized_message_id)
         self.assertEqual(self.conversation.session_state_json["active_goal"], "general_guidance")
         self.assertLessEqual(len(self.conversation.session_state_json["open_loops"]), 3)
+
+
+class AIRateLimitingTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="seed_user_rate_limit", password="testpass")
+        self.conversation = Conversation.objects.create(
+            user=self.user,
+            context_type=ConversationContext.GENERAL,
+        )
+
+    def tearDown(self):
+        cache.clear()
+
+    @override_settings(
+        REST_FRAMEWORK={
+            **settings.REST_FRAMEWORK,
+            "DEFAULT_THROTTLE_CLASSES": (
+                "rest_framework.throttling.ScopedRateThrottle",
+            ),
+            "DEFAULT_THROTTLE_RATES": {
+                **settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"],
+                "ai": "1/minute",
+            },
+        }
+    )
+    def test_ai_message_endpoint_returns_429_after_scope_limit_is_hit(self):
+        cache.clear()
+
+        first_response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/",
+            {"content": "Help me with my budget."},
+            format="json",
+            HTTP_X_DEV_USER="seed_user_rate_limit",
+        )
+        second_response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/",
+            {"content": "Help me with my subscriptions."},
+            format="json",
+            HTTP_X_DEV_USER="seed_user_rate_limit",
+        )
+
+        self.assertEqual(first_response.status_code, 201)
+        self.assertEqual(second_response.status_code, 429)
 
 
 class IntentClassificationTests(TestCase):
