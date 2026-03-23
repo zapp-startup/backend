@@ -153,29 +153,15 @@ class ValuationAgent(BaseAgent):
             )))
             net_value = estimated_value - total_cost
 
-            keep_logit = (
-                w["w_usage"] * usage
-                + w["w_habit"] * habit
-                - w["w_friction"] * friction
-                - w["w_cost"] * cost_share
-                - burden_penalty
-                - price_pressure
+            rec = self._subscription_recommendation(
+                state=state,
+                net_value=net_value,
+                usage=usage,
+                cost_share=cost_share,
+                monthly_income=monthly_income,
+                fit=fit,
+                friction=friction,
             )
-            cancel_logit = -keep_logit
-            wait_logit = 0.0
-
-            if usage < 0.15 and cost_share > 0.08:
-                rec = "skip" if rng.random() < 0.80 else _softmax_choice(
-                    rng, [keep_logit, wait_logit, cancel_logit], ("buy", "wait", "skip")
-                )
-            else:
-                rec = _softmax_choice(
-                    rng,
-                    [keep_logit + float(rng.normal(0, 0.3)),
-                     wait_logit + float(rng.normal(0, 0.25)),
-                     cancel_logit + float(rng.normal(0, 0.3))],
-                    ("buy", "wait", "skip"),
-                )
 
             signal_count = 3 + int(usage > 0.3) + int(habit > 0.5)
             net_ratio = float(net_value) / max(0.01, float(total_cost))
@@ -231,6 +217,76 @@ class ValuationAgent(BaseAgent):
             current = period_end + timedelta(days=1)
 
         return valuations
+
+    def _subscription_recommendation(
+        self,
+        *,
+        state: UserState,
+        net_value: Decimal,
+        usage: float,
+        cost_share: float,
+        monthly_income: float,
+        fit: float,
+        friction: float,
+    ) -> str:
+        """
+        Probabilistic buy / wait / skip from net value, usage, burden, liquidity, income.
+        buy ~= keep; strongly negative net value rarely yields buy.
+        """
+        rng = self.rng
+        net_f = float(net_value)
+        liq_n = state.liquidity_numeric()
+        burden_shift = {
+            "light": 0.0,
+            "normal": 0.35,
+            "stretched": 1.25,
+            "overloaded": 2.1,
+        }.get(state.subscription_burden_state, 0.35)
+
+        income_rel = min(1.5, monthly_income / max(1.0, 4000.0))
+
+        buy = (
+            1.15 * usage
+            + 0.45 * fit
+            - 0.85 * friction
+            - 8.5 * cost_share
+            - burden_shift
+            - 1.1 * liq_n
+            + 0.25 * income_rel
+        )
+        if net_f < -15:
+            buy -= 10.0 + 0.05 * abs(net_f + 15)
+        elif net_f < -10:
+            buy -= 5.5
+            if usage < 0.48:
+                buy -= 3.2
+
+        wait = (
+            -0.12 * net_f / max(8.0, abs(net_f) * 0.15 + 8.0)
+            - 0.25 * abs(usage - 0.45)
+            + 0.15 * friction
+            + float(rng.normal(0, 0.08))
+        )
+
+        skip = (
+            -0.55 * usage
+            - 0.35 * fit
+            + 0.55 * friction
+            + 6.0 * cost_share
+            + burden_shift * 0.9
+            + 0.9 * liq_n
+        )
+        if net_f < -10 and usage < 0.52:
+            skip += 2.8
+        if net_f < -15:
+            skip += 1.8
+
+        logits = [
+            buy + float(rng.normal(0, 0.32)),
+            wait + float(rng.normal(0, 0.26)),
+            skip + float(rng.normal(0, 0.32)),
+        ]
+        return _softmax_choice(rng, logits, ("buy", "wait", "skip"))
 
     def _monthly_subscription_cost(self, sub: dict) -> float:
         price = float(sub.get("price", 0) or 0)

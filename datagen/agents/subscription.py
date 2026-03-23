@@ -24,11 +24,26 @@ from datagen.config import (
     REACTIVATION_PROBABILITY,
     SUBSCRIPTION_CATEGORIES,
     SUBSCRIPTION_COUNT_LAMBDA,
+    SUBSCRIPTION_MERCHANT_PRICE_TIERS,
     SUBSCRIPTION_PRICE_LOGNORMAL,
     TRIAL_PROBABILITY,
 )
 from datagen.distributions import make_aware_dt, sample_lognormal_decimal, sample_poisson
 from datagen.state import UserState
+
+
+def _sample_tier_price(rng, tiers: list[tuple[str, float]]) -> Decimal:
+    r = rng.random()
+    acc = 0.0
+    chosen = tiers[0][0]
+    for price_s, w in tiers:
+        acc += w
+        if r <= acc:
+            chosen = price_s
+            break
+    base = Decimal(chosen)
+    noise = Decimal(str(round(float(rng.normal(0, 0.22)), 2)))
+    return max(Decimal("0.99"), base + noise)
 
 
 def _monthly_subscription_cost(sub: dict) -> float:
@@ -43,6 +58,33 @@ def _monthly_subscription_cost(sub: dict) -> float:
 
 class SubscriptionAgent(BaseAgent):
     """Generate subscriptions and their recurring charge transactions."""
+
+    def _price_for_merchant(self, merch: dict, sub_cat: str) -> Decimal:
+        rng = self.rng
+        name = merch.get("name", "")
+        tiers = SUBSCRIPTION_MERCHANT_PRICE_TIERS.get(name)
+        if tiers:
+            return _sample_tier_price(rng, tiers)
+        mu, sig = SUBSCRIPTION_PRICE_LOGNORMAL.get(
+            sub_cat, SUBSCRIPTION_PRICE_LOGNORMAL["streaming"]
+        )
+        base_price = sample_lognormal_decimal(rng, mu, sig)
+        return max(Decimal("1.99"), min(Decimal("99.99"), base_price))
+
+    def _yearly_billing_draw(self, merch: dict, sub_cat: str) -> bool:
+        rng = self.rng
+        mode = merch.get("yearly_billing_mode")
+        if mode == "forbidden":
+            return False
+        if mode == "rare":
+            return rng.random() < 0.02
+        if mode == "low":
+            return rng.random() < 0.08
+        if mode == "normal":
+            p = ANNUAL_BILLING_PROBABILITY.get(sub_cat, ANNUAL_BILLING_PROBABILITY["default"])
+            return rng.random() < p
+        p = min(ANNUAL_BILLING_PROBABILITY.get(sub_cat, ANNUAL_BILLING_PROBABILITY["default"]), 0.12)
+        return rng.random() < p
 
     def run(self, state: UserState, context: dict) -> dict:
         rng = self.rng
@@ -63,19 +105,15 @@ class SubscriptionAgent(BaseAgent):
 
         for i, merch in enumerate(sub_merchants):
             sub_cat = str(rng.choice(SUBSCRIPTION_CATEGORIES))
-            price_mu, price_sig = SUBSCRIPTION_PRICE_LOGNORMAL.get(
-                sub_cat, SUBSCRIPTION_PRICE_LOGNORMAL["streaming"]
-            )
-            base_price = sample_lognormal_decimal(rng, price_mu, price_sig)
-            base_price = max(Decimal("1.99"), min(Decimal("99.99"), base_price))
+            base_price = self._price_for_merchant(merch, sub_cat)
 
-            # Annual vs monthly billing
-            annual_p = ANNUAL_BILLING_PROBABILITY.get(sub_cat, ANNUAL_BILLING_PROBABILITY["default"])
-            is_annual = rng.random() < annual_p
+            is_annual = self._yearly_billing_draw(merch, sub_cat)
             billing_cycle = "yearly" if is_annual else "monthly"
 
             if is_annual:
-                base_price = Decimal(str(round(float(base_price) * 10, 2)))
+                monthly_equiv = float(base_price)
+                annual = monthly_equiv * 12.0 * float(rng.uniform(0.96, 1.04))
+                base_price = Decimal(str(round(annual, 2)))
 
             # Trial probability
             has_trial = rng.random() < rng.uniform(*TRIAL_PROBABILITY)

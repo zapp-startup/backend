@@ -8,7 +8,11 @@ from __future__ import annotations
 from decimal import Decimal
 
 from datagen.agents.base import BaseAgent
-from datagen.config import MERCHANT_CATEGORY_COMPAT
+from datagen.config import (
+    MERCHANT_CATEGORY_COMPAT,
+    MERCHANT_FAMILY_DEFAULT_SPEND_CATEGORY,
+    compat_status_family,
+)
 from datagen.state import UserState
 
 
@@ -24,6 +28,7 @@ class AuditAgent(BaseAgent):
         repairs.extend(self._check_subscription_charges(context))
         repairs.extend(self._check_income_plausibility(state, context))
         repairs.extend(self._check_refund_matching(context))
+        repairs.extend(self._semantic_repair_spend_transactions(context))
         repairs.extend(self._check_merchant_category_compat(context))
         repairs.extend(self._check_valuation_realism(context))
         repairs.extend(self._check_conversation_dedup(context))
@@ -257,15 +262,94 @@ class AuditAgent(BaseAgent):
         context["anomaly_transactions"] = to_keep
         return repairs
 
+    def _txn_merchant_spend_compat(self, txn: dict) -> str:
+        merch = txn.get("merchant_info") or {}
+        fam = txn.get("merchant_family") or merch.get("merchant_family")
+        sc = txn.get("spend_category", "")
+        if fam and sc:
+            return compat_status_family(fam, sc)
+        mc = merch.get("category", "other")
+        return MERCHANT_CATEGORY_COMPAT.get((mc, sc), "allowed")
+
+    def _semantic_repair_spend_transactions(self, context: dict) -> list[str]:
+        """Fix category, then merchant; drop only if still invalid (tail cleanup)."""
+        repairs: list[str] = []
+        merchant_agent = context.get("merchant_agent")
+        catalog = context.get("merchant_catalog") or []
+        spend_txns = list(context.get("spend_transactions") or [])
+        if not spend_txns:
+            return repairs
+
+        def spend_to_txn_cat(sc: str) -> str:
+            return {
+                "groceries": "groceries",
+                "dining": "eating_out",
+                "transport": "transport",
+                "shopping": "shopping",
+                "entertainment": "entertainment",
+                "health": "health",
+                "travel": "other",
+            }.get(sc, "other")
+
+        fixed: list[dict] = []
+        for txn in spend_txns:
+            merch = txn.get("merchant_info") or {}
+            fam = txn.get("merchant_family") or merch.get("merchant_family", "")
+            sc = txn.get("spend_category", "")
+            if not fam or not sc:
+                fixed.append(txn)
+                continue
+            st = compat_status_family(fam, sc)
+            if st == "allowed":
+                fixed.append(txn)
+                continue
+            if st == "rare" and txn.get("_anomaly") == "mislabel":
+                fixed.append(txn)
+                continue
+
+            pref = MERCHANT_FAMILY_DEFAULT_SPEND_CATEGORY.get(fam)
+            if pref and compat_status_family(fam, pref) == "allowed":
+                txn["spend_category"] = pref
+                txn["category"] = spend_to_txn_cat(pref)
+                repairs.append(f"semantic_repair: aligned spend to family {fam} -> {pref}")
+                st = "allowed"
+
+            if st == "allowed":
+                fixed.append(txn)
+                continue
+
+            if merchant_agent and catalog:
+                sc2 = txn.get("spend_category", sc)
+                new_m = merchant_agent.pick_merchant_for_family(
+                    fam, sc2, catalog, anomaly_mode=False,
+                )
+                if new_m:
+                    txn["merchant_info"] = new_m
+                    txn["merchant_family"] = new_m.get("merchant_family", fam)
+                    txn["description_raw"] = merchant_agent.render_description_raw(
+                        new_m["name"], new_m.get("domain", ""),
+                    )
+                    if compat_status_family(txn["merchant_family"], txn["spend_category"]) == "allowed":
+                        repairs.append("semantic_repair: resampled merchant in family")
+                        fixed.append(txn)
+                        continue
+
+            repairs.append(
+                f"semantic_repair: dropped row {merch.get('name', '?')} family={fam} spend={sc}"
+            )
+
+        context["spend_transactions"] = fixed
+        return repairs
+
     def _check_merchant_category_compat(self, context: dict) -> list[str]:
         repairs = []
         for txn in context.get("spend_transactions", []):
-            merch = txn.get("merchant_info") or {}
-            mc = merch.get("category", "other")
-            sc = txn.get("spend_category", "")
-            status = MERCHANT_CATEGORY_COMPAT.get((mc, sc), "allowed")
+            status = self._txn_merchant_spend_compat(txn)
             if status == "disallowed":
-                repairs.append(f"compat: disallowed mapping {mc}->{sc}")
+                merch = txn.get("merchant_info") or {}
+                fam = txn.get("merchant_family") or merch.get("merchant_family", "")
+                sc = txn.get("spend_category", "")
+                repairs.append(f"compat: disallowed mapping family={fam}->{sc}")
         return repairs
 
     def _check_conversation_dedup(self, context: dict) -> list[str]:

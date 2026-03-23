@@ -279,12 +279,6 @@ CANCEL_CHURN_GAMMA = 0.04
 CANCEL_TIGHT_GAMMA = 0.03
 REACTIVATION_PROBABILITY = (0.05, 0.20)
 FAILED_CHARGE_PROBABILITY = (0.005, 0.02)
-ANNUAL_BILLING_PROBABILITY = {
-    "software": 0.40,
-    "cloud_storage": 0.35,
-    "education": 0.30,
-    "default": 0.10,
-}
 
 # ---------------------------------------------------------------------------
 # Section 14  Anomaly probabilities (Section 19 defaults table)
@@ -515,6 +509,153 @@ MERCHANT_CATEGORY_COMPAT: dict[tuple[str, str], str] = {
 }
 
 # ---------------------------------------------------------------------------
+# Merchant family x internal spend_category (SpendAgent keys) compatibility
+# Primary guard for intent-first generation; overrides loose (mc, sc) pairs.
+# ---------------------------------------------------------------------------
+def _fs(f: str, s: str) -> tuple[str, str]:
+    return (f, s)
+
+
+FAMILY_SPEND_COMPAT: dict[tuple[str, str], str] = {
+    _fs("pharmacy", "groceries"): "rare",
+    _fs("pharmacy", "health"): "allowed",
+    _fs("pharmacy", "transport"): "disallowed",
+    _fs("pharmacy", "shopping"): "rare",
+    _fs("pharmacy", "dining"): "disallowed",
+    _fs("fuel", "transport"): "allowed",
+    _fs("fuel", "shopping"): "disallowed",
+    _fs("fuel", "groceries"): "disallowed",
+    _fs("rideshare", "transport"): "allowed",
+    _fs("rideshare", "shopping"): "disallowed",
+    _fs("rideshare", "groceries"): "disallowed",
+    _fs("ecommerce", "shopping"): "allowed",
+    _fs("ecommerce", "groceries"): "rare",
+    _fs("ecommerce", "transport"): "disallowed",
+    _fs("grocery_retail", "groceries"): "allowed",
+    _fs("grocery_retail", "dining"): "rare",
+    _fs("grocery_retail", "shopping"): "rare",
+    _fs("food_quick", "dining"): "allowed",
+    _fs("delivery_membership", "dining"): "allowed",
+    _fs("delivery_membership", "groceries"): "disallowed",
+    _fs("retail_big_box", "shopping"): "allowed",
+    _fs("retail_big_box", "groceries"): "rare",
+    _fs("streaming", "entertainment"): "allowed",
+    _fs("streaming", "subscriptions"): "allowed",
+    _fs("software", "subscriptions"): "allowed",
+    _fs("software", "shopping"): "allowed",
+    _fs("fitness", "health"): "allowed",
+    _fs("utilities", "utilities"): "allowed",
+    _fs("telecom", "utilities"): "allowed",
+    _fs("food", "dining"): "allowed",
+    _fs("education", "education"): "allowed",
+}
+
+
+def compat_status_family(merchant_family: str, spend_category: str) -> str:
+    """Compatibility for intent-first spend: allowed | rare | disallowed."""
+    return FAMILY_SPEND_COMPAT.get((merchant_family, spend_category), "allowed")
+
+
+# When repair fixes a row, map merchant_family -> canonical internal spend_category
+MERCHANT_FAMILY_DEFAULT_SPEND_CATEGORY: dict[str, str] = {
+    "pharmacy": "health",
+    "fuel": "transport",
+    "rideshare": "transport",
+    "ecommerce": "shopping",
+    "grocery_retail": "groceries",
+    "delivery_membership": "dining",
+    "food_quick": "dining",
+    "retail_big_box": "shopping",
+    "utilities": "utilities",
+    "telecom": "utilities",
+    "streaming": "entertainment",
+    "software": "shopping",
+    "fitness": "health",
+    "education": "education",
+    "food": "dining",
+}
+
+# DB TransactionCategory value strings -> SpendAgent internal keys
+TXN_CATEGORY_TO_SPEND: dict[str, str] = {
+    "groceries": "groceries",
+    "eating_out": "dining",
+    "transport": "transport",
+    "shopping": "shopping",
+    "entertainment": "entertainment",
+    "health": "health",
+    "education": "education",
+    "subscriptions": "subscriptions",
+    "bills": "utilities",
+    "other": "travel",
+}
+
+
+# LogNormal-ish (mu, sigma) for amount sampling after merchant family is chosen
+AMOUNT_PRIORS_BY_FAMILY: dict[str, tuple[float, float]] = {
+    "rideshare": (2.7, 0.45),
+    "fuel": (3.1, 0.35),
+    "pharmacy": (3.5, 0.45),
+    "grocery_retail": (3.9, 0.42),
+    "ecommerce": (3.5, 0.55),
+    "food_quick": (3.0, 0.50),
+    "delivery_membership": (3.2, 0.45),
+    "retail_big_box": (3.6, 0.48),
+    "streaming": (2.6, 0.28),
+    "software": (2.7, 0.35),
+    "fitness": (3.1, 0.38),
+    "utilities": (4.2, 0.25),
+    "telecom": (4.3, 0.28),
+    "food": (2.8, 0.35),
+    "education": (3.0, 0.40),
+}
+
+# Merchant-specific subscription monthly price tiers (weights sum ~1); small noise applied in agent
+SUBSCRIPTION_MERCHANT_PRICE_TIERS: dict[str, list[tuple[str, float]]] = {
+    "Netflix": [("15.49", 0.45), ("24.99", 0.40), ("6.99", 0.15)],
+    "Spotify": [("10.99", 0.55), ("16.99", 0.45)],
+    "Hulu": [("7.99", 0.35), ("17.99", 0.65)],
+    "Disney+": [("13.99", 0.6), ("19.99", 0.4)],
+    "YouTube Premium": [("13.99", 0.7), ("22.99", 0.3)],
+    "Apple Music": [("10.99", 0.6), ("16.99", 0.4)],
+    "HBO Max": [("15.99", 0.5), ("19.99", 0.5)],
+    "Amazon Prime": [("14.99", 0.85), ("7.49", 0.15)],
+    "Apple iCloud": [("0.99", 0.2), ("2.99", 0.35), ("9.99", 0.45)],
+    "Google One": [("1.99", 0.25), ("2.99", 0.35), ("9.99", 0.40)],
+    "Dropbox": [("11.99", 0.5), ("19.99", 0.5)],
+    "Microsoft 365": [("6.99", 0.3), ("9.99", 0.45), ("12.99", 0.25)],
+    "Adobe Creative Cloud": [("54.99", 0.7), ("79.49", 0.3)],
+    "Planet Fitness": [("10.00", 0.4), ("24.99", 0.6)],
+    "LA Fitness": [("34.99", 0.6), ("44.99", 0.4)],
+    "Peloton": [("44.00", 0.5), ("12.99", 0.5)],
+    "Xfinity": [("89.99", 0.4), ("119.99", 0.35), ("149.99", 0.25)],
+    "ComEd": [("95.00", 0.5), ("120.00", 0.5)],
+    "AT&T": [("75.00", 0.4), ("85.00", 0.35), ("95.00", 0.25)],
+    "Verizon": [("80.00", 0.4), ("90.00", 0.35), ("100.00", 0.25)],
+    "T-Mobile": [("70.00", 0.45), ("85.00", 0.35), ("95.00", 0.2)],
+    "DoorDash": [("9.99", 0.85), ("4.99", 0.15)],
+    "Uber Eats": [("9.99", 0.8), ("4.99", 0.2)],
+    "Grubhub": [("9.99", 0.9), ("4.99", 0.1)],
+    "Coursera": [("49.00", 0.5), ("59.00", 0.5)],
+    "Udemy": [("20.00", 0.6), ("29.99", 0.4)],
+    "LinkedIn Learning": [("39.99", 0.7), ("29.99", 0.3)],
+}
+
+# Yearly billing: forbidden (utilities, food memberships), rare telecom, normal streaming/software
+ANNUAL_BILLING_PROBABILITY = {
+    "software": 0.22,
+    "cloud_storage": 0.18,
+    "education": 0.12,
+    "streaming": 0.20,
+    "music": 0.15,
+    "fitness": 0.12,
+    "gaming": 0.10,
+    "food_delivery": 0.02,
+    "productivity": 0.12,
+    "news": 0.08,
+    "default": 0.08,
+}
+
+# ---------------------------------------------------------------------------
 # Section 16  AI Conversation Agent parameters
 # ---------------------------------------------------------------------------
 CONVERSATION_LAMBDA_BASE = 2.0
@@ -526,50 +667,51 @@ FACT_MIN_OBSERVATIONS = 3
 # Merchant catalog for Merchant Agent (Section 9)
 # ---------------------------------------------------------------------------
 # eligibility: not_subscribable | membership | standard_subscription | utility_recurring | insurance_recurring
+# merchant_family: intent-first routing (SpendAgent); yearly_billing_mode: subscription yearly eligibility
 MERCHANT_CATALOG: list[dict] = [
-    {"name": "Netflix", "category": "streaming", "domain": "netflix.com", "eligibility": "standard_subscription"},
-    {"name": "Spotify", "category": "streaming", "domain": "spotify.com", "eligibility": "standard_subscription"},
-    {"name": "Hulu", "category": "streaming", "domain": "hulu.com", "eligibility": "standard_subscription"},
-    {"name": "Disney+", "category": "streaming", "domain": "disneyplus.com", "eligibility": "standard_subscription"},
-    {"name": "YouTube Premium", "category": "streaming", "domain": "youtube.com", "eligibility": "standard_subscription"},
-    {"name": "Apple Music", "category": "streaming", "domain": "apple.com", "eligibility": "standard_subscription"},
-    {"name": "HBO Max", "category": "streaming", "domain": "max.com", "eligibility": "standard_subscription"},
-    {"name": "Amazon Prime", "category": "software", "domain": "amazon.com", "eligibility": "standard_subscription"},
-    {"name": "Apple iCloud", "category": "software", "domain": "apple.com/icloud", "eligibility": "standard_subscription"},
-    {"name": "Google One", "category": "software", "domain": "one.google.com", "eligibility": "standard_subscription"},
-    {"name": "Dropbox", "category": "software", "domain": "dropbox.com", "eligibility": "standard_subscription"},
-    {"name": "Microsoft 365", "category": "software", "domain": "microsoft.com", "eligibility": "standard_subscription"},
-    {"name": "Adobe Creative Cloud", "category": "software", "domain": "adobe.com", "eligibility": "standard_subscription"},
-    {"name": "Planet Fitness", "category": "fitness", "domain": "planetfitness.com", "eligibility": "membership"},
-    {"name": "LA Fitness", "category": "fitness", "domain": "lafitness.com", "eligibility": "membership"},
-    {"name": "Peloton", "category": "fitness", "domain": "onepeloton.com", "eligibility": "standard_subscription"},
-    {"name": "Xfinity", "category": "utilities", "domain": "xfinity.com", "eligibility": "utility_recurring"},
-    {"name": "ComEd", "category": "utilities", "domain": "comed.com", "eligibility": "utility_recurring"},
-    {"name": "AT&T", "category": "utilities", "domain": "att.com", "eligibility": "utility_recurring"},
-    {"name": "Verizon", "category": "utilities", "domain": "verizon.com", "eligibility": "utility_recurring"},
-    {"name": "T-Mobile", "category": "utilities", "domain": "t-mobile.com", "eligibility": "utility_recurring"},
-    {"name": "DoorDash", "category": "food", "domain": "doordash.com", "eligibility": "membership"},
-    {"name": "Uber Eats", "category": "food", "domain": "ubereats.com", "eligibility": "membership"},
-    {"name": "Grubhub", "category": "food", "domain": "grubhub.com", "eligibility": "membership"},
-    {"name": "Walmart", "category": "grocery", "domain": "walmart.com", "eligibility": "not_subscribable"},
-    {"name": "Target", "category": "grocery", "domain": "target.com", "eligibility": "not_subscribable"},
-    {"name": "Costco", "category": "grocery", "domain": "costco.com", "eligibility": "membership"},
-    {"name": "Whole Foods", "category": "grocery", "domain": "wholefoodsmarket.com", "eligibility": "not_subscribable"},
-    {"name": "Kroger", "category": "grocery", "domain": "kroger.com", "eligibility": "not_subscribable"},
-    {"name": "Trader Joe's", "category": "grocery", "domain": "traderjoes.com", "eligibility": "not_subscribable"},
-    {"name": "Coursera", "category": "education", "domain": "coursera.org", "eligibility": "standard_subscription"},
-    {"name": "Udemy", "category": "education", "domain": "udemy.com", "eligibility": "standard_subscription"},
-    {"name": "LinkedIn Learning", "category": "education", "domain": "linkedin.com", "eligibility": "standard_subscription"},
-    {"name": "Starbucks", "category": "food", "domain": "starbucks.com", "eligibility": "not_subscribable"},
-    {"name": "Chipotle", "category": "food", "domain": "chipotle.com", "eligibility": "not_subscribable"},
-    {"name": "McDonald's", "category": "food", "domain": "mcdonalds.com", "eligibility": "not_subscribable"},
-    {"name": "Amazon", "category": "other", "domain": "amazon.com", "eligibility": "not_subscribable"},
-    {"name": "Walgreens", "category": "other", "domain": "walgreens.com", "eligibility": "not_subscribable"},
-    {"name": "CVS Pharmacy", "category": "other", "domain": "cvs.com", "eligibility": "not_subscribable"},
-    {"name": "Shell", "category": "other", "domain": "shell.com", "eligibility": "not_subscribable"},
-    {"name": "Chevron", "category": "other", "domain": "chevron.com", "eligibility": "not_subscribable"},
-    {"name": "Lyft", "category": "other", "domain": "lyft.com", "eligibility": "not_subscribable"},
-    {"name": "Uber", "category": "other", "domain": "uber.com", "eligibility": "not_subscribable"},
+    {"name": "Netflix", "category": "streaming", "merchant_family": "streaming", "domain": "netflix.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Spotify", "category": "streaming", "merchant_family": "streaming", "domain": "spotify.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Hulu", "category": "streaming", "merchant_family": "streaming", "domain": "hulu.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Disney+", "category": "streaming", "merchant_family": "streaming", "domain": "disneyplus.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "YouTube Premium", "category": "streaming", "merchant_family": "streaming", "domain": "youtube.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Apple Music", "category": "streaming", "merchant_family": "streaming", "domain": "apple.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "HBO Max", "category": "streaming", "merchant_family": "streaming", "domain": "max.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Amazon Prime", "category": "software", "merchant_family": "software", "domain": "amazon.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Apple iCloud", "category": "software", "merchant_family": "software", "domain": "apple.com/icloud", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Google One", "category": "software", "merchant_family": "software", "domain": "one.google.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Dropbox", "category": "software", "merchant_family": "software", "domain": "dropbox.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Microsoft 365", "category": "software", "merchant_family": "software", "domain": "microsoft.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Adobe Creative Cloud", "category": "software", "merchant_family": "software", "domain": "adobe.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Planet Fitness", "category": "fitness", "merchant_family": "fitness", "domain": "planetfitness.com", "eligibility": "membership", "yearly_billing_mode": "normal"},
+    {"name": "LA Fitness", "category": "fitness", "merchant_family": "fitness", "domain": "lafitness.com", "eligibility": "membership", "yearly_billing_mode": "normal"},
+    {"name": "Peloton", "category": "fitness", "merchant_family": "fitness", "domain": "onepeloton.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Xfinity", "category": "utilities", "merchant_family": "utilities", "domain": "xfinity.com", "eligibility": "utility_recurring", "yearly_billing_mode": "forbidden"},
+    {"name": "ComEd", "category": "utilities", "merchant_family": "utilities", "domain": "comed.com", "eligibility": "utility_recurring", "yearly_billing_mode": "forbidden"},
+    {"name": "AT&T", "category": "utilities", "merchant_family": "telecom", "domain": "att.com", "eligibility": "utility_recurring", "yearly_billing_mode": "low"},
+    {"name": "Verizon", "category": "utilities", "merchant_family": "telecom", "domain": "verizon.com", "eligibility": "utility_recurring", "yearly_billing_mode": "low"},
+    {"name": "T-Mobile", "category": "utilities", "merchant_family": "telecom", "domain": "t-mobile.com", "eligibility": "utility_recurring", "yearly_billing_mode": "low"},
+    {"name": "DoorDash", "category": "food", "merchant_family": "delivery_membership", "domain": "doordash.com", "eligibility": "membership", "yearly_billing_mode": "forbidden"},
+    {"name": "Uber Eats", "category": "food", "merchant_family": "delivery_membership", "domain": "ubereats.com", "eligibility": "membership", "yearly_billing_mode": "forbidden"},
+    {"name": "Grubhub", "category": "food", "merchant_family": "delivery_membership", "domain": "grubhub.com", "eligibility": "membership", "yearly_billing_mode": "forbidden"},
+    {"name": "Walmart", "category": "grocery", "merchant_family": "grocery_retail", "domain": "walmart.com", "eligibility": "not_subscribable"},
+    {"name": "Target", "category": "grocery", "merchant_family": "retail_big_box", "domain": "target.com", "eligibility": "not_subscribable"},
+    {"name": "Costco", "category": "grocery", "merchant_family": "grocery_retail", "domain": "costco.com", "eligibility": "membership"},
+    {"name": "Whole Foods", "category": "grocery", "merchant_family": "grocery_retail", "domain": "wholefoodsmarket.com", "eligibility": "not_subscribable"},
+    {"name": "Kroger", "category": "grocery", "merchant_family": "grocery_retail", "domain": "kroger.com", "eligibility": "not_subscribable"},
+    {"name": "Trader Joe's", "category": "grocery", "merchant_family": "grocery_retail", "domain": "traderjoes.com", "eligibility": "not_subscribable"},
+    {"name": "Coursera", "category": "education", "merchant_family": "education", "domain": "coursera.org", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Udemy", "category": "education", "merchant_family": "education", "domain": "udemy.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "LinkedIn Learning", "category": "education", "merchant_family": "education", "domain": "linkedin.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"},
+    {"name": "Starbucks", "category": "food", "merchant_family": "food_quick", "domain": "starbucks.com", "eligibility": "not_subscribable"},
+    {"name": "Chipotle", "category": "food", "merchant_family": "food_quick", "domain": "chipotle.com", "eligibility": "not_subscribable"},
+    {"name": "McDonald's", "category": "food", "merchant_family": "food_quick", "domain": "mcdonalds.com", "eligibility": "not_subscribable"},
+    {"name": "Amazon", "category": "other", "merchant_family": "ecommerce", "domain": "amazon.com", "eligibility": "not_subscribable"},
+    {"name": "Walgreens", "category": "other", "merchant_family": "pharmacy", "domain": "walgreens.com", "eligibility": "not_subscribable"},
+    {"name": "CVS Pharmacy", "category": "other", "merchant_family": "pharmacy", "domain": "cvs.com", "eligibility": "not_subscribable"},
+    {"name": "Shell", "category": "other", "merchant_family": "fuel", "domain": "shell.com", "eligibility": "not_subscribable"},
+    {"name": "Chevron", "category": "other", "merchant_family": "fuel", "domain": "chevron.com", "eligibility": "not_subscribable"},
+    {"name": "Lyft", "category": "other", "merchant_family": "rideshare", "domain": "lyft.com", "eligibility": "not_subscribable"},
+    {"name": "Uber", "category": "other", "merchant_family": "rideshare", "domain": "uber.com", "eligibility": "not_subscribable"},
 ]
 
 # Processor prefixes for noisy merchant rendering (Section 9.5)

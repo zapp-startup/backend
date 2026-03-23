@@ -1,18 +1,24 @@
 """
 Agent 6: Spend Agent (Section 12)
-Essential then discretionary passes per calendar month; logistic purchase
-probability; LogNormal amounts; merchant-category compatibility.
+Intent-first spending: user state -> intent -> category -> merchant family -> merchant -> amount.
+Essential then discretionary passes per calendar month; logistic purchase probability;
+LogNormal amounts with family-specific priors after merchant selection.
 Writes to: transactions_transaction
 """
 
 from __future__ import annotations
 
 from calendar import monthrange
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from datagen.agents.base import BaseAgent
-from datagen.config import AMOUNT_LOGNORMAL, SPEND_LOGISTIC
+from datagen.config import (
+    AMOUNT_LOGNORMAL,
+    AMOUNT_PRIORS_BY_FAMILY,
+    SPEND_LOGISTIC,
+)
 from datagen.distributions import (
     clip01,
     logistic,
@@ -62,8 +68,18 @@ def _iter_month_segments(start_date: date, end_date: date):
             m += 1
 
 
+@dataclass
+class SpendRoutine:
+    """Per-user habit state for repeated patterns (pharmacy cadence, fuel spacing, etc.)."""
+
+    pharmacy_days_since_refill: int = field(default_factory=lambda: 14)
+    fuel_days_since: int = 0
+    grocery_trip_index: int = 0
+    commuter: bool = True
+
+
 class SpendAgent(BaseAgent):
-    """Generate spending: essential pass then discretionary pass per month."""
+    """Generate spending: intent-first essential then discretionary passes per month."""
 
     def run(self, state: UserState, context: dict) -> dict:
         rng = self.rng
@@ -74,16 +90,25 @@ class SpendAgent(BaseAgent):
 
         transactions: list[dict] = []
         mi = float(state.monthly_income or 1)
+        routine = SpendRoutine()
+        routine.commuter = bool(rng.random() < 0.72)
+        routine.pharmacy_days_since_refill = int(rng.integers(10, 22))
 
         for _ym, seg_start, seg_end in _iter_month_segments(start_date, end_date):
             state.large_purchase_shock_this_month = False
             essential_month = 0.0
 
-            # Pass 1: essential categories (utilities are in ObligationAgent / fixed_month)
             d = seg_start
             while d <= seg_end:
                 essential_month += self._day_essential(
-                    state, context, d, transactions, merchant_agent, merchant_catalog,
+                    state,
+                    context,
+                    d,
+                    transactions,
+                    merchant_agent,
+                    merchant_catalog,
+                    routine,
+                    mi,
                 )
                 d += timedelta(days=1)
 
@@ -96,7 +121,6 @@ class SpendAgent(BaseAgent):
             disc_cap = max(0.0, available - reserve)
             month_disc_spent = 0.0
 
-            # Pass 2: discretionary (capped)
             d = seg_start
             while d <= seg_end:
                 month_disc_spent = self._day_discretionary(
@@ -109,10 +133,87 @@ class SpendAgent(BaseAgent):
                     month_disc_spent,
                     disc_cap,
                     mi,
+                    routine,
                 )
                 d += timedelta(days=1)
 
         return {"spend_transactions": transactions}
+
+    def _disc_compression(self, state: UserState, current: date) -> float:
+        """Late-month discretionary compression for budget-tight users."""
+        if current.day < 25:
+            return 1.0
+        if state.liquidity not in ("tight", "overdraft_risk", "overdrafted"):
+            return 1.0
+        if state.budget_adherence < 0.45:
+            return 1.0
+        return 0.52
+
+    def _intent_for_essential_transport(self, state: UserState, current: date, routine: SpendRoutine) -> str:
+        rng = self.rng
+        is_weekday = current.weekday() < 5
+        routine.fuel_days_since += 1
+        p_commute = 0.62 if (routine.commuter and is_weekday) else 0.28
+        p_commute += 0.12 if is_weekday else -0.08
+        p_commute = clip01(p_commute)
+        if rng.random() < p_commute:
+            return "commute"
+        if routine.fuel_days_since >= 5 or rng.random() < 0.22:
+            routine.fuel_days_since = 0
+            return "fuel_stop"
+        return "commute"
+
+    def _emit_transaction(
+        self,
+        state: UserState,
+        current: date,
+        *,
+        spend_category: str,
+        intent: str,
+        merchant_family: str,
+        transactions: list,
+        merchant_agent,
+        merchant_catalog: list,
+        days_since: int,
+        liq: float,
+        mi: float,
+        anomaly_mode: bool = False,
+    ) -> float:
+        rng = self.rng
+        if not merchant_agent or not merchant_catalog:
+            return 0.0
+        merch = merchant_agent.pick_merchant_for_family(
+            merchant_family, spend_category, merchant_catalog, anomaly_mode=anomaly_mode,
+        )
+        if not merch:
+            return 0.0
+        fam = merch.get("merchant_family", merchant_family)
+        amount = self._sample_amount_for_family(
+            state, current, spend_category, fam, days_since, liq, mi,
+        )
+        amount = self._attenuate_large_purchase(state, amount, mi=mi, merchant_family=fam)
+        desc = merchant_agent.render_description_raw(merch["name"], merch.get("domain", ""))
+        hour = self._sample_hour(spend_category)
+        minute = int(rng.integers(0, 60))
+        occurred = make_aware_dt(
+            datetime(current.year, current.month, current.day, hour, minute)
+        )
+        amt_dec = Decimal(str(round(amount, 2)))
+        transactions.append({
+            "direction": "spend",
+            "amount": amt_dec,
+            "occurred_at": occurred,
+            "category": self._map_category(spend_category),
+            "payment_channel": self._pick_channel(spend_category),
+            "description_raw": desc,
+            "merchant_info": merch,
+            "subscription_obj": None,
+            "spend_category": spend_category,
+            "spend_intent": intent,
+            "merchant_family": fam,
+        })
+        state.balance_proxy -= amt_dec
+        return float(amt_dec)
 
     def _day_essential(
         self,
@@ -122,8 +223,9 @@ class SpendAgent(BaseAgent):
         transactions: list,
         merchant_agent,
         merchant_catalog: list,
+        routine: SpendRoutine,
+        mi: float,
     ) -> float:
-        """Essential categories for one day; returns amount spent toward essential_month."""
         rng = self.rng
         day_total = 0.0
         days_since = state.days_since_payday(current)
@@ -132,40 +234,35 @@ class SpendAgent(BaseAgent):
         liq = state.liquidity_numeric()
 
         for cat in ESSENTIAL_CATEGORIES:
+            if cat == "groceries":
+                intent = "grocery_run"
+                merchant_family = "grocery_retail"
+            else:
+                intent = self._intent_for_essential_transport(state, current, routine)
+                merchant_family = "rideshare" if intent == "commute" else "fuel"
+
             p = self._purchase_probability(
                 state, cat, is_weekend, payday_window, liq, essential=True,
             )
+            if cat == "groceries":
+                p *= 1.12 if is_weekend > 0 else 0.92
+                routine.grocery_trip_index += 1
             if rng.random() >= p:
                 continue
-            amount = self._sample_amount(state, current, cat, days_since, liq)
-            amount = self._attenuate_large_purchase(state, amount, mi=float(state.monthly_income))
-            merch = None
-            desc = cat.upper()
-            if merchant_agent and merchant_catalog:
-                merch = merchant_agent.pick_merchant_for_category(cat, merchant_catalog)
-                if merch:
-                    desc = merchant_agent.render_description_raw(
-                        merch["name"], merch.get("domain", ""),
-                    )
-            hour = self._sample_hour(cat)
-            minute = int(rng.integers(0, 60))
-            occurred = make_aware_dt(
-                datetime(current.year, current.month, current.day, hour, minute)
+
+            day_total += self._emit_transaction(
+                state,
+                current,
+                spend_category=cat,
+                intent=intent,
+                merchant_family=merchant_family,
+                transactions=transactions,
+                merchant_agent=merchant_agent,
+                merchant_catalog=merchant_catalog,
+                days_since=days_since,
+                liq=liq,
+                mi=mi,
             )
-            amt_dec = Decimal(str(round(amount, 2)))
-            transactions.append({
-                "direction": "spend",
-                "amount": amt_dec,
-                "occurred_at": occurred,
-                "category": self._map_category(cat),
-                "payment_channel": self._pick_channel(cat),
-                "description_raw": desc,
-                "merchant_info": merch,
-                "subscription_obj": None,
-                "spend_category": cat,
-            })
-            state.balance_proxy -= amt_dec
-            day_total += float(amt_dec)
 
         state.update_liquidity()
         return day_total
@@ -181,20 +278,34 @@ class SpendAgent(BaseAgent):
         month_disc_spent: float,
         disc_cap: float,
         mi: float,
+        routine: SpendRoutine,
     ) -> float:
         rng = self.rng
         days_since = state.days_since_payday(current)
         payday_window = 1.0 if days_since <= 3 else 0.0
         is_weekend = 1.0 if current.weekday() >= 5 else 0.0
         liq = state.liquidity_numeric()
+        disc_mult = self._disc_compression(state, current)
 
         for cat in DISCRETIONARY_CATEGORIES:
             if month_disc_spent >= disc_cap:
                 break
+
+            intent, merchant_family = self._discretionary_intent(cat, state, current, routine)
+
             p = self._purchase_probability(
                 state, cat, is_weekend, payday_window, liq, essential=False,
             )
-            # Travel: need liquidity or high income
+            p *= disc_mult
+            if cat == "health":
+                routine.pharmacy_days_since_refill += 1
+                if routine.pharmacy_days_since_refill > 21:
+                    p *= 1.35
+                if routine.pharmacy_days_since_refill > 35:
+                    p *= 1.2
+            if cat == "shopping" and payday_window > 0:
+                p *= 1.18
+
             if cat == "travel":
                 if state.liquidity not in ("comfortable", "stable") and mi < 5000:
                     p *= 0.15
@@ -202,21 +313,26 @@ class SpendAgent(BaseAgent):
             if rng.random() >= p:
                 continue
 
-            amount = self._sample_amount(state, current, cat, days_since, liq)
-            amount = self._attenuate_large_purchase(state, amount, mi=mi)
+            if not merchant_agent or not merchant_catalog:
+                continue
+            merch = merchant_agent.pick_merchant_for_family(
+                merchant_family, cat, merchant_catalog, anomaly_mode=False,
+            )
+            if not merch:
+                continue
+            fam = merch.get("merchant_family", merchant_family)
+            amount = self._sample_amount_for_family(
+                state, current, cat, fam, days_since, liq, mi,
+            )
+            amount = self._attenuate_large_purchase(state, amount, mi=mi, merchant_family=fam)
             remaining = max(0.0, disc_cap - month_disc_spent)
             if amount > remaining and remaining < mi * 0.05:
                 continue
             amount = min(amount, remaining + mi * 0.1) if remaining < amount else amount
 
-            merch = None
-            desc = cat.upper()
-            if merchant_agent and merchant_catalog:
-                merch = merchant_agent.pick_merchant_for_category(cat, merchant_catalog)
-                if merch:
-                    desc = merchant_agent.render_description_raw(
-                        merch["name"], merch.get("domain", ""),
-                    )
+            desc = merchant_agent.render_description_raw(
+                merch["name"], merch.get("domain", ""),
+            )
             hour = self._sample_hour(cat)
             minute = int(rng.integers(0, 60))
             occurred = make_aware_dt(
@@ -233,23 +349,82 @@ class SpendAgent(BaseAgent):
                 "merchant_info": merch,
                 "subscription_obj": None,
                 "spend_category": cat,
+                "spend_intent": intent,
+                "merchant_family": fam,
             })
+            if cat == "health":
+                routine.pharmacy_days_since_refill = 0
             state.balance_proxy -= amt_dec
             month_disc_spent += float(amt_dec)
 
         state.update_liquidity()
         return month_disc_spent
 
-    def _attenuate_large_purchase(self, state: UserState, amount: float, mi: float) -> float:
+    def _discretionary_intent(self, cat: str, state: UserState, current: date, routine: SpendRoutine) -> tuple[str, str]:
         rng = self.rng
-        if amount > mi:
+        if cat == "dining":
+            if rng.random() < 0.42:
+                return "meal_delivery", "delivery_membership"
+            return "quick_meal", "food_quick"
+        if cat == "shopping":
+            if rng.random() < 0.88:
+                return "online_order", "ecommerce"
+            return "retail_trip", "retail_big_box"
+        if cat == "health":
+            return "pharmacy_refill", "pharmacy"
+        if cat == "entertainment":
+            return "night_out", "food_quick"
+        if cat == "travel":
+            return "travel", "ecommerce"
+        return "misc", "ecommerce"
+
+    def _attenuate_large_purchase(
+        self,
+        state: UserState,
+        amount: float,
+        mi: float,
+        *,
+        merchant_family: str,
+    ) -> float:
+        rng = self.rng
+        large_ok = merchant_family in ("ecommerce", "travel", "retail_big_box", "grocery_retail")
+        if amount > mi and not large_ok:
             extra = max(0.0, (amount - mi) * 0.5)
             state.balance_proxy -= Decimal(str(round(extra, 2)))
             state.large_purchase_shock_this_month = True
             amount = min(amount, mi * float(rng.uniform(0.85, 1.0)))
-        elif amount > 0.6 * mi:
+        elif amount > 0.6 * mi and not large_ok:
             amount *= float(rng.uniform(0.45, 0.75))
+        elif amount > 0.45 * mi and not large_ok:
+            amount *= float(rng.uniform(0.65, 0.9))
         return max(0.5, amount)
+
+    def _sample_amount_for_family(
+        self,
+        state: UserState,
+        day: date,
+        spend_category: str,
+        merchant_family: str,
+        days_since: int,
+        liq: float,
+        mi: float,
+    ) -> float:
+        rng = self.rng
+        mu, sigma = AMOUNT_PRIORS_BY_FAMILY.get(
+            merchant_family,
+            AMOUNT_LOGNORMAL.get(spend_category, (3.0, 0.6)),
+        )
+        mu += (state.quality_preference - 0.5) * 0.3
+        mu -= liq * 0.2
+        mu -= state.price_sensitivity * 0.25
+        if merchant_family == "grocery_retail":
+            mu += 0.22 * max(0, state.household_size - 1)
+            mu += 0.08 * state.dependents_count
+        base_amount = sample_lognormal(rng, mu, sigma)
+        pm = payday_multiplier(days_since, state.payday_eta, state.payday_tau)
+        wm = weekend_multiplier(day, spend_category)
+        sm = seasonality_multiplier(day.month, spend_category)
+        return max(0.50, base_amount * pm * wm * sm)
 
     def _purchase_probability(
         self,
@@ -294,25 +469,6 @@ class SpendAgent(BaseAgent):
             p *= 0.65
 
         return clip01(p)
-
-    def _sample_amount(
-        self,
-        state: UserState,
-        day: date,
-        category: str,
-        days_since: int,
-        liq: float,
-    ) -> float:
-        rng = self.rng
-        mu, sigma = AMOUNT_LOGNORMAL.get(category, (3.0, 0.6))
-        mu += (state.quality_preference - 0.5) * 0.3
-        mu -= liq * 0.2
-        mu -= state.price_sensitivity * 0.25
-        base_amount = sample_lognormal(rng, mu, sigma)
-        pm = payday_multiplier(days_since, state.payday_eta, state.payday_tau)
-        wm = weekend_multiplier(day, category)
-        sm = seasonality_multiplier(day.month, category)
-        return max(0.50, base_amount * pm * wm * sm)
 
     def _sample_hour(self, category: str) -> int:
         rng = self.rng

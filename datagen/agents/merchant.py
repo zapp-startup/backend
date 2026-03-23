@@ -8,7 +8,12 @@ Writes to: subscriptions_merchant, transactions_transaction.description_raw
 from __future__ import annotations
 
 from datagen.agents.base import BaseAgent
-from datagen.config import MERCHANT_CATALOG, MERCHANT_CATEGORY_COMPAT, PROCESSOR_PREFIXES
+from datagen.config import (
+    MERCHANT_CATALOG,
+    MERCHANT_CATEGORY_COMPAT,
+    PROCESSOR_PREFIXES,
+    compat_status_family,
+)
 from datagen.state import UserState
 
 
@@ -25,8 +30,10 @@ class MerchantAgent(BaseAgent):
             catalog.append({
                 "name": m["name"],
                 "category": m["category"],
+                "merchant_family": m.get("merchant_family", m.get("category", "other")),
                 "domain": m.get("domain", ""),
                 "eligibility": m.get("eligibility", "not_subscribable"),
+                "yearly_billing_mode": m.get("yearly_billing_mode"),
             })
 
         return {"merchant_catalog": catalog}
@@ -104,6 +111,36 @@ class MerchantAgent(BaseAgent):
                 return rng.random() < 0.05
             if status == "disallowed":
                 return anomaly_mode and rng.random() < 0.02
+            return True
+
+        matches = [m for m in candidates if ok(m)]
+        if not matches:
+            matches = candidates
+        return dict(rng.choice(matches))
+
+    def pick_merchant_for_family(
+        self,
+        merchant_family: str,
+        spend_category: str,
+        catalog: list[dict],
+        *,
+        anomaly_mode: bool = False,
+    ) -> dict | None:
+        """Pick merchant by family + spend_category; never pairs disallowed compat in normal mode."""
+        rng = self.rng
+        candidates = [m for m in catalog if m.get("merchant_family") == merchant_family]
+        if not candidates:
+            return None
+
+        def ok(m: dict) -> bool:
+            fam = m.get("merchant_family", merchant_family)
+            status = compat_status_family(fam, spend_category)
+            if status == "allowed":
+                return True
+            if status == "rare":
+                return rng.random() < (0.06 if anomaly_mode else 0.012)
+            if status == "disallowed":
+                return anomaly_mode and rng.random() < 0.015
             return True
 
         matches = [m for m in candidates if ok(m)]

@@ -11,8 +11,15 @@ from django.utils import timezone
 
 from datagen.agents.audit import AuditAgent
 from datagen.agents.conversation import ConversationAgent
+from datagen.agents.merchant import MerchantAgent
+from datagen.agents.spend import SpendAgent
 from datagen.agents.valuation import ValuationAgent
-from datagen.config import CANCEL_BASE_GAMMA, CANCEL_OVERLOAD_GAMMA, MERCHANT_CATEGORY_COMPAT
+from datagen.config import (
+    CANCEL_BASE_GAMMA,
+    CANCEL_OVERLOAD_GAMMA,
+    MERCHANT_CATEGORY_COMPAT,
+    compat_status_family,
+)
 from datagen.distributions import make_rng
 from datagen.pipeline import run_pipeline
 from datagen.state import UserState
@@ -435,3 +442,183 @@ class SyntheticRealismPatchTests(TestCase):
         # Burden should now be overloaded (800/4000 = 0.2 > 0.15)
         self.assertEqual(state.subscription_burden_state, "overloaded")
         self.assertTrue(any("burden" in r or "Recomputed" in r for r in repairs))
+
+
+class IntentFirstRealismTests(TestCase):
+    """Intent-first spend, compatibility, subscription tiers, valuation policy."""
+
+    def setUp(self):
+        self.fixed_now = timezone.make_aware(datetime(2026, 3, 21, 12, 0, 0))
+        reset_conversation_dedup()
+
+    def _run_seed(self, prefix: str, seed: int, months: int = 1, users: int = 1):
+        with patch("datagen.pipeline.timezone.now", return_value=self.fixed_now):
+            return run_pipeline(
+                num_users=users,
+                months=months,
+                prefix=prefix,
+                password="password123",
+                use_llm=False,
+                seed=seed,
+                log=lambda _msg: None,
+            )
+
+    def test_family_spend_compat_hard_rules(self):
+        self.assertEqual(compat_status_family("pharmacy", "transport"), "disallowed")
+        self.assertEqual(compat_status_family("fuel", "shopping"), "disallowed")
+        self.assertEqual(compat_status_family("rideshare", "transport"), "allowed")
+        self.assertEqual(compat_status_family("ecommerce", "transport"), "disallowed")
+        self.assertEqual(compat_status_family("grocery_retail", "groceries"), "allowed")
+
+    def test_merchant_picker_respects_family_and_category(self):
+        rng = make_rng(201)
+        agent = MerchantAgent(rng, use_llm=False)
+        catalog = agent.run(UserState(), {})["merchant_catalog"]
+        m1 = agent.pick_merchant_for_family("rideshare", "transport", catalog)
+        self.assertIn(m1["name"], ("Uber", "Lyft"))
+        m2 = agent.pick_merchant_for_family("pharmacy", "health", catalog)
+        self.assertIn(m2["name"], ("Walgreens", "CVS Pharmacy"))
+        m3 = agent.pick_merchant_for_family("fuel", "transport", catalog)
+        self.assertIn(m3["name"], ("Shell", "Chevron"))
+        m4 = agent.pick_merchant_for_family("grocery_retail", "groceries", catalog)
+        self.assertIn(
+            m4["name"],
+            ("Walmart", "Target", "Costco", "Whole Foods", "Kroger", "Trader Joe's"),
+        )
+
+    def test_spend_agent_essential_transport_never_pharmacy(self):
+        rng = make_rng(88)
+        state = UserState(
+            monthly_income=Decimal("5200.00"),
+            archetype="salary_biweekly",
+            category_budgets={c: 0.09 for c in [
+                "rent", "groceries", "dining", "transport", "shopping",
+                "entertainment", "health", "travel", "utilities", "subscriptions", "fees",
+            ]},
+        )
+        state.last_paydays = [date(2025, 1, 3), date(2025, 1, 17)]
+        merchant_agent = MerchantAgent(rng, use_llm=False)
+        catalog = merchant_agent.run(UserState(), {})["merchant_catalog"]
+        context = {
+            "start_date": date(2025, 1, 1),
+            "end_date": date(2025, 2, 28),
+            "merchant_agent": merchant_agent,
+            "merchant_catalog": catalog,
+            "subscriptions": [],
+        }
+        out = SpendAgent(rng, use_llm=False).run(state, context)["spend_transactions"]
+        for t in out:
+            if t.get("spend_category") == "transport":
+                self.assertIn(
+                    t["merchant_info"]["name"],
+                    ("Uber", "Lyft", "Shell", "Chevron"),
+                )
+
+    def test_spend_groceries_use_grocery_retailers_only(self):
+        rng = make_rng(91)
+        state = UserState(
+            monthly_income=Decimal("4800.00"),
+            household_size=2,
+            category_budgets={c: 0.09 for c in [
+                "rent", "groceries", "dining", "transport", "shopping",
+                "entertainment", "health", "travel", "utilities", "subscriptions", "fees",
+            ]},
+        )
+        state.last_paydays = [date(2025, 1, 1)]
+        merchant_agent = MerchantAgent(rng, use_llm=False)
+        catalog = merchant_agent.run(UserState(), {})["merchant_catalog"]
+        context = {
+            "start_date": date(2025, 1, 1),
+            "end_date": date(2025, 3, 31),
+            "merchant_agent": merchant_agent,
+            "merchant_catalog": catalog,
+            "subscriptions": [],
+        }
+        out = SpendAgent(rng, use_llm=False).run(state, context)["spend_transactions"]
+        groc = [t for t in out if t.get("spend_category") == "groceries"]
+        self.assertTrue(groc)
+        for t in groc:
+            self.assertEqual(t.get("merchant_family"), "grocery_retail")
+
+    def test_subscription_netflix_price_from_tier_table(self):
+        from datagen.agents.subscription import SubscriptionAgent
+        from datagen.config import SUBSCRIPTION_MERCHANT_PRICE_TIERS
+
+        rng = make_rng(33)
+        agent = SubscriptionAgent(rng, use_llm=False)
+        merch = {"name": "Netflix", "category": "streaming", "domain": "netflix.com", "eligibility": "standard_subscription", "yearly_billing_mode": "normal"}
+        p = agent._price_for_merchant(merch, "streaming")
+        tier_vals = [Decimal(s) for s, _w in SUBSCRIPTION_MERCHANT_PRICE_TIERS["Netflix"]]
+        self.assertGreaterEqual(p, min(tier_vals) - Decimal("1.5"))
+        self.assertLessEqual(p, max(tier_vals) + Decimal("1.5"))
+
+    def test_subscription_yearly_forbidden_for_utilities(self):
+        from datagen.agents.subscription import SubscriptionAgent
+
+        rng = make_rng(5)
+        agent = SubscriptionAgent(rng, use_llm=False)
+        merch = {"name": "ComEd", "yearly_billing_mode": "forbidden"}
+        yearly_hits = sum(
+            1 for _ in range(400)
+            if agent._yearly_billing_draw(merch, "streaming")
+        )
+        self.assertEqual(yearly_hits, 0)
+
+    def test_subscription_valuation_strongly_negative_net_rarely_buy(self):
+        state = UserState(
+            monthly_income=Decimal("4000.00"),
+            subscription_burden_state="stretched",
+            liquidity="tight",
+        )
+        buys = 0
+        for seed in range(40):
+            agent = ValuationAgent(make_rng(seed), use_llm=False)
+            rec = agent._subscription_recommendation(
+                state=state,
+                net_value=Decimal("-22.00"),
+                usage=0.2,
+                cost_share=0.12,
+                monthly_income=4000.0,
+                fit=0.4,
+                friction=0.5,
+            )
+            if rec == "buy":
+                buys += 1
+        self.assertLessEqual(buys, 2)
+
+    def test_actual_monthly_spending_not_written_in_datagen_context(self):
+        """Generators must not set actual_monthly_spending; only inference rollup does."""
+        prefix = "derived_"
+        self._run_seed(prefix=prefix, seed=717, months=1)
+        user = User.objects.get(username=f"{prefix}user_0")
+        inferred = UserRawInferred.objects.get(user=user)
+        self.assertIsNotNone(inferred.actual_monthly_spending)
+
+    def test_audit_semantic_repair_aligns_pharmacy_to_health(self):
+        from datagen.agents.audit import AuditAgent
+
+        audit = AuditAgent(make_rng(1), use_llm=False)
+        ctx = {
+            "spend_transactions": [
+                {
+                    "direction": "spend",
+                    "amount": Decimal("12.00"),
+                    "occurred_at": timezone.now(),
+                    "category": "transport",
+                    "spend_category": "transport",
+                    "merchant_family": "pharmacy",
+                    "merchant_info": {"name": "Walgreens", "category": "other", "merchant_family": "pharmacy"},
+                    "payment_channel": "card",
+                    "description_raw": "WALGREENS",
+                }
+            ],
+            "merchant_catalog": [],
+            "merchant_agent": None,
+            "subscriptions": [],
+            "subscription_transactions": [],
+            "income_transactions": [{"amount": Decimal("5000"), "direction": "income"}],
+            "behavior_facts": [{"fact_key": "intentionally_sparse"}],
+            "conversation_facts": [],
+        }
+        audit.run(UserState(), ctx)
+        self.assertEqual(ctx["spend_transactions"][0]["spend_category"], "health")
