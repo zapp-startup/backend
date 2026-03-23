@@ -2,6 +2,14 @@ from django.conf import settings
 from django.db import models
 
 
+class SubscriptionEligibility(models.TextChoices):
+    NOT_SUBSCRIBABLE = "not_subscribable", "Not Subscribable"
+    MEMBERSHIP = "membership", "Membership"
+    STANDARD_SUBSCRIPTION = "standard_subscription", "Standard Subscription"
+    UTILITY_RECURRING = "utility_recurring", "Utility Recurring"
+    INSURANCE_RECURRING = "insurance_recurring", "Insurance Recurring"
+
+
 class MerchantCategory(models.TextChoices):
     STREAMING = "streaming", "Streaming"
     GROCERY = "grocery", "Grocery"
@@ -44,6 +52,12 @@ class Merchant(models.Model):
         blank=True,
         null=True,
         help_text="Optional domain like 'netflix.com' used for matching/inference.",
+    )
+    subscription_eligibility = models.CharField(
+        max_length=32,
+        choices=SubscriptionEligibility.choices,
+        default=SubscriptionEligibility.NOT_SUBSCRIBABLE,
+        help_text="Whether this merchant can appear as a recurring subscription in synthetic data.",
     )
 
     created_at = models.DateTimeField(auto_now_add=True)

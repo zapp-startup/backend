@@ -19,8 +19,14 @@ from datagen.config import (
     ARCHETYPE_LIFE_STAGE,
     DIRICHLET_ALPHA,
     FIXED_EXPENSE_RATIO_BETA,
+    FIXED_EXPENSE_RATIO_BY_HOUSING,
+    FIXED_EXPENSE_RATIO_GLOBAL,
     HOUSEHOLD_POISSON_LAMBDA,
+    HOUSING_INDEPENDENCE_PRIORS,
     INCOME_LOGNORMAL,
+    INCOME_STABILITY_PARAMS,
+    LIFE_STAGE_AGE_WEIGHTS,
+    PRICE_SENSITIVITY_BETA,
     SPEND_CATEGORIES,
     SUBSCRIPTION_ENGAGEMENT_STATES,
     TRAIT_BETA_PARAMS,
@@ -34,6 +40,47 @@ from datagen.distributions import (
     sample_poisson,
 )
 from datagen.state import UserState
+
+HOUSING_STATES = ["dependent", "shared", "independent", "homeowner"]
+INCOME_STABILITY_STATES = ["stable", "variable", "fragile"]
+
+
+def _age_bucket_key(age: int) -> str:
+    if age < 25:
+        return "18_24"
+    if age < 35:
+        return "25_34"
+    if age < 45:
+        return "35_44"
+    return "45_plus"
+
+
+def _sample_life_stage(rng, arch: str, age: int) -> str:
+    if arch == "student":
+        return "student"
+    if arch == "retired":
+        return "other"
+    valid = list(ARCHETYPE_LIFE_STAGE[arch])
+    bucket = _age_bucket_key(age)
+    table = LIFE_STAGE_AGE_WEIGHTS.get(bucket, {}).get(arch)
+    if table is None:
+        return str(rng.choice(valid))
+    # table order: early_career, mid_career, family, other
+    stage_order = ["early_career", "mid_career", "family", "other"]
+    weights = []
+    stages = []
+    for st, w in zip(stage_order, table):
+        if st in valid:
+            stages.append(st)
+            weights.append(w)
+    if not stages:
+        return str(rng.choice(valid))
+    s = sum(weights)
+    p = [w / s for w in weights]
+    picked = str(rng.choice(stages, p=p))
+    if picked not in valid:
+        return str(rng.choice(valid))
+    return picked
 
 
 class PersonaAgent(BaseAgent):
@@ -91,14 +138,45 @@ class PersonaAgent(BaseAgent):
         lo, hi = age_ranges.get(arch, (22, 55))
         state.age = int(rng.integers(lo, hi + 1))
 
-        # Section 7.6: Monthly income ~ LogNormal
+        # Housing independence (affects rent / fixed ratio in obligation + persona)
+        hw = HOUSING_INDEPENDENCE_PRIORS[arch]
+        state.housing_independence_state = HOUSING_STATES[int(rng.choice(4, p=hw))]
+        if arch == "student" and state.housing_independence_state == "homeowner" and rng.random() < 0.85:
+            state.housing_independence_state = str(rng.choice(["dependent", "shared"]))
+
+        life_stage = _sample_life_stage(rng, arch, state.age)
+        if life_stage == "family" and state.household_size < 2:
+            state.household_size = max(2, state.household_size + int(rng.integers(1, 3)))
+
+        # Section 7.6: Monthly income ~ LogNormal (take-home monthly estimate)
         mu_i, sig_i = INCOME_LOGNORMAL[arch]
         state.monthly_income = sample_lognormal_decimal(rng, mu_i, sig_i)
 
-        # Section 7.6: Fixed expense ratio ~ Beta, then multiply by income
+        # Income stability + price sensitivity
+        is_w = INCOME_STABILITY_PARAMS[arch]
+        state.income_stability_state = INCOME_STABILITY_STATES[int(rng.choice(3, p=is_w))]
+        ps_a, ps_b = PRICE_SENSITIVITY_BETA[arch]
+        state.price_sensitivity = float(sample_beta(rng, ps_a, ps_b))
+
+        # Debt carry from credit_stress trait
+        cs = state.credit_stress
+        if cs < 0.3:
+            state.debt_carry_state = "none"
+        elif cs < 0.55:
+            state.debt_carry_state = "managed"
+        elif cs < 0.75:
+            state.debt_carry_state = "revolving"
+        else:
+            state.debt_carry_state = "stressed"
+
+        # Fixed expense ratio: housing-conditioned band (primary), global sanity clamp
+        lo_r, hi_r = FIXED_EXPENSE_RATIO_BY_HOUSING[state.housing_independence_state]
         fe_a, fe_b = FIXED_EXPENSE_RATIO_BETA[arch]
         ratio = sample_beta(rng, fe_a, fe_b)
-        ratio = max(0.15, min(0.70, ratio))  # plausible cap
+        ratio = lo_r + ratio * (hi_r - lo_r)
+        g_lo, g_hi = FIXED_EXPENSE_RATIO_GLOBAL
+        if ratio < g_lo or ratio > g_hi:
+            ratio = max(g_lo, min(g_hi, ratio))
         state.monthly_fixed_expenses = Decimal(str(
             round(float(state.monthly_income) * ratio, 2)
         ))
@@ -174,7 +252,6 @@ class PersonaAgent(BaseAgent):
         financial_goal = str(rng.choice(goal_weights[arch]))
 
         employment_type = str(rng.choice(ARCHETYPE_EMPLOYMENT[arch]))
-        life_stage = str(rng.choice(ARCHETYPE_LIFE_STAGE[arch]))
 
         reference_year = context["end_date"].year
         dob = date(

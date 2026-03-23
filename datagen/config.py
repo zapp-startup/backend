@@ -382,6 +382,139 @@ LIQUIDITY_THRESHOLDS = {
 }
 
 # ---------------------------------------------------------------------------
+# Subscription burden (monthlyized sub cost / monthly income)
+# ---------------------------------------------------------------------------
+SUBSCRIPTION_BURDEN_THRESHOLDS = {
+    "light": 0.03,
+    "normal": 0.08,
+    "stretched": 0.15,
+}
+
+CANCEL_STRETCH_GAMMA = 0.025
+CANCEL_OVERLOAD_GAMMA = 0.06
+
+DEBT_WORSEN_MONTHS = 3
+DEBT_RECOVER_MONTHS = 4
+
+# ---------------------------------------------------------------------------
+# Fixed expense ratio by housing (primary band); global [0.10, 0.80] is sanity clamp
+# ---------------------------------------------------------------------------
+FIXED_EXPENSE_RATIO_BY_HOUSING: dict[str, tuple[float, float]] = {
+    "dependent": (0.10, 0.35),
+    "shared": (0.25, 0.55),
+    "independent": (0.35, 0.75),
+    "homeowner": (0.45, 0.80),
+}
+
+FIXED_EXPENSE_RATIO_GLOBAL = (0.10, 0.80)
+
+# Housing independence priors per archetype (weights for dependent, shared, independent, homeowner)
+HOUSING_INDEPENDENCE_PRIORS: dict[str, list[float]] = {
+    "salary_biweekly": [0.05, 0.10, 0.55, 0.30],
+    "salary_monthly": [0.05, 0.10, 0.50, 0.35],
+    "hourly_weekly": [0.10, 0.20, 0.55, 0.15],
+    "gig": [0.15, 0.25, 0.50, 0.10],
+    "student": [0.45, 0.40, 0.12, 0.03],
+    "retired": [0.08, 0.12, 0.40, 0.40],
+    "high_income": [0.02, 0.05, 0.38, 0.55],
+    "credit_constrained": [0.20, 0.30, 0.45, 0.05],
+}
+
+# Income stability categorical weights per archetype: stable, variable, fragile
+INCOME_STABILITY_PARAMS: dict[str, list[float]] = {
+    "salary_biweekly": [0.65, 0.25, 0.10],
+    "salary_monthly": [0.70, 0.22, 0.08],
+    "hourly_weekly": [0.45, 0.40, 0.15],
+    "gig": [0.15, 0.45, 0.40],
+    "student": [0.45, 0.40, 0.15],
+    "retired": [0.55, 0.30, 0.15],
+    "high_income": [0.60, 0.30, 0.10],
+    "credit_constrained": [0.20, 0.35, 0.45],
+}
+
+# Price sensitivity Beta (alpha, beta) per archetype
+PRICE_SENSITIVITY_BETA: dict[str, tuple[float, float]] = {
+    "salary_biweekly": (3.0, 2.5),
+    "salary_monthly": (3.0, 2.5),
+    "hourly_weekly": (2.5, 3.0),
+    "gig": (2.5, 3.0),
+    "student": (4.0, 2.0),
+    "retired": (3.5, 2.5),
+    "high_income": (2.0, 4.0),
+    "credit_constrained": (5.0, 2.0),
+}
+
+# Age bucket -> life-stage weights [early_career, mid_career, family, other] per archetype
+LIFE_STAGE_AGE_WEIGHTS: dict[str, dict[str, list[float]]] = {
+    "18_24": {
+        "salary_biweekly": [0.55, 0.30, 0.10, 0.05],
+        "salary_monthly": [0.50, 0.35, 0.10, 0.05],
+        "hourly_weekly": [0.60, 0.30, 0.08, 0.02],
+        "gig": [0.55, 0.35, 0.08, 0.02],
+        "credit_constrained": [0.50, 0.35, 0.12, 0.03],
+        "high_income": [0.40, 0.45, 0.12, 0.03],
+    },
+    "25_34": {
+        "salary_biweekly": [0.35, 0.40, 0.15, 0.10],
+        "salary_monthly": [0.25, 0.45, 0.20, 0.10],
+        "hourly_weekly": [0.40, 0.45, 0.10, 0.05],
+        "gig": [0.35, 0.45, 0.12, 0.08],
+        "credit_constrained": [0.35, 0.40, 0.15, 0.10],
+        "high_income": [0.20, 0.45, 0.25, 0.10],
+    },
+    "35_44": {
+        "salary_biweekly": [0.10, 0.45, 0.35, 0.10],
+        "salary_monthly": [0.08, 0.40, 0.40, 0.12],
+        "hourly_weekly": [0.15, 0.50, 0.25, 0.10],
+        "gig": [0.12, 0.45, 0.30, 0.13],
+        "credit_constrained": [0.12, 0.45, 0.30, 0.13],
+        "high_income": [0.05, 0.35, 0.45, 0.15],
+    },
+    "45_plus": {
+        "salary_biweekly": [0.02, 0.35, 0.45, 0.18],
+        "salary_monthly": [0.02, 0.30, 0.48, 0.20],
+        "hourly_weekly": [0.05, 0.40, 0.40, 0.15],
+        "gig": [0.05, 0.40, 0.40, 0.15],
+        "credit_constrained": [0.05, 0.40, 0.40, 0.15],
+        "high_income": [0.02, 0.30, 0.48, 0.20],
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Merchant catalog category x spend_category compatibility (allowed | rare | disallowed)
+# spend_category uses internal spend keys (groceries, dining, ...) matching SpendAgent
+# ---------------------------------------------------------------------------
+def _mc(m: str, s: str) -> tuple[str, str]:
+    return (m, s)
+
+
+MERCHANT_CATEGORY_COMPAT: dict[tuple[str, str], str] = {
+    _mc("streaming", "groceries"): "disallowed",
+    _mc("streaming", "dining"): "rare",
+    _mc("streaming", "entertainment"): "allowed",
+    _mc("streaming", "subscriptions"): "allowed",
+    _mc("streaming", "shopping"): "rare",
+    _mc("software", "subscriptions"): "allowed",
+    _mc("software", "shopping"): "allowed",
+    _mc("software", "groceries"): "disallowed",
+    _mc("fitness", "health"): "allowed",
+    _mc("fitness", "groceries"): "disallowed",
+    _mc("utilities", "utilities"): "allowed",
+    _mc("utilities", "subscriptions"): "allowed",
+    _mc("utilities", "groceries"): "disallowed",
+    _mc("food", "dining"): "allowed",
+    _mc("food", "groceries"): "disallowed",
+    _mc("grocery", "groceries"): "allowed",
+    _mc("grocery", "dining"): "rare",
+    _mc("grocery", "health"): "disallowed",
+    _mc("education", "education"): "allowed",
+    _mc("education", "health"): "disallowed",
+    _mc("other", "shopping"): "allowed",
+    _mc("other", "transport"): "allowed",
+    _mc("other", "groceries"): "rare",
+}
+
+# ---------------------------------------------------------------------------
 # Section 16  AI Conversation Agent parameters
 # ---------------------------------------------------------------------------
 CONVERSATION_LAMBDA_BASE = 2.0
@@ -392,50 +525,51 @@ FACT_MIN_OBSERVATIONS = 3
 # ---------------------------------------------------------------------------
 # Merchant catalog for Merchant Agent (Section 9)
 # ---------------------------------------------------------------------------
+# eligibility: not_subscribable | membership | standard_subscription | utility_recurring | insurance_recurring
 MERCHANT_CATALOG: list[dict] = [
-    {"name": "Netflix", "category": "streaming", "domain": "netflix.com"},
-    {"name": "Spotify", "category": "streaming", "domain": "spotify.com"},
-    {"name": "Hulu", "category": "streaming", "domain": "hulu.com"},
-    {"name": "Disney+", "category": "streaming", "domain": "disneyplus.com"},
-    {"name": "YouTube Premium", "category": "streaming", "domain": "youtube.com"},
-    {"name": "Apple Music", "category": "streaming", "domain": "apple.com"},
-    {"name": "HBO Max", "category": "streaming", "domain": "max.com"},
-    {"name": "Amazon Prime", "category": "software", "domain": "amazon.com"},
-    {"name": "Apple iCloud", "category": "software", "domain": "apple.com/icloud"},
-    {"name": "Google One", "category": "software", "domain": "one.google.com"},
-    {"name": "Dropbox", "category": "software", "domain": "dropbox.com"},
-    {"name": "Microsoft 365", "category": "software", "domain": "microsoft.com"},
-    {"name": "Adobe Creative Cloud", "category": "software", "domain": "adobe.com"},
-    {"name": "Planet Fitness", "category": "fitness", "domain": "planetfitness.com"},
-    {"name": "LA Fitness", "category": "fitness", "domain": "lafitness.com"},
-    {"name": "Peloton", "category": "fitness", "domain": "onepeloton.com"},
-    {"name": "Xfinity", "category": "utilities", "domain": "xfinity.com"},
-    {"name": "ComEd", "category": "utilities", "domain": "comed.com"},
-    {"name": "AT&T", "category": "utilities", "domain": "att.com"},
-    {"name": "Verizon", "category": "utilities", "domain": "verizon.com"},
-    {"name": "T-Mobile", "category": "utilities", "domain": "t-mobile.com"},
-    {"name": "DoorDash", "category": "food", "domain": "doordash.com"},
-    {"name": "Uber Eats", "category": "food", "domain": "ubereats.com"},
-    {"name": "Grubhub", "category": "food", "domain": "grubhub.com"},
-    {"name": "Walmart", "category": "grocery", "domain": "walmart.com"},
-    {"name": "Target", "category": "grocery", "domain": "target.com"},
-    {"name": "Costco", "category": "grocery", "domain": "costco.com"},
-    {"name": "Whole Foods", "category": "grocery", "domain": "wholefoodsmarket.com"},
-    {"name": "Kroger", "category": "grocery", "domain": "kroger.com"},
-    {"name": "Trader Joe's", "category": "grocery", "domain": "traderjoes.com"},
-    {"name": "Coursera", "category": "education", "domain": "coursera.org"},
-    {"name": "Udemy", "category": "education", "domain": "udemy.com"},
-    {"name": "LinkedIn Learning", "category": "education", "domain": "linkedin.com"},
-    {"name": "Starbucks", "category": "food", "domain": "starbucks.com"},
-    {"name": "Chipotle", "category": "food", "domain": "chipotle.com"},
-    {"name": "McDonald's", "category": "food", "domain": "mcdonalds.com"},
-    {"name": "Amazon", "category": "other", "domain": "amazon.com"},
-    {"name": "Walgreens", "category": "other", "domain": "walgreens.com"},
-    {"name": "CVS Pharmacy", "category": "other", "domain": "cvs.com"},
-    {"name": "Shell", "category": "other", "domain": "shell.com"},
-    {"name": "Chevron", "category": "other", "domain": "chevron.com"},
-    {"name": "Lyft", "category": "other", "domain": "lyft.com"},
-    {"name": "Uber", "category": "other", "domain": "uber.com"},
+    {"name": "Netflix", "category": "streaming", "domain": "netflix.com", "eligibility": "standard_subscription"},
+    {"name": "Spotify", "category": "streaming", "domain": "spotify.com", "eligibility": "standard_subscription"},
+    {"name": "Hulu", "category": "streaming", "domain": "hulu.com", "eligibility": "standard_subscription"},
+    {"name": "Disney+", "category": "streaming", "domain": "disneyplus.com", "eligibility": "standard_subscription"},
+    {"name": "YouTube Premium", "category": "streaming", "domain": "youtube.com", "eligibility": "standard_subscription"},
+    {"name": "Apple Music", "category": "streaming", "domain": "apple.com", "eligibility": "standard_subscription"},
+    {"name": "HBO Max", "category": "streaming", "domain": "max.com", "eligibility": "standard_subscription"},
+    {"name": "Amazon Prime", "category": "software", "domain": "amazon.com", "eligibility": "standard_subscription"},
+    {"name": "Apple iCloud", "category": "software", "domain": "apple.com/icloud", "eligibility": "standard_subscription"},
+    {"name": "Google One", "category": "software", "domain": "one.google.com", "eligibility": "standard_subscription"},
+    {"name": "Dropbox", "category": "software", "domain": "dropbox.com", "eligibility": "standard_subscription"},
+    {"name": "Microsoft 365", "category": "software", "domain": "microsoft.com", "eligibility": "standard_subscription"},
+    {"name": "Adobe Creative Cloud", "category": "software", "domain": "adobe.com", "eligibility": "standard_subscription"},
+    {"name": "Planet Fitness", "category": "fitness", "domain": "planetfitness.com", "eligibility": "membership"},
+    {"name": "LA Fitness", "category": "fitness", "domain": "lafitness.com", "eligibility": "membership"},
+    {"name": "Peloton", "category": "fitness", "domain": "onepeloton.com", "eligibility": "standard_subscription"},
+    {"name": "Xfinity", "category": "utilities", "domain": "xfinity.com", "eligibility": "utility_recurring"},
+    {"name": "ComEd", "category": "utilities", "domain": "comed.com", "eligibility": "utility_recurring"},
+    {"name": "AT&T", "category": "utilities", "domain": "att.com", "eligibility": "utility_recurring"},
+    {"name": "Verizon", "category": "utilities", "domain": "verizon.com", "eligibility": "utility_recurring"},
+    {"name": "T-Mobile", "category": "utilities", "domain": "t-mobile.com", "eligibility": "utility_recurring"},
+    {"name": "DoorDash", "category": "food", "domain": "doordash.com", "eligibility": "membership"},
+    {"name": "Uber Eats", "category": "food", "domain": "ubereats.com", "eligibility": "membership"},
+    {"name": "Grubhub", "category": "food", "domain": "grubhub.com", "eligibility": "membership"},
+    {"name": "Walmart", "category": "grocery", "domain": "walmart.com", "eligibility": "not_subscribable"},
+    {"name": "Target", "category": "grocery", "domain": "target.com", "eligibility": "not_subscribable"},
+    {"name": "Costco", "category": "grocery", "domain": "costco.com", "eligibility": "membership"},
+    {"name": "Whole Foods", "category": "grocery", "domain": "wholefoodsmarket.com", "eligibility": "not_subscribable"},
+    {"name": "Kroger", "category": "grocery", "domain": "kroger.com", "eligibility": "not_subscribable"},
+    {"name": "Trader Joe's", "category": "grocery", "domain": "traderjoes.com", "eligibility": "not_subscribable"},
+    {"name": "Coursera", "category": "education", "domain": "coursera.org", "eligibility": "standard_subscription"},
+    {"name": "Udemy", "category": "education", "domain": "udemy.com", "eligibility": "standard_subscription"},
+    {"name": "LinkedIn Learning", "category": "education", "domain": "linkedin.com", "eligibility": "standard_subscription"},
+    {"name": "Starbucks", "category": "food", "domain": "starbucks.com", "eligibility": "not_subscribable"},
+    {"name": "Chipotle", "category": "food", "domain": "chipotle.com", "eligibility": "not_subscribable"},
+    {"name": "McDonald's", "category": "food", "domain": "mcdonalds.com", "eligibility": "not_subscribable"},
+    {"name": "Amazon", "category": "other", "domain": "amazon.com", "eligibility": "not_subscribable"},
+    {"name": "Walgreens", "category": "other", "domain": "walgreens.com", "eligibility": "not_subscribable"},
+    {"name": "CVS Pharmacy", "category": "other", "domain": "cvs.com", "eligibility": "not_subscribable"},
+    {"name": "Shell", "category": "other", "domain": "shell.com", "eligibility": "not_subscribable"},
+    {"name": "Chevron", "category": "other", "domain": "chevron.com", "eligibility": "not_subscribable"},
+    {"name": "Lyft", "category": "other", "domain": "lyft.com", "eligibility": "not_subscribable"},
+    {"name": "Uber", "category": "other", "domain": "uber.com", "eligibility": "not_subscribable"},
 ]
 
 # Processor prefixes for noisy merchant rendering (Section 9.5)

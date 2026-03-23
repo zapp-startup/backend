@@ -29,8 +29,45 @@ from datagen.agents.subscription import SubscriptionAgent
 from datagen.agents.valuation import ValuationAgent
 from datagen.distributions import make_rng
 from datagen.state import UserState
+from datagen.text import reset_conversation_dedup
 
 User = get_user_model()
+
+
+def _txn_date_from_dict(t: dict):
+    oc = t["occurred_at"]
+    return oc.date() if hasattr(oc, "date") else oc
+
+
+def _apply_monthly_debt_transitions(state: UserState, context: dict, start_date: date, end_date: date) -> None:
+    """Single call site for apply_debt_transition: month-end surplus from ledger context."""
+    from collections import defaultdict
+
+    income_m: dict[tuple[int, int], float] = defaultdict(float)
+    spend_m: dict[tuple[int, int], float] = defaultdict(float)
+    for t in context.get("income_transactions", []):
+        d = _txn_date_from_dict(t)
+        income_m[(d.year, d.month)] += float(t["amount"])
+    for key in ("spend_transactions", "obligation_transactions", "subscription_transactions", "anomaly_transactions"):
+        for t in context.get(key, []):
+            if t.get("direction") != "spend":
+                continue
+            d = _txn_date_from_dict(t)
+            spend_m[(d.year, d.month)] += float(t["amount"])
+    y, m = start_date.year, start_date.month
+    while True:
+        cur = date(y, m, 1)
+        if cur > end_date:
+            break
+        inc = income_m.get((y, m), 0.0)
+        spd = spend_m.get((y, m), 0.0)
+        state.apply_debt_transition(inc - spd)
+        if y == end_date.year and m == end_date.month:
+            break
+        if m == 12:
+            y, m = y + 1, 1
+        else:
+            m += 1
 
 
 def _raise_statement_timeout(seconds: int = 300) -> None:
@@ -60,6 +97,8 @@ def run_pipeline(
 
     # Raise statement_timeout for seed (avoids Postgres/Supabase default ~8s limit)
     _raise_statement_timeout(seconds=300)
+
+    reset_conversation_dedup()
 
     now = timezone.now()
     end_date = now.date()
@@ -270,6 +309,8 @@ def _generate_one_user(
     context.update(anomaly_result)
     stats["anomalies"] = len(anomaly_result.get("anomaly_transactions", []))
 
+    _apply_monthly_debt_transitions(state, context, start_date, end_date)
+
     # === Step 8: Valuation Agent ===
     valuation_agent = ValuationAgent(rng, use_llm)
     valuation_result = valuation_agent.run(state, context)
@@ -341,7 +382,7 @@ def _generate_one_user(
 
 def _persist_merchants(catalog: list[dict]) -> dict:
     """Ensure all catalog merchants exist in DB. Returns name->Merchant map."""
-    from subscriptions.models import Merchant, MerchantCategory
+    from subscriptions.models import Merchant, MerchantCategory, SubscriptionEligibility
 
     cat_map = {
         "streaming": MerchantCategory.STREAMING,
@@ -354,13 +395,41 @@ def _persist_merchants(catalog: list[dict]) -> dict:
         "other": MerchantCategory.OTHER,
     }
 
+    elig_map = {
+        "not_subscribable": SubscriptionEligibility.NOT_SUBSCRIBABLE,
+        "membership": SubscriptionEligibility.MEMBERSHIP,
+        "standard_subscription": SubscriptionEligibility.STANDARD_SUBSCRIPTION,
+        "utility_recurring": SubscriptionEligibility.UTILITY_RECURRING,
+        "insurance_recurring": SubscriptionEligibility.INSURANCE_RECURRING,
+    }
+
     db_map = {}
     for m in catalog:
         cat = cat_map.get(m["category"], MerchantCategory.OTHER)
-        obj, _ = Merchant.objects.get_or_create(
+        raw_elig = str(m.get("eligibility", "not_subscribable"))
+        elig = elig_map.get(raw_elig, SubscriptionEligibility.NOT_SUBSCRIBABLE)
+        obj, created = Merchant.objects.get_or_create(
             name=m["name"],
-            defaults={"category": cat, "website_domain": m.get("domain", "")},
+            defaults={
+                "category": cat,
+                "website_domain": m.get("domain", ""),
+                "subscription_eligibility": elig,
+            },
         )
+        if not created:
+            updates = []
+            if obj.category != cat:
+                obj.category = cat
+                updates.append("category")
+            domain = m.get("domain", "") or ""
+            if (obj.website_domain or "") != domain:
+                obj.website_domain = domain
+                updates.append("website_domain")
+            if obj.subscription_eligibility != elig:
+                obj.subscription_eligibility = elig
+                updates.append("subscription_eligibility")
+            if updates:
+                obj.save(update_fields=updates)
         db_map[m["name"]] = obj
 
     return db_map
@@ -874,9 +943,18 @@ def _compute_raw_inferred(user, db_txns: list, db_subs: list, state: UserState):
     repeat_count = sum(1 for v in merchant_counts.values() if v > 1)
     brand_rep = repeat_count / max(1, len(merchant_counts)) if merchant_counts else None
 
-    # Subscription aggregates
+    # Subscription aggregates (monthlyized price)
+    def _monthlyize_db_sub(s) -> float:
+        p = float(s.price)
+        bc = str(s.billing_cycle)
+        if bc == "yearly":
+            return p / 12.0
+        if bc == "weekly":
+            return p * 52.0 / 12.0
+        return p
+
     active_subs = [s for s in db_subs if s.status == "active"]
-    total_sub_cost = sum(float(s.price) for s in active_subs)
+    total_sub_cost = sum(_monthlyize_db_sub(s) for s in active_subs)
     monthly_income = max(1, float(state.monthly_income))
 
     # Decision time (from considered_at)
@@ -889,7 +967,10 @@ def _compute_raw_inferred(user, db_txns: list, db_subs: list, state: UserState):
     avg_decision = sum(decision_times) / len(decision_times) if decision_times else None
 
     total_spend = sum(amounts)
-    months_in_window = max(1, 3)  # 90-day window
+    dmin = min(t.occurred_at.date() if hasattr(t.occurred_at, "date") else t.occurred_at for t in spend_txns)
+    dmax = max(t.occurred_at.date() if hasattr(t.occurred_at, "date") else t.occurred_at for t in spend_txns)
+    window_days = max(1, (dmax - dmin).days + 1)
+    months_in_window = max(1.0, window_days / 30.0)
     actual_monthly = total_spend / months_in_window
 
     # Subscription usage frequency
@@ -914,7 +995,7 @@ def _compute_raw_inferred(user, db_txns: list, db_subs: list, state: UserState):
     UserRawInferred.objects.update_or_create(
         user=user,
         defaults={
-            "window_days": 90,
+            "window_days": min(365, window_days),
             "avg_purchase_price": Decimal(str(round(avg_price, 2))),
             "purchase_price_variance": Decimal(str(round(variance, 6))),
             "category_distribution_json": cat_dist,

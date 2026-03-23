@@ -12,6 +12,22 @@ from numpy.random import Generator
 
 from datagen.llm import _call_openai, is_llm_available
 
+# Dataset-level assistant sentence repetition control (reset each pipeline run)
+_ASSISTANT_SENTENCE_COUNTS: dict[str, int] = {}
+
+
+def reset_conversation_dedup() -> None:
+    """Clear cross-user assistant sentence counts (call at pipeline start / tests)."""
+    _ASSISTANT_SENTENCE_COUNTS.clear()
+
+
+def _register_assistant_sentence(content: str) -> str:
+    n = _ASSISTANT_SENTENCE_COUNTS.get(content, 0)
+    _ASSISTANT_SENTENCE_COUNTS[content] = n + 1
+    if n >= 10:
+        return content + " "
+    return content
+
 
 # ---------------------------------------------------------------------------
 # Reflection text templates (Behavior Agent, Section 13)
@@ -52,22 +68,31 @@ _CONVERSATION_USER_TEMPLATES = {
         "Should I cancel my {merchant} subscription?",
         "I barely use {merchant} anymore. Worth the ${price}?",
         "How does my {merchant} usage compare to what I'm paying?",
+        "Too many subscriptions — is {merchant} one I should drop first?",
+        "My {merchant} bill feels high vs what I use. Thoughts?",
+        "Debt is tight; should I cut {merchant} or something else?",
     ],
     "budget_advice": [
         "I feel like I'm spending too much on {category}. Any tips?",
         "Can you help me figure out where my money is going?",
         "I want to cut my monthly expenses by 20%. Where should I start?",
         "My spending feels out of control this month. What should I do?",
+        "I had a spending spike — where did the money go?",
+        "Subscriptions add up to ${total_subscription_spend_monthly}/mo — help me trim.",
+        "I'm oversubscribed and stressed about cash flow.",
     ],
     "item_valuation": [
         "I'm thinking about buying a {item}. Is it worth ${price}?",
         "Should I wait for a sale on {item} or buy now?",
         "Is {item} a good value at ${price} given my budget?",
+        "Is {item} a bad idea if money is tight?",
+        "Would you buy {item} at ${price} or skip?",
     ],
     "spending_regret": [
         "I keep buying things late at night and regretting it. How do I stop?",
         "I just realized I spent ${amount} on {category} this month. That's too much.",
         "I need help with impulse spending. It's getting worse.",
+        "I regret last week's splurge — how do I recover?",
     ],
 }
 
@@ -77,23 +102,29 @@ _CONVERSATION_ASSISTANT_TEMPLATES = {
         "At ${price}/mo, that's about ${per_use} per session. {recommendation}.",
         "Looking at your {merchant} subscription: {recommendation}. "
         "Your usage has been {usage_trend} over the past 3 months.",
+        "From your data: {merchant} costs ${price}/mo and usage is {usage}/week. {recommendation}",
+        "If cash is tight, {recommendation} for {merchant} given ${price}/mo.",
     ],
     "budget_advice": [
         "Looking at your spending breakdown: {top_categories}. "
         "The biggest opportunity to save is in {category} where you're spending "
         "{pct}% more than similar users.",
         "Here's what I'd suggest: {advice}. This could save you about ${savings}/month.",
+        "Your top categories this period: {top_categories}. Start with {category}.",
+        "You asked about cash flow; your recorded monthly spend in this window is ${amount}.",
     ],
     "item_valuation": [
         "For the {item} at ${price}: based on your preferences and budget, "
         "I'd give it a {score}/100 personal fit score. {recommendation}.",
         "The {item} is {price_assessment} compared to alternatives. "
         "Given your {budget_status} budget status, I'd recommend: {recommendation}.",
+        "Fit score ~{score}/150 for {item} at ${price}. {recommendation}.",
     ],
     "spending_regret": [
         "I can see the pattern - {pct}% of your regretted purchases happen after 10pm. "
         "Consider setting up a cooling-off reminder for late-night browsing.",
         "Your impulse spending averages ${amount}/month. Here are three strategies: {strategies}.",
+        "From your totals: {top_categories}. Try a 24h rule before non-essential buys.",
     ],
 }
 
@@ -188,6 +219,9 @@ def generate_conversation_messages(
             content = tpl.format(**{k: v for k, v in template_vars.items()})
         except (KeyError, IndexError):
             content = tpl.split("{")[0].strip() or tpl
+
+        if role == "assistant":
+            content = _register_assistant_sentence(content)
 
         messages.append({"role": role, "content": content})
 

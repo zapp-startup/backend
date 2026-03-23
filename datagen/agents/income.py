@@ -42,7 +42,10 @@ class IncomeAgent(BaseAgent):
         arch = state.archetype
         monthly_income = float(state.monthly_income)
 
-        noise_sigma = float(rng.uniform(*INCOME_NOISE_SIGMA))
+        stab_mult = {"stable": 1.0, "variable": 1.85, "fragile": 2.6}.get(
+            state.income_stability_state, 1.0
+        )
+        noise_sigma = float(rng.uniform(*INCOME_NOISE_SIGMA)) * stab_mult
         transactions = []
 
         if arch in ("salary_biweekly", "hourly_weekly"):

@@ -1,8 +1,7 @@
 """
 Agent 9: Valuation Agent (Section 15)
 Creates synthetic ground-truth valuation outputs for items and subscriptions.
-Uses utility-based formulas with structured JSON evidence.
-Writes to: valuations_subscriptionvaluation, valuations_itemvaluation
+Probabilistic buy/wait/skip mapping on 0–150 score space.
 """
 
 from __future__ import annotations
@@ -10,11 +9,10 @@ from __future__ import annotations
 from datetime import date, timedelta
 from decimal import Decimal
 
+import numpy as np
+
 from datagen.agents.base import BaseAgent
 from datagen.config import (
-    ITEM_REC_THRESHOLDS,
-    ITEM_VALUE_WEIGHTS,
-    SUBSCRIPTION_REC_THRESHOLDS,
     SUBSCRIPTION_VALUE_WEIGHTS,
     VALUATION_SCORE_BANDS,
 )
@@ -44,6 +42,24 @@ ITEM_POOL = [
 ]
 
 
+def _income_tier(monthly_income: float) -> str:
+    annual = monthly_income * 12
+    if annual < 25000:
+        return "low"
+    if annual < 50000:
+        return "moderate"
+    return "high"
+
+
+def _softmax_choice(rng, logits: list[float], labels: tuple[str, ...]) -> str:
+    x = np.array(logits, dtype=float) + rng.normal(0, 0.4, size=len(logits))
+    x = x - np.max(x)
+    e = np.exp(x)
+    p = e / e.sum()
+    i = int(rng.choice(len(labels), p=p))
+    return labels[i]
+
+
 class ValuationAgent(BaseAgent):
     """Generate subscription and item valuations with structured evidence."""
 
@@ -57,19 +73,16 @@ class ValuationAgent(BaseAgent):
         sub_valuations = []
         item_valuations = []
 
-        # Subscription valuations (Section 15.4)
         for sub in subscriptions:
             vals = self._valuate_subscription(state, sub, start_date, end_date)
             sub_valuations.extend(vals)
 
-        # Item valuations for ~90% of spend transactions (product feedback)
         for txn in spend_txns:
             if rng.random() < 0.90:
                 val = self._valuate_spend_transaction(state, txn)
                 if val:
                     item_valuations.append(val)
 
-        # Additional valuations from ITEM_POOL for variety (fewer)
         n_extra = max(0, int(rng.poisson(2)))
         for _ in range(n_extra):
             item_valuations.append(self._valuate_item(state))
@@ -99,7 +112,6 @@ class ValuationAgent(BaseAgent):
             )
 
             usage = clip01(float(rng.beta(2, 3)) * (1 + (sub.get("usage_frequency", 3) / 7.0)))
-            price = float(sub.get("price", 10))
             total_cost = self._period_cost(sub, period_start, period_end)
             total_cost_float = float(total_cost)
             monthly_income = max(1, float(state.monthly_income))
@@ -116,7 +128,16 @@ class ValuationAgent(BaseAgent):
                 + float(rng.normal(0, 0.1))
             )
             monthly_cost_equivalent = max(0.01, self._monthly_subscription_cost(sub))
+            cost_share = monthly_cost_equivalent / monthly_income
             cost_ratio = min(1.0, monthly_cost_equivalent / (monthly_income * 0.05))
+
+            burden_penalty = {
+                "light": 0.0,
+                "normal": 0.1,
+                "stretched": 0.5,
+                "overloaded": 1.2,
+            }.get(state.subscription_burden_state, 0.1)
+            price_pressure = state.price_sensitivity * cost_share * 2.0
 
             raw_value = (
                 w["w_usage"] * usage
@@ -132,34 +153,47 @@ class ValuationAgent(BaseAgent):
             )))
             net_value = estimated_value - total_cost
 
-            # Section 15.6: Recommendation mapping
-            net_ratio = float(net_value) / max(0.01, float(total_cost))
-            if net_ratio > SUBSCRIPTION_REC_THRESHOLDS["keep"]:
-                rec = "buy"  # "keep" maps to buy in Recommendation choices
-            elif net_ratio < SUBSCRIPTION_REC_THRESHOLDS["cancel"]:
-                rec = "skip"  # "cancel" maps to skip
-            else:
-                rec = "wait"  # "downgrade"
+            keep_logit = (
+                w["w_usage"] * usage
+                + w["w_habit"] * habit
+                - w["w_friction"] * friction
+                - w["w_cost"] * cost_share
+                - burden_penalty
+                - price_pressure
+            )
+            cancel_logit = -keep_logit
+            wait_logit = 0.0
 
-            # Confidence (Section 15.7)
+            if usage < 0.15 and cost_share > 0.08:
+                rec = "skip" if rng.random() < 0.80 else _softmax_choice(
+                    rng, [keep_logit, wait_logit, cancel_logit], ("buy", "wait", "skip")
+                )
+            else:
+                rec = _softmax_choice(
+                    rng,
+                    [keep_logit + float(rng.normal(0, 0.3)),
+                     wait_logit + float(rng.normal(0, 0.25)),
+                     cancel_logit + float(rng.normal(0, 0.3))],
+                    ("buy", "wait", "skip"),
+                )
+
             signal_count = 3 + int(usage > 0.3) + int(habit > 0.5)
+            net_ratio = float(net_value) / max(0.01, float(total_cost))
             ambiguity = abs(net_ratio)
             confidence = clip01(logistic_simple(
                 0.5 + 0.2 * signal_count - 0.3 * (1 - ambiguity)
             ))
 
-            # personal_value_score 0-150: usage + fit + habit - friction
             usage_fit = (usage + fit) / 2.0
             habit_friction = habit - friction
             combo = clip01(0.5 + 0.5 * (usage_fit + habit_friction) / 2)
             sb = VALUATION_SCORE_BANDS
-            if combo > 0.75:  # extremely useful
+            if combo > 0.75:
                 sub_score = int(rng.integers(sb["extremely_useful_min"], sb["extremely_useful_max"] + 1))
-            elif combo > 0.45:  # match value
+            elif combo > 0.45:
                 sub_score = int(rng.integers(sb["match_lo"], sb["match_hi"] + 1))
-            else:  # underused
+            else:
                 sub_score = int(rng.integers(20, sb["underused_max"] + 1))
-            # Add noise: ±8 points so adjacent valuations vary
             sub_score = int(max(0, min(150, sub_score + int(rng.normal(0, 8)))))
 
             explanation = generate_explanation_json(rng, "subscription", {
@@ -191,6 +225,7 @@ class ValuationAgent(BaseAgent):
                     else "subscription_renewal"
                 ),
                 "_sub_ref": sub,
+                "_sub_key": sub.get("_sub_key"),
             })
 
             current = period_end + timedelta(days=1)
@@ -218,8 +253,25 @@ class ValuationAgent(BaseAgent):
             daily_cost = price / 30.0
         return Decimal(str(round(daily_cost * days_in_period, 2)))
 
+    def _item_recommendation_from_score(
+        self,
+        state: UserState,
+        score: int,
+        price_fairness: float,
+        need_fit: float,
+    ) -> str:
+        rng = self.rng
+        mi = float(state.monthly_income or 1)
+        tier = _income_tier(mi)
+        buy_logit = (score - 90) / 25.0
+        skip_logit = (65 - score) / 25.0
+        wait_logit = 0.0
+        buy_logit -= state.price_sensitivity * (1.0 - price_fairness) * 1.5
+        if tier in ("low", "moderate") and price_fairness < 0.5 and need_fit < 0.6:
+            buy_logit -= (0.5 - price_fairness) * 1.5
+        return _softmax_choice(rng, [buy_logit, wait_logit, skip_logit], ("buy", "wait", "skip"))
+
     def _valuate_spend_transaction(self, state: UserState, txn: dict) -> dict | None:
-        """Create ItemValuation for a spend transaction using merchant + behavioral signals."""
         rng = self.rng
         merch = txn.get("merchant_info", {})
         if not merch:
@@ -231,7 +283,6 @@ class ValuationAgent(BaseAgent):
         satisfaction = txn.get("satisfaction_rating") or 5
         regret = txn.get("regret_score") or 0.3
 
-        # usage proxy: usage_freq/7 and satisfaction/10
         usage_proxy = clip01(usage_freq / 7.0 * 0.5 + satisfaction / 10.0 * 0.5)
         fit_proxy = clip01(1.0 - regret + float(rng.normal(0, 0.1)))
         combo = (usage_proxy + fit_proxy) / 2.0
@@ -243,15 +294,11 @@ class ValuationAgent(BaseAgent):
             score = int(rng.integers(sb["match_lo"], sb["match_hi"] + 1))
         else:
             score = int(rng.integers(20, sb["underused_max"] + 1))
-        # Add noise: ±10 points for spend transactions
         score = int(max(0, min(150, score + int(rng.normal(0, 10)))))
 
-        if score >= ITEM_REC_THRESHOLDS["buy"]:
-            rec = "buy"
-        elif score >= ITEM_REC_THRESHOLDS["wait"]:
-            rec = "wait"
-        else:
-            rec = "skip"
+        price_fairness = clip01(1.0 - abs(amount - amount * 0.95) / max(1, amount))
+        need_fit = fit_proxy
+        rec = self._item_recommendation_from_score(state, score, price_fairness, need_fit)
 
         fair_price = Decimal(str(round(amount * 0.9, 2)))
         observed_price = Decimal(str(round(amount, 2)))
@@ -277,9 +324,7 @@ class ValuationAgent(BaseAgent):
         }
 
     def _valuate_item(self, state: UserState) -> dict:
-        """Create ItemValuation from ITEM_POOL with score bands 0-150."""
         rng = self.rng
-        w = ITEM_VALUE_WEIGHTS
 
         item_name, item_cat, price_lo, price_hi = ITEM_POOL[
             int(rng.integers(0, len(ITEM_POOL)))
@@ -311,15 +356,11 @@ class ValuationAgent(BaseAgent):
             personal_value_score = int(rng.integers(sb["match_lo"], sb["match_hi"] + 1))
         else:
             personal_value_score = int(rng.integers(20, sb["underused_max"] + 1))
-        # Add noise: ±10 points for ITEM_POOL valuations
         personal_value_score = int(max(0, min(150, personal_value_score + int(rng.normal(0, 10)))))
 
-        if personal_value_score >= ITEM_REC_THRESHOLDS["buy"]:
-            rec = "buy"
-        elif personal_value_score >= ITEM_REC_THRESHOLDS["wait"]:
-            rec = "wait"
-        else:
-            rec = "skip"
+        rec = self._item_recommendation_from_score(
+            state, personal_value_score, price_fairness, need_fit,
+        )
 
         signal_count = 3
         confidence = clip01(0.5 + 0.1 * signal_count + float(rng.normal(0, 0.05)))

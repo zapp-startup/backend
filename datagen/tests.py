@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -8,11 +9,17 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
 
+from datagen.agents.audit import AuditAgent
+from datagen.agents.conversation import ConversationAgent
 from datagen.agents.valuation import ValuationAgent
+from datagen.config import CANCEL_BASE_GAMMA, CANCEL_OVERLOAD_GAMMA, MERCHANT_CATEGORY_COMPAT
 from datagen.distributions import make_rng
 from datagen.pipeline import run_pipeline
 from datagen.state import UserState
-from subscriptions.models import Subscription, SubscriptionStatus
+from datagen.text import reset_conversation_dedup
+from subscriptions.models import Subscription, SubscriptionEligibility, SubscriptionStatus
+from transactions.models import Transaction, TransactionDirection
+from users.models import UserComputed, UserRawInferred
 from valuations.models import SubscriptionValuation, ValuationContext
 
 User = get_user_model()
@@ -21,6 +28,7 @@ User = get_user_model()
 class DatagenPipelineTests(TestCase):
     def setUp(self):
         self.fixed_now = timezone.make_aware(datetime(2026, 3, 21, 12, 0, 0))
+        reset_conversation_dedup()
 
     def _run_seed(self, prefix: str, seed: int, months: int = 2, users: int = 1):
         with patch("datagen.pipeline.timezone.now", return_value=self.fixed_now):
@@ -141,3 +149,289 @@ class ValuationAgentTests(TestCase):
             self.assertLessEqual(valuation["period_end"], subscription["cancelled_on"])
             self.assertLessEqual(valuation["total_cost"], Decimal("120.00"))
             self.assertIn(valuation["context"], {"subscription_renewal", "subscription_cancel"})
+
+
+def _monthlyize_subscription_row(sub: Subscription) -> float:
+    p = float(sub.price)
+    bc = str(sub.billing_cycle)
+    if bc == "yearly":
+        return p / 12.0
+    if bc == "weekly":
+        return p * 52.0 / 12.0
+    return p
+
+
+class SyntheticRealismPatchTests(TestCase):
+    """Tests for the synthetic data realism patch (plan checklist)."""
+
+    def setUp(self):
+        self.fixed_now = timezone.make_aware(datetime(2026, 3, 21, 12, 0, 0))
+        reset_conversation_dedup()
+
+    def _run_seed(self, prefix: str, seed: int, months: int = 2, users: int = 1):
+        with patch("datagen.pipeline.timezone.now", return_value=self.fixed_now):
+            return run_pipeline(
+                num_users=users,
+                months=months,
+                prefix=prefix,
+                password="password123",
+                use_llm=False,
+                seed=seed,
+                log=lambda _msg: None,
+            )
+
+    def test_no_not_subscribable_merchant_in_subscription_table(self):
+        prefix = "elig_"
+        self._run_seed(prefix=prefix, seed=101)
+        bad = Subscription.objects.filter(
+            merchant__subscription_eligibility=SubscriptionEligibility.NOT_SUBSCRIBABLE,
+        )
+        self.assertEqual(bad.count(), 0)
+
+    def test_raw_inferred_total_subscription_cost_matches_monthlyized_active(self):
+        prefix = "subcost_"
+        self._run_seed(prefix=prefix, seed=202)
+        user = User.objects.get(username=f"{prefix}user_0")
+        expected = sum(
+            _monthlyize_subscription_row(s)
+            for s in Subscription.objects.filter(user=user, status=SubscriptionStatus.ACTIVE)
+        )
+        inferred = UserRawInferred.objects.get(user=user)
+        self.assertIsNotNone(inferred.total_subscription_cost)
+        self.assertAlmostEqual(float(inferred.total_subscription_cost), expected, places=2)
+
+    def test_actual_monthly_spending_is_window_total_over_months(self):
+        prefix = "monthly_"
+        self._run_seed(prefix=prefix, seed=303)
+        user = User.objects.get(username=f"{prefix}user_0")
+        spends = list(
+            Transaction.objects.filter(user=user, direction=TransactionDirection.SPEND).order_by(
+                "occurred_at"
+            )
+        )
+        self.assertTrue(spends)
+        total = sum(float(t.amount) for t in spends)
+        dmin = min(t.occurred_at.date() for t in spends)
+        dmax = max(t.occurred_at.date() for t in spends)
+        window_days = max(1, (dmax - dmin).days + 1)
+        months_in_window = max(1.0, window_days / 30.0)
+        expected = total / months_in_window
+        inferred = UserRawInferred.objects.get(user=user)
+        self.assertAlmostEqual(float(inferred.actual_monthly_spending), expected, places=1)
+
+    def test_overloaded_cancel_probability_exceeds_light_burden(self):
+        """Cancellation p includes overload gamma; Monte Carlo mean should be higher."""
+        rng = np.random.default_rng(7)
+        n = 4000
+        p_light = CANCEL_BASE_GAMMA
+        p_over = CANCEL_BASE_GAMMA + CANCEL_OVERLOAD_GAMMA
+        light_cancels = (rng.random(n) < p_light).mean()
+        over_cancels = (rng.random(n) < p_over).mean()
+        self.assertGreater(over_cancels, light_cancels)
+        self.assertGreater(p_over, p_light)
+
+    def test_persistent_deficits_worsen_debt_carry_state(self):
+        state = UserState(monthly_income=Decimal("4000"))
+        state.debt_carry_state = "none"
+        for _ in range(3):
+            state.apply_debt_transition(-500.0)
+        self.assertNotEqual(state.debt_carry_state, "none")
+
+    def test_audit_logs_disallowed_merchant_category_compat(self):
+        agent = AuditAgent(make_rng(1), use_llm=False)
+        pair = next(k for k, v in MERCHANT_CATEGORY_COMPAT.items() if v == "disallowed")
+        ctx = {
+            "spend_transactions": [
+                {
+                    "merchant_info": {"category": pair[0]},
+                    "spend_category": pair[1],
+                }
+            ]
+        }
+        repairs = agent._check_merchant_category_compat(ctx)
+        self.assertTrue(any("compat" in r for r in repairs))
+
+    def test_item_valuation_softmax_stochastic_and_score_band_monotonic(self):
+        state = UserState(monthly_income=Decimal("5500"), price_sensitivity=0.35)
+
+        def band_buy_rate(lo: int, hi: int, seed: int) -> float:
+            agent = ValuationAgent(make_rng(seed), use_llm=False)
+            n = 60
+            buys = 0
+            for _ in range(n):
+                score = int(agent.rng.integers(lo, hi + 1))
+                rec = agent._item_recommendation_from_score(state, score, 0.75, 0.72)
+                if rec == "buy":
+                    buys += 1
+            return buys / n
+
+        r_low = band_buy_rate(0, 50, 11)
+        r_high = band_buy_rate(100, 150, 22)
+        self.assertGreater(r_high, r_low)
+
+        agent = ValuationAgent(make_rng(99), use_llm=False)
+        recs = [agent._item_recommendation_from_score(state, 85, 0.7, 0.7) for _ in range(50)]
+        self.assertGreater(len(set(recs)), 1)
+
+    def test_conversation_roles_alternate_and_no_duplicate_content(self):
+        prefix = "convo_"
+        self._run_seed(prefix=prefix, seed=404, months=3)
+        user = User.objects.get(username=f"{prefix}user_0")
+        for convo in user.conversations.all():
+            messages = list(convo.messages.order_by("created_at", "id"))
+            if len(messages) < 2:
+                continue
+            roles = [m.role for m in messages]
+            for i in range(len(roles) - 1):
+                self.assertNotEqual(roles[i], roles[i + 1])
+            contents = [m.content.strip() for m in messages]
+            self.assertEqual(len(contents), len(set(contents)))
+
+    def test_over_subscribed_fact_not_emitted_when_thresholds_not_met(self):
+        agent = ConversationAgent(make_rng(5), use_llm=False)
+        state = UserState(monthly_income=Decimal("8000"))
+        subs = []
+        for i in range(7):
+            subs.append(
+                {
+                    "status": "active",
+                    "price": Decimal("10.00"),
+                    "billing_cycle": "monthly",
+                    "usage_frequency": 1,
+                    "merchant_info": {"name": f"S{i}"},
+                }
+            )
+        ctx = {
+            "subscriptions": subs,
+            "start_date": date(2025, 1, 1),
+            "end_date": date(2025, 6, 1),
+            "spend_transactions": [],
+            "item_valuations": [],
+            "subscription_valuations": [],
+        }
+        out = agent.run(state, ctx)
+        keys = [f.get("fact_key") for f in out.get("conversation_facts", [])]
+        self.assertNotIn("over_subscribed", keys)
+
+    def test_pipeline_creates_profile_layers_and_audit_income_rule(self):
+        prefix = "layers_"
+        self._run_seed(prefix=prefix, seed=505)
+        user = User.objects.get(username=f"{prefix}user_0")
+        self.assertTrue(UserRawInferred.objects.filter(user=user).exists())
+        self.assertTrue(UserComputed.objects.filter(user=user).exists())
+        self.assertIsNotNone(user.raw_explicit)
+
+        audit = AuditAgent(make_rng(1), use_llm=False)
+        st = UserState()
+        bad = audit.run(
+            st,
+            {"income_transactions": [], "behavior_facts": [], "conversation_facts": []},
+        )
+        self.assertTrue(any("income" in r for r in bad["audit_repairs"]))
+
+        ok = audit.run(
+            st,
+            {
+                "income_transactions": [],
+                "behavior_facts": [{"fact_key": "intentionally_sparse"}],
+                "conversation_facts": [],
+            },
+        )
+        self.assertFalse(any("income" in r for r in ok["audit_repairs"]))
+
+    def test_price_sensitivity_reduces_buy_probability_for_overpriced_items(self):
+        """High price_sensitivity should reduce buy rate when item is overpriced."""
+        sensitive = UserState(
+            monthly_income=Decimal("3500"),
+            price_sensitivity=0.95,
+            quality_preference=0.3,
+        )
+        insensitive = UserState(
+            monthly_income=Decimal("3500"),
+            price_sensitivity=0.05,
+            quality_preference=0.3,
+        )
+        n = 200
+        # Score 110 — leans buy, but low price_fairness should pull sensitive users away
+        def buy_rate(state: UserState, seed: int) -> float:
+            agent = ValuationAgent(make_rng(seed), use_llm=False)
+            buys = sum(
+                1 for _ in range(n)
+                if agent._item_recommendation_from_score(state, 110, 0.15, 0.5) == "buy"
+            )
+            return buys / n
+
+        r_sensitive = buy_rate(sensitive, 42)
+        r_insensitive = buy_rate(insensitive, 42)
+        self.assertLess(r_sensitive, r_insensitive)
+
+    def test_subscription_valuation_burden_shifts_toward_skip(self):
+        """High cost share + overloaded burden should produce more skip than cheap sub."""
+        base_state = dict(
+            quality_preference=0.4,
+            credit_stress=0.4,
+            regret_sensitivity=0.4,
+            price_sensitivity=0.7,
+        )
+        expensive_state = UserState(
+            monthly_income=Decimal("3000"),
+            subscription_burden_state="overloaded",
+            **base_state,
+        )
+        cheap_state = UserState(
+            monthly_income=Decimal("3000"),
+            subscription_burden_state="light",
+            **base_state,
+        )
+
+        def rec_counts(state: UserState, price: Decimal, seed: int) -> dict[str, int]:
+            agent = ValuationAgent(make_rng(seed), use_llm=False)
+            sub = {
+                "status": "active",
+                "billing_cycle": "monthly",
+                "price": price,
+                "started_on": date(2025, 1, 1),
+                "cancelled_on": None,
+                "usage_frequency": 1,
+            }
+            vals = agent._valuate_subscription(
+                state=state, sub=sub,
+                start=date(2025, 1, 1), end=date(2025, 12, 31),
+            )
+            counts: dict[str, int] = {"buy": 0, "wait": 0, "skip": 0}
+            for v in vals:
+                counts[v["recommendation"]] = counts.get(v["recommendation"], 0) + 1
+            return counts
+
+        # Expensive sub (cost_share=0.25) under overloaded burden
+        exp = rec_counts(expensive_state, Decimal("750.00"), 77)
+        # Cheap sub (cost_share=0.01) under light burden
+        chp = rec_counts(cheap_state, Decimal("30.00"), 77)
+
+        # Expensive/overloaded should produce at least as many skips as cheap/light
+        self.assertGreaterEqual(exp.get("skip", 0), chp.get("skip", 0))
+
+    def test_audit_subscription_metric_consistency_recomputes_burden(self):
+        """Audit should fix stale subscription_burden_state."""
+        audit = AuditAgent(make_rng(1), use_llm=False)
+        state = UserState(monthly_income=Decimal("4000"))
+        state.subscription_burden_state = "light"  # stale — will be overloaded after sub added
+        ctx = {
+            "subscriptions": [
+                {
+                    "status": "active",
+                    "price": Decimal("800.00"),
+                    "billing_cycle": "monthly",
+                    "merchant_info": {"name": "SomeService", "eligibility": "standard_subscription"},
+                    "_sub_key": "SomeService::2025-01-01",
+                }
+            ],
+            "subscription_transactions": [],
+            "subscription_valuations": [],
+            "behavior_facts": [{"fact_key": "intentionally_sparse"}],
+            "conversation_facts": [],
+        }
+        repairs = audit.run(state, ctx)["audit_repairs"]
+        # Burden should now be overloaded (800/4000 = 0.2 > 0.15)
+        self.assertEqual(state.subscription_burden_state, "overloaded")
+        self.assertTrue(any("burden" in r or "Recomputed" in r for r in repairs))

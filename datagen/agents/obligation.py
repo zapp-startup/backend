@@ -60,8 +60,12 @@ class ObligationAgent(BaseAgent):
 
     def _generate_rent(self, state: UserState, start: date, end: date) -> list[dict]:
         rng = self.rng
+        if state.housing_independence_state == "dependent" and rng.random() < 0.92:
+            return []
         ratio = sample_beta(rng, *RENT_RATIO_BETA)
         ratio = max(RENT_RATIO_CAP[0], min(RENT_RATIO_CAP[1], ratio))
+        if state.housing_independence_state == "shared":
+            ratio *= 0.55
         rent_amount = Decimal(str(round(float(state.monthly_income) * ratio, 2)))
 
         txns = []

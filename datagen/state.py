@@ -10,7 +10,15 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
-from datagen.config import LIQUIDITY_THRESHOLDS
+from datagen.config import (
+    DEBT_RECOVER_MONTHS,
+    DEBT_WORSEN_MONTHS,
+    LIQUIDITY_THRESHOLDS,
+    SUBSCRIPTION_BURDEN_THRESHOLDS,
+)
+
+
+DEBT_CARRY_ORDER = ["none", "managed", "revolving", "stressed"]
 
 
 @dataclass
@@ -41,6 +49,17 @@ class UserState:
 
     payday_eta: float = 0.5
     payday_tau: float = 5.0
+
+    # Extended latent dimensions (synthetic realism patch)
+    debt_carry_state: str = "none"
+    income_stability_state: str = "stable"
+    price_sensitivity: float = 0.5
+    subscription_burden_state: str = "light"
+    housing_independence_state: str = "independent"
+
+    _consecutive_deficit_months: int = 0
+    _consecutive_surplus_months: int = 0
+    large_purchase_shock_this_month: bool = False
 
     def update_liquidity(self) -> None:
         """Section 18.1: Update liquidity state based on balance proxy vs fixed expenses."""
@@ -105,3 +124,63 @@ class UserState:
             self.subscription_engagement = "churn_prone"
         elif self.subscription_engagement == "churn_prone" and rng.random() < 0.15:
             self.subscription_engagement = "moderate"
+
+    def update_subscription_burden(self, monthlyized_sub_cost: float) -> None:
+        """Classify subscription burden from monthlyized cost / monthly take-home income."""
+        mi = float(self.monthly_income)
+        if mi <= 0:
+            self.subscription_burden_state = "light"
+            return
+        ratio = monthlyized_sub_cost / mi
+        t = SUBSCRIPTION_BURDEN_THRESHOLDS
+        if ratio < t["light"]:
+            self.subscription_burden_state = "light"
+        elif ratio < t["normal"]:
+            self.subscription_burden_state = "normal"
+        elif ratio < t["stretched"]:
+            self.subscription_burden_state = "stretched"
+        else:
+            self.subscription_burden_state = "overloaded"
+
+    def apply_debt_transition(self, monthly_surplus: float) -> None:
+        """
+        Single source of truth for debt state changes from monthly cash flow persistence.
+        Do not call from individual transactions; use month-end surplus only.
+        """
+        if monthly_surplus < 0:
+            self._consecutive_deficit_months += 1
+            self._consecutive_surplus_months = 0
+            if self._consecutive_deficit_months >= DEBT_WORSEN_MONTHS:
+                self._worsen_debt_one_step()
+                self._consecutive_deficit_months = 0
+        else:
+            self._consecutive_surplus_months += 1
+            self._consecutive_deficit_months = 0
+            if self._consecutive_surplus_months >= DEBT_RECOVER_MONTHS:
+                self._recover_debt_one_step()
+                self._consecutive_surplus_months = 0
+
+    def _worsen_debt_one_step(self) -> None:
+        idx = DEBT_CARRY_ORDER.index(self.debt_carry_state) if self.debt_carry_state in DEBT_CARRY_ORDER else 0
+        if idx < len(DEBT_CARRY_ORDER) - 1:
+            self.debt_carry_state = DEBT_CARRY_ORDER[idx + 1]
+
+    def _recover_debt_one_step(self) -> None:
+        idx = DEBT_CARRY_ORDER.index(self.debt_carry_state) if self.debt_carry_state in DEBT_CARRY_ORDER else 0
+        if idx > 0:
+            self.debt_carry_state = DEBT_CARRY_ORDER[idx - 1]
+
+    def income_stability_numeric(self) -> float:
+        """0=stable, 1=fragile for reserve scaling."""
+        return {"stable": 0.0, "variable": 0.5, "fragile": 1.0}.get(
+            self.income_stability_state, 0.25
+        )
+
+    def debt_capacity_monthly(self) -> float:
+        """Small credit allowance from revolving debt (fraction of income)."""
+        return {
+            "none": 0.0,
+            "managed": 0.02,
+            "revolving": 0.05,
+            "stressed": 0.08,
+        }.get(self.debt_carry_state, 0.0) * float(self.monthly_income or 0)

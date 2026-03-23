@@ -16,6 +16,8 @@ from datagen.config import (
     ANNUAL_BILLING_PROBABILITY,
     CANCEL_BASE_GAMMA,
     CANCEL_CHURN_GAMMA,
+    CANCEL_OVERLOAD_GAMMA,
+    CANCEL_STRETCH_GAMMA,
     CANCEL_TIGHT_GAMMA,
     FAILED_CHARGE_PROBABILITY,
     PRICE_INCREASE_YEARLY,
@@ -27,6 +29,16 @@ from datagen.config import (
 )
 from datagen.distributions import make_aware_dt, sample_lognormal_decimal, sample_poisson
 from datagen.state import UserState
+
+
+def _monthly_subscription_cost(sub: dict) -> float:
+    price = float(sub.get("price", 0) or 0)
+    billing_cycle = sub.get("billing_cycle", "monthly")
+    if billing_cycle == "yearly":
+        return price / 12.0
+    if billing_cycle == "weekly":
+        return price * 52.0 / 12.0
+    return price
 
 
 class SubscriptionAgent(BaseAgent):
@@ -71,22 +83,40 @@ class SubscriptionAgent(BaseAgent):
             # Started somewhere in the window
             days_range = (end_date - start_date).days
             started_on = start_date + timedelta(days=int(rng.integers(0, max(1, days_range - 60))))
+            sub_key = f"{merch['name']}::{started_on.isoformat()}"
 
             # Simulate lifecycle
             sub_data, charges = self._simulate_lifecycle(
                 state, started_on, end_date, base_price,
-                billing_cycle, has_trial, merch, merchant_agent,
+                billing_cycle, has_trial, merch, merchant_agent, sub_key,
             )
             sub_data["merchant_info"] = merch
+            sub_data["_sub_key"] = sub_key
             sub_data["plan_name"] = str(rng.choice(["Basic", "Standard", "Premium", "Plus", "Student", None]))
 
             subscriptions.append(sub_data)
+            for c in charges:
+                c["_sub_key"] = sub_key
             sub_transactions.extend(charges)
+
+            active_cost = sum(
+                _monthly_subscription_cost(s)
+                for s in subscriptions
+                if s.get("status") == "active"
+            )
+            state.update_subscription_burden(active_cost)
 
         # Update balance
         total_sub_cost = sum(t["amount"] for t in sub_transactions)
         state.balance_proxy -= total_sub_cost
         state.update_liquidity()
+
+        active_monthly = sum(
+            _monthly_subscription_cost(s)
+            for s in subscriptions
+            if s.get("status") == "active"
+        )
+        state.update_subscription_burden(active_monthly)
 
         return {
             "subscriptions": subscriptions,
@@ -95,13 +125,14 @@ class SubscriptionAgent(BaseAgent):
 
     def _simulate_lifecycle(self, state: UserState, started: date, end: date,
                             price: Decimal, billing_cycle: str, has_trial: bool,
-                            merch: dict, merchant_agent) -> tuple[dict, list[dict]]:
+                            merch: dict, merchant_agent, sub_key: str) -> tuple[dict, list[dict]]:
         rng = self.rng
         charges: list[dict] = []
         current_price = price
         status = "active"
         cancelled_on = None
         reactivation_count = 0
+        usage_frequency = int(rng.integers(0, 8))
 
         period_days = 365 if billing_cycle == "yearly" else 30
         current = started
@@ -131,14 +162,14 @@ class SubscriptionAgent(BaseAgent):
                 retry_date = current + timedelta(days=retry_lag)
                 if retry_date <= end:
                     charges.append(self._make_charge(
-                        retry_date, current_price, merch, merchant_agent, state
+                        retry_date, current_price, merch, merchant_agent, state, sub_key,
                     ))
                 current += timedelta(days=period_days)
                 continue
 
             # Normal charge
             charges.append(self._make_charge(
-                current, current_price, merch, merchant_agent, state
+                current, current_price, merch, merchant_agent, state, sub_key,
             ))
 
             # Price increase check (yearly)
@@ -147,12 +178,18 @@ class SubscriptionAgent(BaseAgent):
                 bump = Decimal(str(round(float(current_price) * float(rng.uniform(0.05, 0.15)), 2)))
                 current_price += bump
 
-            # Cancellation check
+            # Cancellation check (no valuation leakage — burden + usage + liquidity only)
             cancel_p = CANCEL_BASE_GAMMA
             if state.subscription_engagement == "churn_prone":
                 cancel_p += CANCEL_CHURN_GAMMA
-            if state.liquidity in ("tight", "overdraft_risk"):
+            if state.liquidity in ("tight", "overdraft_risk", "overdrafted"):
                 cancel_p += CANCEL_TIGHT_GAMMA
+            if state.subscription_burden_state == "stretched":
+                cancel_p += CANCEL_STRETCH_GAMMA
+            if state.subscription_burden_state == "overloaded":
+                cancel_p += CANCEL_OVERLOAD_GAMMA
+            if usage_frequency < 2:
+                cancel_p += 0.02
 
             if rng.random() < cancel_p:
                 status = "canceled"
@@ -171,8 +208,6 @@ class SubscriptionAgent(BaseAgent):
             else:
                 renewal_date = end + timedelta(days=int(rng.integers(1, period_days)))
 
-        usage_frequency = int(rng.integers(0, 8))
-
         return {
             "status": status,
             "billing_cycle": billing_cycle,
@@ -185,7 +220,7 @@ class SubscriptionAgent(BaseAgent):
         }, charges
 
     def _make_charge(self, charge_date: date, price: Decimal, merch: dict,
-                     merchant_agent, state: UserState) -> dict:
+                     merchant_agent, state: UserState, sub_key: str) -> dict:
         rng = self.rng
         hour = int(rng.integers(0, 6))
         minute = int(rng.integers(0, 60))
@@ -208,14 +243,21 @@ class SubscriptionAgent(BaseAgent):
             "description_raw": desc,
             "merchant_info": merch,
             "subscription_idx": None,  # linked later in pipeline
+            "_sub_key": sub_key,
         }
 
     def _pick_subscription_merchants(self, n: int, catalog: list[dict]) -> list[dict]:
         rng = self.rng
         sub_cats = ["streaming", "software", "fitness", "education", "food", "utilities"]
-        candidates = [m for m in catalog if m["category"] in sub_cats]
+        eligible = [
+            m for m in catalog
+            if m.get("eligibility", "not_subscribable") != "not_subscribable"
+        ]
+        candidates = [m for m in eligible if m["category"] in sub_cats]
         if not candidates:
-            candidates = catalog[:20]
+            candidates = eligible
+        if not candidates:
+            return []
         n = min(n, len(candidates))
         indices = rng.choice(len(candidates), size=n, replace=False)
         return [candidates[i] for i in indices]

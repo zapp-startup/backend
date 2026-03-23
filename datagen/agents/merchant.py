@@ -8,7 +8,7 @@ Writes to: subscriptions_merchant, transactions_transaction.description_raw
 from __future__ import annotations
 
 from datagen.agents.base import BaseAgent
-from datagen.config import MERCHANT_CATALOG, PROCESSOR_PREFIXES
+from datagen.config import MERCHANT_CATALOG, MERCHANT_CATEGORY_COMPAT, PROCESSOR_PREFIXES
 from datagen.state import UserState
 
 
@@ -26,6 +26,7 @@ class MerchantAgent(BaseAgent):
                 "name": m["name"],
                 "category": m["category"],
                 "domain": m.get("domain", ""),
+                "eligibility": m.get("eligibility", "not_subscribable"),
             })
 
         return {"merchant_catalog": catalog}
@@ -72,8 +73,10 @@ class MerchantAgent(BaseAgent):
 
         return result.strip()
 
-    def pick_merchant_for_category(self, category: str, catalog: list[dict]) -> dict | None:
-        """Pick a random merchant from catalog matching a category."""
+    def pick_merchant_for_category(
+        self, category: str, catalog: list[dict], anomaly_mode: bool = False,
+    ) -> dict | None:
+        """Pick a random merchant from catalog matching a category and compatibility matrix."""
         rng = self.rng
         category_map = {
             "groceries": ["grocery"],
@@ -87,8 +90,23 @@ class MerchantAgent(BaseAgent):
             "subscriptions": ["streaming", "software", "fitness", "food", "education"],
             "fees": ["other"],
         }
-        allowed = category_map.get(category, ["other"])
-        matches = [m for m in catalog if m["category"] in allowed]
+        allowed_cats = category_map.get(category, ["other"])
+        candidates = [m for m in catalog if m["category"] in allowed_cats]
+        if not candidates:
+            candidates = catalog
+
+        def ok(m: dict) -> bool:
+            mc = m.get("category", "other")
+            status = MERCHANT_CATEGORY_COMPAT.get((mc, category), "allowed")
+            if status == "allowed":
+                return True
+            if status == "rare":
+                return rng.random() < 0.05
+            if status == "disallowed":
+                return anomaly_mode and rng.random() < 0.02
+            return True
+
+        matches = [m for m in candidates if ok(m)]
         if not matches:
-            matches = catalog
+            matches = candidates
         return dict(rng.choice(matches))
