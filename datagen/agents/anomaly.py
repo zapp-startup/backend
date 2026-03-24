@@ -21,8 +21,6 @@ from datagen.config import (
     ANOMALY_OVERDRAFT_MONTHLY_P,
     ANOMALY_REFUND_P,
     ANOMALY_REVERSAL_P,
-    TXN_CATEGORY_TO_SPEND,
-    compat_status_family,
 )
 from datagen.state import UserState
 
@@ -151,21 +149,13 @@ class AnomalyAgent(BaseAgent):
         all_categories = ["groceries", "eating_out", "transport", "shopping",
                           "entertainment", "health", "education", "other", "bills"]
         for txn in spend_txns:
+            merch = txn.get("merchant_info") or {}
+            fam = txn.get("merchant_family") or merch.get("merchant_family")
+            if fam:
+                continue
             if rng.random() < mislabel_p:
                 original = txn.get("category", "other")
-                merch = txn.get("merchant_info") or {}
-                fam = txn.get("merchant_family") or merch.get("merchant_family")
-                if fam:
-                    candidates = []
-                    for c in all_categories:
-                        if c == original:
-                            continue
-                        spend_wrong = TXN_CATEGORY_TO_SPEND.get(c, "travel")
-                        if compat_status_family(fam, spend_wrong) != "disallowed":
-                            candidates.append(c)
-                    wrong = str(rng.choice(candidates)) if candidates else original
-                else:
-                    wrong = str(rng.choice([c for c in all_categories if c != original]))
+                wrong = str(rng.choice([c for c in all_categories if c != original]))
                 if wrong != original:
                     txn["category"] = wrong
                     txn["_anomaly"] = "mislabel"

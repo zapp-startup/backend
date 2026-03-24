@@ -283,13 +283,13 @@ FAILED_CHARGE_PROBABILITY = (0.005, 0.02)
 # ---------------------------------------------------------------------------
 # Section 14  Anomaly probabilities (Section 19 defaults table)
 # ---------------------------------------------------------------------------
-ANOMALY_DUPLICATE_P = 0.002
-ANOMALY_REFUND_P = (0.01, 0.03)
-ANOMALY_REVERSAL_P = (0.001, 0.005)
-ANOMALY_OVERDRAFT_MONTHLY_P = (0.05, 0.20)
+ANOMALY_DUPLICATE_P = 0.001
+ANOMALY_REFUND_P = (0.005, 0.015)
+ANOMALY_REVERSAL_P = (0.0005, 0.002)
+ANOMALY_OVERDRAFT_MONTHLY_P = (0.03, 0.12)
 ANOMALY_OVERDRAFT_AMOUNT = (20.0, 35.0)
 ANOMALY_FRAUD_YEARLY_P = (0.001, 0.005)
-ANOMALY_CATEGORY_MISLABEL_P = (0.03, 0.05)
+ANOMALY_CATEGORY_MISLABEL_P = (0.002, 0.01)
 
 # ---------------------------------------------------------------------------
 # Section 8.5  Income Agent parameters
@@ -588,6 +588,35 @@ TXN_CATEGORY_TO_SPEND: dict[str, str] = {
     "bills": "utilities",
     "other": "travel",
 }
+
+
+def spend_to_txn_category(spend_category: str) -> str:
+    """Map internal spend categories to persisted transaction categories."""
+    return {
+        "groceries": "groceries",
+        "dining": "eating_out",
+        "transport": "transport",
+        "shopping": "shopping",
+        "entertainment": "entertainment",
+        "health": "health",
+        "education": "education",
+        "utilities": "bills",
+        "subscriptions": "subscriptions",
+        "travel": "other",
+    }.get(spend_category, "other")
+
+
+def subscription_family_to_txn_category(merchant_family: str) -> str:
+    """Map recurring merchant families to more realistic ledger categories."""
+    return {
+        "streaming": "entertainment",
+        "fitness": "health",
+        "utilities": "bills",
+        "telecom": "bills",
+        "delivery_membership": "eating_out",
+        "food": "eating_out",
+        "education": "education",
+    }.get(merchant_family, "subscriptions")
 
 
 # LogNormal-ish (mu, sigma) for amount sampling after merchant family is chosen

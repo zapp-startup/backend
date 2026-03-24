@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Callable
 
 from django.contrib.auth import get_user_model
-from django.db import connection, transaction
+from django.db import OperationalError, close_old_connections, connection, transaction
 from django.utils import timezone
 
 from faker import Faker
@@ -141,25 +141,37 @@ def run_pipeline(
 
     for i in range(num_users):
         user_seed = int(rng.integers(0, 2**31))
-        user_rng = make_rng(user_seed)
+        user_stats = None
+        for attempt in range(2):
+            user_rng = make_rng(user_seed)
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    user_stats = _generate_one_user(
+                        idx=i,
+                        rng=user_rng,
+                        faker=_build_faker(user_seed),
+                        prefix=prefix,
+                        password=password,
+                        use_llm=use_llm,
+                        max_llm_reflections=max_llm_reflections,
+                        start_date=start_date,
+                        end_date=end_date,
+                        merchant_agent=MerchantAgent(user_rng, use_llm),
+                        merchant_catalog=merchant_catalog,
+                        merchant_db_map=merchant_db_map,
+                        sub_model=sub_model,
+                        item_model=item_model,
+                    )
+                break
+            except OperationalError:
+                close_old_connections()
+                if attempt == 1:
+                    raise
+                log(f"  Database connection dropped while generating user {i+1}; retrying once...")
 
-        with transaction.atomic():
-            user_stats = _generate_one_user(
-                idx=i,
-                rng=user_rng,
-                faker=_build_faker(user_seed),
-                prefix=prefix,
-                password=password,
-                use_llm=use_llm,
-                max_llm_reflections=max_llm_reflections,
-                start_date=start_date,
-                end_date=end_date,
-                merchant_agent=MerchantAgent(user_rng, use_llm),
-                merchant_catalog=merchant_catalog,
-                merchant_db_map=merchant_db_map,
-                sub_model=sub_model,
-                item_model=item_model,
-            )
+        if user_stats is None:
+            raise RuntimeError(f"Failed to generate user {i+1}: no stats returned")
 
         for k, v in user_stats.items():
             stats[k] = stats.get(k, 0) + v

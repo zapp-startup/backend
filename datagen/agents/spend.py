@@ -18,6 +18,7 @@ from datagen.config import (
     AMOUNT_LOGNORMAL,
     AMOUNT_PRIORS_BY_FAMILY,
     SPEND_LOGISTIC,
+    spend_to_txn_category,
 )
 from datagen.distributions import (
     clip01,
@@ -315,8 +316,14 @@ class SpendAgent(BaseAgent):
 
             if not merchant_agent or not merchant_catalog:
                 continue
-            merch = merchant_agent.pick_merchant_for_family(
-                merchant_family, cat, merchant_catalog, anomaly_mode=False,
+            merch = self._pick_discretionary_merchant(
+                state,
+                context,
+                spend_category=cat,
+                intent=intent,
+                merchant_family=merchant_family,
+                merchant_agent=merchant_agent,
+                merchant_catalog=merchant_catalog,
             )
             if not merch:
                 continue
@@ -359,6 +366,51 @@ class SpendAgent(BaseAgent):
 
         state.update_liquidity()
         return month_disc_spent
+
+    def _pick_discretionary_merchant(
+        self,
+        state: UserState,
+        context: dict,
+        *,
+        spend_category: str,
+        intent: str,
+        merchant_family: str,
+        merchant_agent,
+        merchant_catalog: list,
+    ) -> dict | None:
+        if intent == "meal_delivery" and merchant_family == "delivery_membership":
+            preferred = self._pick_delivery_usage_merchant(context, merchant_catalog)
+            if preferred is not None:
+                return preferred
+        return merchant_agent.pick_merchant_for_family(
+            merchant_family, spend_category, merchant_catalog, anomaly_mode=False,
+        )
+
+    def _pick_delivery_usage_merchant(self, context: dict, merchant_catalog: list) -> dict | None:
+        rng = self.rng
+        active_delivery_subs = [
+            s for s in context.get("subscriptions", [])
+            if s.get("status") == "active"
+            and (s.get("merchant_info") or {}).get("merchant_family") == "delivery_membership"
+        ]
+        catalog_by_name = {m.get("name"): m for m in merchant_catalog}
+
+        if active_delivery_subs and rng.random() < 0.72:
+            preferred_names = [
+                (s.get("merchant_info") or {}).get("name")
+                for s in active_delivery_subs
+                if (s.get("merchant_info") or {}).get("name") in catalog_by_name
+            ]
+            if preferred_names:
+                return dict(catalog_by_name[str(rng.choice(preferred_names))])
+
+        candidates = [
+            m for m in merchant_catalog
+            if m.get("merchant_family") == "delivery_membership"
+        ]
+        if not candidates:
+            return None
+        return dict(rng.choice(candidates))
 
     def _discretionary_intent(self, cat: str, state: UserState, current: date, routine: SpendRoutine) -> tuple[str, str]:
         rng = self.rng
@@ -485,16 +537,7 @@ class SpendAgent(BaseAgent):
         return int(rng.integers(lo, hi))
 
     def _map_category(self, spend_cat: str) -> str:
-        cat_map = {
-            "groceries": "groceries",
-            "dining": "eating_out",
-            "transport": "transport",
-            "shopping": "shopping",
-            "entertainment": "entertainment",
-            "health": "health",
-            "travel": "other",
-        }
-        return cat_map.get(spend_cat, "other")
+        return spend_to_txn_category(spend_cat)
 
     def _pick_channel(self, category: str) -> str:
         rng = self.rng

@@ -10,6 +10,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from datagen.agents.audit import AuditAgent
+from datagen.agents.anomaly import AnomalyAgent
 from datagen.agents.conversation import ConversationAgent
 from datagen.agents.merchant import MerchantAgent
 from datagen.agents.spend import SpendAgent
@@ -540,6 +541,35 @@ class IntentFirstRealismTests(TestCase):
         for t in groc:
             self.assertEqual(t.get("merchant_family"), "grocery_retail")
 
+    def test_delivery_orders_can_prefer_active_membership_merchant_without_subscription_link(self):
+        rng = make_rng(123)
+        agent = SpendAgent(rng, use_llm=False)
+        catalog = MerchantAgent(rng, use_llm=False).run(UserState(), {})["merchant_catalog"]
+        ctx = {
+            "subscriptions": [
+                {
+                    "status": "active",
+                    "merchant_info": {
+                        "name": "DoorDash",
+                        "merchant_family": "delivery_membership",
+                    },
+                }
+            ]
+        }
+        picked = [
+            agent._pick_discretionary_merchant(
+                UserState(),
+                ctx,
+                spend_category="dining",
+                intent="meal_delivery",
+                merchant_family="delivery_membership",
+                merchant_agent=MerchantAgent(make_rng(123 + i), use_llm=False),
+                merchant_catalog=catalog,
+            )["name"]
+            for i in range(12)
+        ]
+        self.assertIn("DoorDash", picked)
+
     def test_subscription_netflix_price_from_tier_table(self):
         from datagen.agents.subscription import SubscriptionAgent
         from datagen.config import SUBSCRIPTION_MERCHANT_PRICE_TIERS
@@ -563,6 +593,42 @@ class IntentFirstRealismTests(TestCase):
             if agent._yearly_billing_draw(merch, "streaming")
         )
         self.assertEqual(yearly_hits, 0)
+
+    def test_subscription_charge_categories_follow_merchant_family(self):
+        from datagen.agents.subscription import SubscriptionAgent
+
+        agent = SubscriptionAgent(make_rng(6), use_llm=False)
+        state = UserState()
+        charge_date = date(2025, 1, 15)
+
+        utility = agent._make_charge(
+            charge_date,
+            Decimal("89.99"),
+            {"name": "ComEd", "merchant_family": "utilities"},
+            None,
+            state,
+            "sub-utility",
+        )
+        education = agent._make_charge(
+            charge_date,
+            Decimal("49.00"),
+            {"name": "Coursera", "merchant_family": "education"},
+            None,
+            state,
+            "sub-education",
+        )
+        food = agent._make_charge(
+            charge_date,
+            Decimal("9.99"),
+            {"name": "DoorDash", "merchant_family": "delivery_membership"},
+            None,
+            state,
+            "sub-food",
+        )
+
+        self.assertEqual(utility["category"], "bills")
+        self.assertEqual(education["category"], "education")
+        self.assertEqual(food["category"], "eating_out")
 
     def test_subscription_valuation_strongly_negative_net_rarely_buy(self):
         state = UserState(
@@ -622,3 +688,58 @@ class IntentFirstRealismTests(TestCase):
         }
         audit.run(UserState(), ctx)
         self.assertEqual(ctx["spend_transactions"][0]["spend_category"], "health")
+        self.assertEqual(ctx["spend_transactions"][0]["category"], "health")
+
+    def test_audit_canonicalizes_category_even_when_spend_category_is_allowed(self):
+        audit = AuditAgent(make_rng(2), use_llm=False)
+        ctx = {
+            "spend_transactions": [
+                {
+                    "direction": "spend",
+                    "amount": Decimal("18.00"),
+                    "occurred_at": timezone.now(),
+                    "category": "transport",
+                    "spend_category": "shopping",
+                    "merchant_family": "ecommerce",
+                    "merchant_info": {"name": "Amazon", "category": "other", "merchant_family": "ecommerce"},
+                    "payment_channel": "card",
+                    "description_raw": "AMAZON",
+                    "_anomaly": "mislabel",
+                }
+            ],
+            "merchant_catalog": [],
+            "merchant_agent": None,
+            "subscriptions": [],
+            "subscription_transactions": [],
+            "income_transactions": [{"amount": Decimal("5000"), "direction": "income"}],
+            "behavior_facts": [{"fact_key": "intentionally_sparse"}],
+            "conversation_facts": [],
+        }
+        audit.run(UserState(), ctx)
+        self.assertEqual(ctx["spend_transactions"][0]["spend_category"], "shopping")
+        self.assertEqual(ctx["spend_transactions"][0]["category"], "shopping")
+
+    def test_anomaly_agent_skips_category_mislabels_for_family_backed_spend(self):
+        agent = AnomalyAgent(make_rng(3), use_llm=False)
+        txn = {
+            "direction": "spend",
+            "amount": Decimal("24.00"),
+            "occurred_at": timezone.now(),
+            "category": "transport",
+            "spend_category": "transport",
+            "merchant_family": "rideshare",
+            "merchant_info": {"name": "Uber", "category": "other", "merchant_family": "rideshare"},
+            "payment_channel": "card",
+            "description_raw": "UBER",
+        }
+        ctx = {
+            "spend_transactions": [txn],
+            "obligation_transactions": [],
+            "subscription_transactions": [],
+            "start_date": date(2025, 1, 1),
+            "end_date": date(2025, 3, 1),
+        }
+        for _ in range(20):
+            agent.run(UserState(), ctx)
+        self.assertEqual(txn["category"], "transport")
+        self.assertNotEqual(txn.get("_anomaly"), "mislabel")

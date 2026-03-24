@@ -27,6 +27,7 @@ from datagen.config import (
     SUBSCRIPTION_MERCHANT_PRICE_TIERS,
     SUBSCRIPTION_PRICE_LOGNORMAL,
     TRIAL_PROBABILITY,
+    subscription_family_to_txn_category,
 )
 from datagen.distributions import make_aware_dt, sample_lognormal_decimal, sample_poisson
 from datagen.state import UserState
@@ -276,7 +277,9 @@ class SubscriptionAgent(BaseAgent):
             "direction": "spend",
             "amount": price,
             "occurred_at": occurred,
-            "category": "subscriptions",
+            "category": subscription_family_to_txn_category(
+                merch.get("merchant_family", merch.get("category", ""))
+            ),
             "payment_channel": "online",
             "description_raw": desc,
             "merchant_info": merch,

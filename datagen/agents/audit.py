@@ -12,6 +12,7 @@ from datagen.config import (
     MERCHANT_CATEGORY_COMPAT,
     MERCHANT_FAMILY_DEFAULT_SPEND_CATEGORY,
     compat_status_family,
+    spend_to_txn_category,
 )
 from datagen.state import UserState
 
@@ -280,17 +281,6 @@ class AuditAgent(BaseAgent):
         if not spend_txns:
             return repairs
 
-        def spend_to_txn_cat(sc: str) -> str:
-            return {
-                "groceries": "groceries",
-                "dining": "eating_out",
-                "transport": "transport",
-                "shopping": "shopping",
-                "entertainment": "entertainment",
-                "health": "health",
-                "travel": "other",
-            }.get(sc, "other")
-
         fixed: list[dict] = []
         for txn in spend_txns:
             merch = txn.get("merchant_info") or {}
@@ -301,16 +291,19 @@ class AuditAgent(BaseAgent):
                 continue
             st = compat_status_family(fam, sc)
             if st == "allowed":
-                fixed.append(txn)
-                continue
-            if st == "rare" and txn.get("_anomaly") == "mislabel":
+                canonical_category = spend_to_txn_category(sc)
+                if txn.get("category") != canonical_category:
+                    txn["category"] = canonical_category
+                    repairs.append(
+                        f"semantic_repair: canonicalized txn category for {fam} -> {canonical_category}"
+                    )
                 fixed.append(txn)
                 continue
 
             pref = MERCHANT_FAMILY_DEFAULT_SPEND_CATEGORY.get(fam)
             if pref and compat_status_family(fam, pref) == "allowed":
                 txn["spend_category"] = pref
-                txn["category"] = spend_to_txn_cat(pref)
+                txn["category"] = spend_to_txn_category(pref)
                 repairs.append(f"semantic_repair: aligned spend to family {fam} -> {pref}")
                 st = "allowed"
 
@@ -330,6 +323,7 @@ class AuditAgent(BaseAgent):
                         new_m["name"], new_m.get("domain", ""),
                     )
                     if compat_status_family(txn["merchant_family"], txn["spend_category"]) == "allowed":
+                        txn["category"] = spend_to_txn_category(txn["spend_category"])
                         repairs.append("semantic_repair: resampled merchant in family")
                         fixed.append(txn)
                         continue
