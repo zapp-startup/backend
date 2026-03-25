@@ -89,6 +89,47 @@ class GamificationServiceTests(TestCase):
         self.assertEqual(streak.current_streak_days, 2)
         self.assertEqual(streak.best_streak_days, 2)
 
+    def test_backfilled_transaction_does_not_reset_current_streak(self):
+        two_days_ago = timezone.now() - timedelta(days=2)
+        yesterday = timezone.now() - timedelta(days=1)
+
+        recent_txn = Transaction.objects.create(
+            user=self.user,
+            amount="20.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=yesterday,
+            category="other",
+            payment_channel="card",
+        )
+        latest_txn = Transaction.objects.create(
+            user=self.user,
+            amount="35.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=timezone.now(),
+            category="other",
+            payment_channel="card",
+        )
+        backfill_txn = Transaction.objects.create(
+            user=self.user,
+            amount="10.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=two_days_ago,
+            category="other",
+            payment_channel="card",
+        )
+
+        award_points_for_transaction(recent_txn)
+        award_points_for_transaction(latest_txn)
+        award_points_for_transaction(backfill_txn)
+
+        streak = UserStreak.objects.get(user=self.user)
+        self.assertEqual(streak.current_streak_days, 3)
+        self.assertEqual(streak.best_streak_days, 3)
+        self.assertEqual(streak.last_checkin_date, latest_txn.occurred_at.date())
+
     def test_purchase_badges_unlock_from_real_events(self):
         for idx in range(5):
             txn = Transaction.objects.create(
@@ -338,6 +379,33 @@ class GamificationApiTests(TestCase):
         self.assertEqual(rows[0]["rank"], 1)
         self.assertEqual(response.json()["current_user_rank"], 1)
 
+    def test_leaderboard_uses_activity_window_date_not_insert_time(self):
+        award_points(
+            user=self.user,
+            group=self.group,
+            action=PointAction.LOG_PURCHASE,
+            points=10,
+            event_key="leaderboard:alice:current",
+            window_date=timezone.now().date(),
+        )
+        PointEvent.objects.create(
+            user=self.peer,
+            group=self.group,
+            action=PointAction.LOG_PURCHASE,
+            points=999,
+            window_date=timezone.now().date() - timedelta(days=30),
+            metadata_json={},
+        )
+
+        response = self.client.get(f"/api/gamification/points/leaderboard/?group_id={self.group.id}&days=7")
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.json()["results"]
+        self.assertEqual(rows[0]["username"], "alice")
+        self.assertEqual(rows[0]["points_total"], 10)
+        self.assertEqual(rows[1]["username"], "bob")
+        self.assertEqual(rows[1]["points_total"], 0)
+
     def test_leaderboard_is_paginated(self):
         for idx in range(12):
             member = User.objects.create_user(username=f"user{idx}", password="pw")
@@ -408,6 +476,17 @@ class GamificationApiTests(TestCase):
         self.assertEqual(first.status_code, 201)
         self.assertEqual(second.status_code, 400)
         self.assertEqual(PointEvent.objects.filter(user=self.user, action=PointAction.REFLECT_SAME_DAY).count(), 1)
+
+        reflection_id = first.json()["id"]
+        patch = self.client.patch(
+            f"/api/transaction-reflections/{reflection_id}/",
+            {"notes": "changed"},
+            format="json",
+        )
+        delete = self.client.delete(f"/api/transaction-reflections/{reflection_id}/")
+
+        self.assertEqual(patch.status_code, 405)
+        self.assertEqual(delete.status_code, 405)
 
     def test_badges_endpoint_returns_catalog(self):
         response = self.client.get("/api/gamification/badges/")

@@ -5,7 +5,7 @@ from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Count, Sum
+from django.db.models import Count, Q, Sum
 from django.utils import timezone
 
 from transactions.models import TransactionReflection
@@ -104,20 +104,46 @@ def _get_or_create_streak(user: User) -> UserStreak:
 
 
 def _update_streak(user: User, streak_date: date | None = None) -> UserStreak:
-    streak_date = streak_date or timezone.now().date()
     streak = _get_or_create_streak(user)
+    qualifying_dates = list(
+        PointEvent.objects.filter(
+            user=user,
+            action__in=STREAK_QUALIFYING_ACTIONS,
+            window_date__isnull=False,
+        )
+        .values_list("window_date", flat=True)
+        .distinct()
+        .order_by("window_date")
+    )
 
-    if streak.last_checkin_date == streak_date:
+    if not qualifying_dates:
+        streak.current_streak_days = 0
+        streak.best_streak_days = 0
+        streak.last_checkin_date = None
+        streak.save(update_fields=["current_streak_days", "best_streak_days", "last_checkin_date", "updated_at"])
         return streak
 
-    if streak.last_checkin_date == streak_date - timedelta(days=1):
-        streak.current_streak_days += 1
-    else:
-        streak.current_streak_days = 1
+    best_streak = 1
+    current_run = 1
+    for idx in range(1, len(qualifying_dates)):
+        if qualifying_dates[idx] == qualifying_dates[idx - 1] + timedelta(days=1):
+            current_run += 1
+        else:
+            best_streak = max(best_streak, current_run)
+            current_run = 1
+    best_streak = max(best_streak, current_run)
 
-    streak.last_checkin_date = streak_date
-    if streak.current_streak_days > streak.best_streak_days:
-        streak.best_streak_days = streak.current_streak_days
+    latest_date = qualifying_dates[-1]
+    current_streak = 1
+    for idx in range(len(qualifying_dates) - 2, -1, -1):
+        if qualifying_dates[idx] == latest_date - timedelta(days=current_streak):
+            current_streak += 1
+            continue
+        break
+
+    streak.current_streak_days = current_streak
+    streak.best_streak_days = best_streak
+    streak.last_checkin_date = latest_date
     streak.save(update_fields=["current_streak_days", "best_streak_days", "last_checkin_date", "updated_at"])
     return streak
 
@@ -645,7 +671,12 @@ def complete_monthly_target(target: MonthlyTarget) -> AwardResult:
 
 def leaderboard_for_group(*, group: Group, days: int = 7):
     start, end = _rolling_window(days)
-    qs = PointEvent.objects.filter(group=group, created_at__gte=start, created_at__lte=end)
+    start_date = start.date()
+    end_date = end.date()
+    qs = PointEvent.objects.filter(group=group).filter(
+        Q(window_date__gte=start_date, window_date__lte=end_date)
+        | Q(window_date__isnull=True, created_at__gte=start, created_at__lte=end)
+    )
 
     totals = (
         qs.values("user__id", "user__username")

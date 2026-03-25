@@ -1,5 +1,6 @@
+from rest_framework import mixins
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.viewsets import ModelViewSet
+from rest_framework.viewsets import GenericViewSet, ModelViewSet
 
 from gamification.services import award_points_for_same_day_reflection, award_points_for_transaction
 
@@ -42,7 +43,12 @@ class TransactionViewSet(ModelViewSet):
         award_points_for_transaction(transaction)
 
 
-class TransactionReflectionViewSet(ModelViewSet):
+class TransactionReflectionViewSet(
+    mixins.CreateModelMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    GenericViewSet,
+):
     serializer_class = TransactionReflectionSerializer
     permission_classes = [IsAuthenticated]
 
