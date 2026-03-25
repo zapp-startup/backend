@@ -867,6 +867,73 @@ def merchant_stub(name: str) -> dict | None:
     }
 
 
+def _amazon_resolution(normalized: str, fallback_category: str | None = None) -> dict | None:
+    if "AMAZON" not in normalized:
+        return None
+
+    if "REFUND" in normalized or "REVERSAL" in normalized:
+        cleaned = re.sub(r"\b(?:REFUND|REVERSAL)\b", " ", normalized)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        resolved = resolve_transaction_description(
+            cleaned,
+            direction="spend",
+            fallback_category=fallback_category,
+        )
+        if resolved:
+            resolved["description_family"] = f"amazon_refund::{resolved['description_family']}"
+            return resolved
+        return {
+            "description_family": "amazon_refund::amazon_retail",
+            "merchant_info": merchant_stub("Amazon"),
+            "category": fallback_category or "shopping",
+        }
+
+    prime_tokens = ("MEMBERSHIP", "MONTHLY", "ANNUAL", "AMAZON PRIME")
+    if "PRIME" in normalized and any(token in normalized for token in prime_tokens):
+        return {
+            "description_family": "amazon_prime_membership",
+            "merchant_info": merchant_stub("Amazon Prime"),
+            "category": "subscriptions",
+        }
+
+    if "WHOLE FOODS" in normalized:
+        return {
+            "description_family": "amazon_whole_foods",
+            "merchant_info": merchant_stub("Whole Foods"),
+            "category": "groceries",
+        }
+
+    if any(
+        token in normalized
+        for token in ("PRIME VIDEO", "AMAZON MUSIC", "KINDLE", "AUDIBLE", "DIGITAL", "APPSTORE")
+    ):
+        return {
+            "description_family": "amazon_digital_media",
+            "merchant_info": merchant_stub("Amazon"),
+            "category": "entertainment",
+        }
+
+    if any(token in normalized for token in ("AWS", "AMAZON WEB SERVICES")):
+        return {
+            "description_family": "amazon_web_services",
+            "merchant_info": {
+                "name": "Amazon Web Services",
+                "category": "other",
+                "merchant_family": "utilities",
+                "domain": "aws.amazon.com",
+                "eligibility": "not_subscribable",
+                "yearly_billing_mode": None,
+            },
+            "category": "bills",
+        }
+
+    return {
+        "description_family": "amazon_retail",
+        "merchant_info": merchant_stub("Amazon"),
+        "category": "shopping",
+    }
+
+
 def resolve_transaction_description(
     description: str,
     *,
@@ -893,6 +960,10 @@ def resolve_transaction_description(
                     "category": fallback_category or "other",
                 }
         return None
+
+    amazon_resolved = _amazon_resolution(normalized, fallback_category=fallback_category)
+    if amazon_resolved:
+        return amazon_resolved
 
     for prefix in REFUND_PREFIXES:
         if normalized.startswith(prefix):

@@ -273,6 +273,34 @@ class SyntheticRealismPatchTests(TestCase):
         self.assertEqual(refund["merchant_info"]["name"], "Amazon")
         self.assertEqual(refund["category"], "shopping")
 
+    def test_description_resolver_splits_amazon_families(self):
+        prime = resolve_transaction_description("AMAZON PRIME MEMBERSHIP MONTHLY", direction="spend")
+        whole_foods = resolve_transaction_description("AMAZON WHOLE FOODS MARKET", direction="spend")
+        digital = resolve_transaction_description("AMAZON DIGITAL PRIME VIDEO", direction="spend")
+        aws = resolve_transaction_description("AWS AMAZON WEB SERVICES", direction="spend")
+
+        self.assertEqual(prime["description_family"], "amazon_prime_membership")
+        self.assertEqual(prime["merchant_info"]["name"], "Amazon Prime")
+        self.assertEqual(prime["category"], "subscriptions")
+
+        self.assertEqual(whole_foods["description_family"], "amazon_whole_foods")
+        self.assertEqual(whole_foods["merchant_info"]["name"], "Whole Foods")
+        self.assertEqual(whole_foods["category"], "groceries")
+
+        self.assertEqual(digital["description_family"], "amazon_digital_media")
+        self.assertEqual(digital["merchant_info"]["name"], "Amazon")
+        self.assertEqual(digital["category"], "entertainment")
+
+        self.assertEqual(aws["description_family"], "amazon_web_services")
+        self.assertEqual(aws["merchant_info"]["name"], "Amazon Web Services")
+        self.assertEqual(aws["category"], "bills")
+
+    def test_description_resolver_amazon_refunds_inherit_cleaned_classification(self):
+        refund = resolve_transaction_description("REVERSAL AMAZON WHOLE FOODS MARKET", direction="refund")
+        self.assertEqual(refund["description_family"], "amazon_refund::amazon_whole_foods")
+        self.assertEqual(refund["merchant_info"]["name"], "Whole Foods")
+        self.assertEqual(refund["category"], "groceries")
+
     def test_item_valuation_softmax_stochastic_and_score_band_monotonic(self):
         state = UserState(monthly_income=Decimal("5500"), price_sensitivity=0.35)
 
