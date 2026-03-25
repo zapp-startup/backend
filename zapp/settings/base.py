@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     'valuations',
     'transactions',
     'banking',
+    'gamification',
 ]
 
 MIDDLEWARE = [

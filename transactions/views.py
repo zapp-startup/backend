@@ -1,12 +1,16 @@
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.viewsets import ModelViewSet
+from rest_framework.viewsets import GenericViewSet, ModelViewSet
+
+from gamification.services import (
+    award_points_for_same_day_reflection,
+    award_points_for_transaction,
+)
 
 from .feedback_candidates import get_feedback_candidates
-from .models import Transaction
-from .serializers import TransactionSerializer
-
+from .models import Transaction, TransactionReflection
+from .serializers import TransactionReflectionSerializer, TransactionSerializer
 
 class TransactionViewSet(ModelViewSet):
     serializer_class = TransactionSerializer
@@ -62,4 +66,26 @@ class TransactionViewSet(ModelViewSet):
 
     def perform_create(self, serializer):
         # Force ownership
-        serializer.save(user=self.request.user)
+        transaction = serializer.save(user=self.request.user)
+        award_points_for_transaction(transaction)
+
+
+class TransactionReflectionViewSet(
+    mixins.CreateModelMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    GenericViewSet,
+):
+    serializer_class = TransactionReflectionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return (
+            TransactionReflection.objects
+            .filter(user=self.request.user)
+            .select_related("transaction")
+        )
+
+    def perform_create(self, serializer):
+        reflection = serializer.save(user=self.request.user)
+        award_points_for_same_day_reflection(reflection)
