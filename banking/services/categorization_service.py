@@ -15,6 +15,8 @@ import logging
 import re
 from typing import Any
 
+from django.db.models.functions import Length
+
 from banking.categories import ZappPrimaryCategory, ZappSubcategory
 from banking.models import BankTransaction, MerchantCategoryRule
 
@@ -254,7 +256,11 @@ def apply_merchant_override_rules(
     """
     Apply merchant override rules. Returns (zapp_primary, zapp_subcategory) if match, else None.
     """
-    rules = MerchantCategoryRule.objects.filter(is_active=True).order_by("-priority")
+    rules = (
+        MerchantCategoryRule.objects.filter(is_active=True)
+        .annotate(pattern_length=Length("match_pattern"))
+        .order_by("-priority", "-pattern_length", "match_pattern")
+    )
     for rule in rules:
         if rule.match_pattern.lower() in normalized_name:
             return rule.zapp_primary_category, (rule.zapp_subcategory or "")

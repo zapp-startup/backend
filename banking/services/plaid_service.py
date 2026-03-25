@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from django.conf import settings
+from django.db import transaction
 
 import plaid
 from plaid.api import plaid_api
@@ -141,17 +142,18 @@ def exchange_public_token_for_user(user, public_token: str) -> BankConnection:
     institution_id = ""
     institution_name = ""
 
-    connection = BankConnection.objects.create(
-        user=user,
-        plaid_item_id=item_id,
-        plaid_access_token=access_token,
-        institution_id=institution_id,
-        institution_name=institution_name,
-        status=BankConnection.Status.ACTIVE,
-    )
+    with transaction.atomic():
+        connection = BankConnection.objects.create(
+            user=user,
+            plaid_item_id=item_id,
+            plaid_access_token=access_token,
+            institution_id=institution_id,
+            institution_name=institution_name,
+            status=BankConnection.Status.ACTIVE,
+        )
 
-    fetch_accounts_for_connection(connection)
-    sync_transactions_for_connection(connection, cursor=None)
+        fetch_accounts_for_connection(connection)
+        sync_transactions_for_connection(connection, cursor=None)
 
     return connection
 
@@ -218,42 +220,47 @@ def sync_transactions_for_connection(
     Returns dict with added_count, modified_count, removed_count, next_cursor.
     """
     client = _get_plaid_client()
-    use_cursor = cursor if cursor is not None else (connection.sync_cursor or "")
+    initial_cursor = cursor if cursor is not None else (connection.sync_cursor or "")
+    current_cursor = initial_cursor
+    added_count = 0
+    modified_count = 0
+    removed_count = 0
 
-    request = TransactionsSyncRequest(
-        access_token=connection.plaid_access_token,
-        cursor=use_cursor or "",  # Plaid requires str, not None
-    )
-    response = _to_dict(client.transactions_sync(request))
+    while True:
+        request = TransactionsSyncRequest(
+            access_token=connection.plaid_access_token,
+            cursor=current_cursor or "",  # Plaid requires str, not None
+        )
+        response = _to_dict(client.transactions_sync(request))
 
-    added = response.get("added", [])
-    modified = response.get("modified", [])
-    removed = response.get("removed", [])
+        added = response.get("added", [])
+        modified = response.get("modified", [])
+        removed = response.get("removed", [])
 
-    upsert_transactions_from_plaid(connection, {"added": added, "modified": modified, "removed": removed})
+        upsert_transactions_from_plaid(
+            connection, {"added": added, "modified": modified, "removed": removed}
+        )
 
-    next_cursor = response.get("next_cursor", "")
-    has_more = response.get("has_more", False)
+        added_count += len(added)
+        modified_count += len(modified)
+        removed_count += len(removed)
 
-    connection.sync_cursor = next_cursor
+        next_cursor = response.get("next_cursor", "") or current_cursor
+        has_more = response.get("has_more", False)
+        current_cursor = next_cursor
+
+        if not (has_more and next_cursor):
+            break
+
+    connection.sync_cursor = current_cursor
     connection.last_synced_at = datetime.utcnow()
     connection.save(update_fields=["sync_cursor", "last_synced_at", "updated_at"])
 
-    # Paginate if has_more
-    if has_more and next_cursor:
-        sub = sync_transactions_for_connection(connection, cursor=next_cursor)
-        return {
-            "added_count": len(added) + sub.get("added_count", 0),
-            "modified_count": len(modified) + sub.get("modified_count", 0),
-            "removed_count": len(removed) + sub.get("removed_count", 0),
-            "next_cursor": sub.get("next_cursor", next_cursor),
-        }
-
     return {
-        "added_count": len(added),
-        "modified_count": len(modified),
-        "removed_count": len(removed),
-        "next_cursor": next_cursor,
+        "added_count": added_count,
+        "modified_count": modified_count,
+        "removed_count": removed_count,
+        "next_cursor": current_cursor,
     }
 
 
@@ -265,10 +272,22 @@ def upsert_transactions_from_plaid(
     Upsert transactions from transactions/sync response.
     Handles added, modified, and removed.
     """
-    account_map = {a.plaid_account_id: a for a in connection.accounts.all()}
-
+    transaction_payload = []
     for txn in sync_payload.get("added", []) + sync_payload.get("modified", []):
         txn_dict = _to_dict(txn) if not isinstance(txn, dict) else txn
+        transaction_payload.append(txn_dict)
+
+    account_map = {a.plaid_account_id: a for a in connection.accounts.all()}
+    missing_account_ids = {
+        t.get("account_id", "")
+        for t in transaction_payload
+        if t.get("account_id") and t.get("account_id") not in account_map
+    }
+    if missing_account_ids:
+        fetch_accounts_for_connection(connection)
+        account_map = {a.plaid_account_id: a for a in connection.accounts.all()}
+
+    for txn_dict in transaction_payload:
         _upsert_single_transaction(connection, txn_dict, account_map)
 
     for removed_item in sync_payload.get("removed", []):
