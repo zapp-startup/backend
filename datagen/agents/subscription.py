@@ -43,8 +43,11 @@ def _sample_tier_price(rng, tiers: list[tuple[str, float]]) -> Decimal:
             chosen = price_s
             break
     base = Decimal(chosen)
-    noise = Decimal(str(round(float(rng.normal(0, 0.22)), 2)))
-    return max(Decimal("0.99"), base + noise)
+    noise_scale = min(0.95, max(0.10, float(base) * 0.018))
+    noise = Decimal(str(round(float(rng.normal(0, noise_scale)), 2)))
+    lo = max(Decimal("0.99"), base - Decimal(str(round(noise_scale * 1.35, 2))))
+    hi = base + Decimal(str(round(noise_scale * 1.35, 2)))
+    return min(hi, max(lo, base + noise))
 
 
 def _monthly_subscription_cost(sub: dict) -> float:
@@ -65,7 +68,11 @@ class SubscriptionAgent(BaseAgent):
         name = merch.get("name", "")
         tiers = SUBSCRIPTION_MERCHANT_PRICE_TIERS.get(name)
         if tiers:
-            return _sample_tier_price(rng, tiers)
+            sampled = _sample_tier_price(rng, tiers)
+            tier_values = [Decimal(price_s) for price_s, _ in tiers]
+            lo = max(Decimal("0.99"), min(tier_values) - Decimal("0.75"))
+            hi = max(tier_values) + Decimal("0.75")
+            return min(hi, max(lo, sampled))
         mu, sig = SUBSCRIPTION_PRICE_LOGNORMAL.get(
             sub_cat, SUBSCRIPTION_PRICE_LOGNORMAL["streaming"]
         )

@@ -175,14 +175,22 @@ class ConversationAgent(BaseAgent):
         subs = context.get("subscriptions", [])
         cancelled_count = sum(1 for s in subs if s.get("status") == "canceled")
         reactivated_count = sum(s.get("reactivation_count", 0) for s in subs)
+        active_count = sum(1 for s in subs if s.get("status") == "active")
+        churn_basis = max(1, len(subs))
+        churn_rate = cancelled_count / churn_basis
 
         conversation_facts = []
-        if cancelled_count >= 3:
+        if cancelled_count >= 3 and (reactivated_count >= 1 or churn_rate >= 0.45):
             conversation_facts.append({
                 "fact_key": "subscription_churner",
-                "fact_value_json": {"cancelled": cancelled_count, "reactivated": reactivated_count},
+                "fact_value_json": {
+                    "cancelled": cancelled_count,
+                    "reactivated": reactivated_count,
+                    "active": active_count,
+                    "churn_rate": round(churn_rate, 3),
+                },
                 "source": "inferred",
-                "confidence": round(min(0.95, 0.5 + cancelled_count * 0.1), 2),
+                "confidence": round(min(0.95, 0.45 + cancelled_count * 0.08 + reactivated_count * 0.05), 2),
             })
 
         active_subs = [s for s in subs if s.get("status") == "active"]

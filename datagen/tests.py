@@ -541,6 +541,15 @@ class IntentFirstRealismTests(TestCase):
         for t in groc:
             self.assertEqual(t.get("merchant_family"), "grocery_retail")
 
+    def test_entertainment_spend_does_not_use_food_quick_merchants(self):
+        rng = make_rng(92)
+        agent = SpendAgent(rng, use_llm=False)
+        seen_families = {
+            agent._discretionary_intent("entertainment", UserState(), date(2025, 1, 10), None)[1]
+            for _ in range(10)
+        }
+        self.assertEqual(seen_families, {"entertainment_out"})
+
     def test_delivery_orders_can_prefer_active_membership_merchant_without_subscription_link(self):
         rng = make_rng(123)
         agent = SpendAgent(rng, use_llm=False)
@@ -630,6 +639,17 @@ class IntentFirstRealismTests(TestCase):
         self.assertEqual(education["category"], "education")
         self.assertEqual(food["category"], "eating_out")
 
+    def test_subscription_tier_prices_stay_close_to_plan_band(self):
+        from datagen.agents.subscription import SubscriptionAgent
+
+        agent = SubscriptionAgent(make_rng(8), use_llm=False)
+        vals = [
+            float(agent._price_for_merchant({"name": "HBO Max"}, "streaming"))
+            for _ in range(30)
+        ]
+        self.assertGreaterEqual(min(vals), 15.0)
+        self.assertLessEqual(max(vals), 20.8)
+
     def test_subscription_valuation_strongly_negative_net_rarely_buy(self):
         state = UserState(
             monthly_income=Decimal("4000.00"),
@@ -690,6 +710,34 @@ class IntentFirstRealismTests(TestCase):
         self.assertEqual(ctx["spend_transactions"][0]["spend_category"], "health")
         self.assertEqual(ctx["spend_transactions"][0]["category"], "health")
 
+    def test_audit_resolves_other_from_strong_family(self):
+        audit = AuditAgent(make_rng(4), use_llm=False)
+        ctx = {
+            "spend_transactions": [
+                {
+                    "direction": "spend",
+                    "amount": Decimal("14.00"),
+                    "occurred_at": timezone.now(),
+                    "category": "other",
+                    "spend_category": "travel",
+                    "merchant_family": "food_quick",
+                    "merchant_info": {"name": "Starbucks", "category": "food", "merchant_family": "food_quick"},
+                    "payment_channel": "card",
+                    "description_raw": "STARBUCKS",
+                }
+            ],
+            "merchant_catalog": [],
+            "merchant_agent": None,
+            "subscriptions": [],
+            "subscription_transactions": [],
+            "income_transactions": [{"amount": Decimal("5000"), "direction": "income"}],
+            "behavior_facts": [{"fact_key": "intentionally_sparse"}],
+            "conversation_facts": [],
+        }
+        audit.run(UserState(), ctx)
+        self.assertEqual(ctx["spend_transactions"][0]["spend_category"], "dining")
+        self.assertEqual(ctx["spend_transactions"][0]["category"], "eating_out")
+
     def test_audit_canonicalizes_category_even_when_spend_category_is_allowed(self):
         audit = AuditAgent(make_rng(2), use_llm=False)
         ctx = {
@@ -743,3 +791,35 @@ class IntentFirstRealismTests(TestCase):
             agent.run(UserState(), ctx)
         self.assertEqual(txn["category"], "transport")
         self.assertNotEqual(txn.get("_anomaly"), "mislabel")
+
+    def test_item_fair_price_gap_is_not_formulaically_constant(self):
+        state = UserState(monthly_income=Decimal("5200.00"))
+        agent = ValuationAgent(make_rng(9), use_llm=False)
+        ratios = []
+        for _ in range(60):
+            item = agent._valuate_item(state)
+            observed = float(item["observed_price"])
+            fair = float(item["estimated_fair_price"])
+            ratios.append(round((observed - fair) / max(1.0, fair), 4))
+        self.assertGreater(len(set(ratios)), 20)
+
+    def test_subscription_churner_fact_requires_real_churn_signal(self):
+        agent = ConversationAgent(make_rng(10), use_llm=False)
+        state = UserState(monthly_income=Decimal("5000.00"))
+        ctx = {
+            "subscriptions": [
+                {"status": "canceled", "reactivation_count": 0, "price": Decimal("10.00"), "billing_cycle": "monthly"},
+                {"status": "canceled", "reactivation_count": 0, "price": Decimal("11.00"), "billing_cycle": "monthly"},
+                {"status": "active", "reactivation_count": 0, "price": Decimal("12.00"), "billing_cycle": "monthly"},
+                {"status": "active", "reactivation_count": 0, "price": Decimal("13.00"), "billing_cycle": "monthly"},
+                {"status": "active", "reactivation_count": 0, "price": Decimal("14.00"), "billing_cycle": "monthly"},
+            ],
+            "item_valuations": [],
+            "subscription_valuations": [],
+            "spend_transactions": [],
+            "start_date": date(2025, 1, 1),
+            "end_date": date(2025, 4, 1),
+        }
+        out = agent.run(state, ctx)
+        keys = [f.get("fact_key") for f in out.get("conversation_facts", [])]
+        self.assertNotIn("subscription_churner", keys)

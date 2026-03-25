@@ -425,7 +425,7 @@ class SpendAgent(BaseAgent):
         if cat == "health":
             return "pharmacy_refill", "pharmacy"
         if cat == "entertainment":
-            return "night_out", "food_quick"
+            return "night_out", "entertainment_out"
         if cat == "travel":
             return "travel", "ecommerce"
         return "misc", "ecommerce"

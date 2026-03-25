@@ -239,6 +239,13 @@ class AuditAgent(BaseAgent):
             elif key == "budget_adherent":
                 if total_spend == 0:
                     repairs.append("fact_evidence: budget_adherent with no spend transactions")
+            elif key == "subscription_churner":
+                subs = context.get("subscriptions", [])
+                cancelled = sum(1 for s in subs if s.get("status") == "canceled")
+                reactivated = sum(int(s.get("reactivation_count", 0) or 0) for s in subs)
+                churn_rate = cancelled / max(1, len(subs))
+                if cancelled < 3 or (reactivated < 1 and churn_rate < 0.45):
+                    repairs.append("fact_evidence: subscription_churner lacks threshold support")
         return repairs
 
     def _check_refund_matching(self, context: dict) -> list[str]:
@@ -291,6 +298,12 @@ class AuditAgent(BaseAgent):
                 continue
             st = compat_status_family(fam, sc)
             if st == "allowed":
+                if txn.get("category") == "other":
+                    pref = MERCHANT_FAMILY_DEFAULT_SPEND_CATEGORY.get(fam)
+                    if pref and pref != "travel":
+                        txn["spend_category"] = pref
+                        sc = pref
+                        repairs.append(f"semantic_repair: resolved 'other' using family {fam} -> {pref}")
                 canonical_category = spend_to_txn_category(sc)
                 if txn.get("category") != canonical_category:
                     txn["category"] = canonical_category

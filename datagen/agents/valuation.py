@@ -41,6 +41,26 @@ ITEM_POOL = [
     ("Vitamins Bundle", "health", 20, 60),
 ]
 
+ITEM_PRICE_PROFILES: dict[str, tuple[float, float]] = {
+    "electronics": (0.02, 0.12),
+    "fitness": (-0.01, 0.10),
+    "education": (-0.03, 0.11),
+    "home": (0.01, 0.13),
+    "health": (-0.02, 0.10),
+    "other": (0.00, 0.14),
+}
+
+MERCHANT_FAMILY_PRICE_PROFILES: dict[str, tuple[float, float]] = {
+    "ecommerce": (0.03, 0.12),
+    "food_quick": (-0.02, 0.08),
+    "delivery_membership": (0.07, 0.10),
+    "grocery_retail": (-0.01, 0.07),
+    "pharmacy": (0.02, 0.09),
+    "rideshare": (0.05, 0.10),
+    "fuel": (0.01, 0.06),
+    "entertainment_out": (0.06, 0.13),
+}
+
 
 def _income_tier(monthly_income: float) -> str:
     annual = monthly_income * 12
@@ -327,6 +347,35 @@ class ValuationAgent(BaseAgent):
             buy_logit -= (0.5 - price_fairness) * 1.5
         return _softmax_choice(rng, [buy_logit, wait_logit, skip_logit], ("buy", "wait", "skip"))
 
+    def _sample_fair_price(
+        self,
+        *,
+        observed_amount: float,
+        item_category: str,
+        merchant_family: str | None = None,
+        state: UserState,
+    ) -> tuple[Decimal, float]:
+        rng = self.rng
+        base_mean, base_sigma = ITEM_PRICE_PROFILES.get(item_category, ITEM_PRICE_PROFILES["other"])
+        fam_mean, fam_sigma = MERCHANT_FAMILY_PRICE_PROFILES.get(
+            merchant_family or "",
+            (0.0, 0.0),
+        )
+        premium_mean = base_mean + fam_mean
+        premium_sigma = max(base_sigma, fam_sigma, 0.06)
+        premium_mean += (state.quality_preference - 0.5) * 0.10
+        premium_mean -= (state.price_sensitivity - 0.5) * 0.14
+        premium = float(rng.normal(premium_mean, premium_sigma))
+        premium = max(-0.22, min(0.32, premium))
+        fair_amount = observed_amount / max(0.55, 1.0 + premium)
+        fair_amount *= float(rng.uniform(0.97, 1.03))
+        fair_amount = max(0.5, fair_amount)
+        observed_price = Decimal(str(round(observed_amount, 2)))
+        fair_price = Decimal(str(round(fair_amount, 2)))
+        spread = abs(float(observed_price - fair_price)) / max(1.0, max(float(observed_price), float(fair_price)))
+        price_fairness = clip01(1.0 - 1.55 * spread)
+        return fair_price, price_fairness
+
     def _valuate_spend_transaction(self, state: UserState, txn: dict) -> dict | None:
         rng = self.rng
         merch = txn.get("merchant_info", {})
@@ -334,6 +383,7 @@ class ValuationAgent(BaseAgent):
             return None
         item_name = merch.get("name", "Unknown")
         item_cat = merch.get("category", "other")
+        merchant_family = merch.get("merchant_family")
         amount = float(txn.get("amount", 50))
         usage_freq = txn.get("usage_frequency") or 2
         satisfaction = txn.get("satisfaction_rating") or 5
@@ -352,11 +402,15 @@ class ValuationAgent(BaseAgent):
             score = int(rng.integers(20, sb["underused_max"] + 1))
         score = int(max(0, min(150, score + int(rng.normal(0, 10)))))
 
-        price_fairness = clip01(1.0 - abs(amount - amount * 0.95) / max(1, amount))
+        fair_price, price_fairness = self._sample_fair_price(
+            observed_amount=amount,
+            item_category=item_cat,
+            merchant_family=merchant_family,
+            state=state,
+        )
         need_fit = fit_proxy
         rec = self._item_recommendation_from_score(state, score, price_fairness, need_fit)
 
-        fair_price = Decimal(str(round(amount * 0.9, 2)))
         observed_price = Decimal(str(round(amount, 2)))
         confidence = clip01(0.6 + 0.2 * (1 if txn.get("reflection_text") else 0) + float(rng.normal(0, 0.05)))
         explanation = generate_explanation_json(rng, "item", {
@@ -374,6 +428,7 @@ class ValuationAgent(BaseAgent):
             "evidence_json": {
                 "usage_proxy": round(usage_proxy, 3),
                 "fit_proxy": round(fit_proxy, 3),
+                "price_fairness": round(price_fairness, 3),
             },
             "reasoning_json": explanation,
             "context": "one_off_purchase",
@@ -386,15 +441,23 @@ class ValuationAgent(BaseAgent):
             int(rng.integers(0, len(ITEM_POOL)))
         ]
 
-        observed_price = Decimal(str(round(float(rng.uniform(price_lo, price_hi)), 2)))
-        fair_price = Decimal(str(round((price_lo + price_hi) / 2, 2)))
+        anchor = float(rng.uniform(price_lo, price_hi))
+        fair_price, _ = self._sample_fair_price(
+            observed_amount=anchor,
+            item_category=item_cat,
+            merchant_family=None,
+            state=state,
+        )
+        obs_multiplier = float(rng.normal(1.0 + (state.quality_preference - state.price_sensitivity) * 0.06, 0.11))
+        obs_multiplier = max(0.72, min(1.34, obs_multiplier))
+        observed_price = Decimal(str(round(max(price_lo * 0.85, float(fair_price) * obs_multiplier), 2)))
 
         quality_fit = clip01(
             state.quality_preference * 0.5
             + float(rng.beta(3, 3))
         )
         price_fairness = clip01(
-            1 - abs(float(observed_price - fair_price)) / max(1, float(fair_price))
+            1 - 1.45 * abs(float(observed_price - fair_price)) / max(1, max(float(fair_price), float(observed_price)))
         )
         need_fit = clip01(float(rng.beta(2, 3)) + state.household_pressure * 0.2)
         budget_strain = clip01(
