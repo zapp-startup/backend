@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -291,6 +291,24 @@ class GamificationApiTests(TestCase):
             1,
         )
 
+    def test_monthly_target_progress_rejects_invalid_amount(self):
+        target = MonthlyTarget.objects.create(
+            user=self.user,
+            target_type="transactions_logged",
+            title="Log 10 purchases",
+            month_start=date(2026, 3, 1),
+            target_value=10,
+        )
+
+        response = self.client.post(
+            f"/api/gamification/monthly-targets/{target.id}/progress/",
+            {"amount": "abc"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "amount must be an integer")
+
     def test_my_streak_returns_level_progression(self):
         award_points(
             user=self.user,
@@ -395,6 +413,34 @@ class GamificationApiTests(TestCase):
             points=999,
             window_date=timezone.now().date() - timedelta(days=30),
             metadata_json={},
+        )
+
+        response = self.client.get(f"/api/gamification/points/leaderboard/?group_id={self.group.id}&days=7")
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.json()["results"]
+        self.assertEqual(rows[0]["username"], "alice")
+        self.assertEqual(rows[0]["points_total"], 10)
+        self.assertEqual(rows[1]["username"], "bob")
+        self.assertEqual(rows[1]["points_total"], 0)
+
+    def test_leaderboard_window_matches_requested_day_count(self):
+        today = timezone.now().date()
+        award_points(
+            user=self.user,
+            group=self.group,
+            action=PointAction.LOG_PURCHASE,
+            points=10,
+            event_key="leaderboard:window:included",
+            window_date=today - timedelta(days=6),
+        )
+        award_points(
+            user=self.peer,
+            group=self.group,
+            action=PointAction.LOG_PURCHASE,
+            points=20,
+            event_key="leaderboard:window:excluded",
+            window_date=today - timedelta(days=7),
         )
 
         response = self.client.get(f"/api/gamification/points/leaderboard/?group_id={self.group.id}&days=7")

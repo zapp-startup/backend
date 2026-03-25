@@ -71,7 +71,8 @@ def normalize_week_start(window_date: date) -> date:
 
 def _rolling_window(days: int, now=None):
     now = now or timezone.now()
-    start = now - timedelta(days=days)
+    days = max(int(days), 1)
+    start = now - timedelta(days=days - 1)
     return start, now
 
 
@@ -354,8 +355,6 @@ def award_points(
     window_date: date | None = None,
     streak_date: date | None = None,
 ) -> AwardResult:
-    sync_badge_catalog()
-
     event_key = _normalize_event_key(event_key)
     defaults = {
         "user": user,

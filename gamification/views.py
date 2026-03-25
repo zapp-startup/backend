@@ -304,7 +304,10 @@ class MonthlyTargetViewSet(ModelViewSet):
     @action(detail=True, methods=["post"])
     def progress(self, request, pk=None):
         target = self.get_object()
-        amount = int(request.data.get("amount", 0))
+        try:
+            amount = int(request.data.get("amount", 0))
+        except (TypeError, ValueError):
+            return Response({"detail": "amount must be an integer"}, status=400)
         if amount <= 0:
             return Response({"detail": "amount must be positive"}, status=400)
         target.current_value += amount
