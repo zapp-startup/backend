@@ -6,6 +6,8 @@ import time
 import uuid
 
 import jwt  # PyJWT
+from django.conf import settings
+
 import requests
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 from django.contrib.auth import get_user_model
@@ -15,11 +17,20 @@ from rest_framework.exceptions import AuthenticationFailed
 User = get_user_model()
 logger = logging.getLogger(__name__)
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")  # e.g. https://xxxx.supabase.co
-SUPABASE_JWT_AUD = os.getenv("SUPABASE_JWT_AUD", "authenticated")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
-SUPABASE_JWT_ISS = os.getenv("SUPABASE_JWT_ISS")  # e.g. https://xxxx.supabase.co/auth/v1
-SUPABASE_JWKS_CACHE_TTL_SECONDS = int(os.getenv("SUPABASE_JWKS_CACHE_TTL_SECONDS", "300"))
+# Read from Django settings (populated from env at startup) - avoids os.getenv in worker/reloader contexts
+def _supabase_url():
+    return getattr(settings, "SUPABASE_URL", None) or os.getenv("SUPABASE_URL")
+def _supabase_jwt_aud():
+    return getattr(settings, "SUPABASE_JWT_AUD", None) or os.getenv("SUPABASE_JWT_AUD", "authenticated")
+def _supabase_anon_key():
+    return getattr(settings, "SUPABASE_ANON_KEY", None) or os.getenv("SUPABASE_ANON_KEY")
+def _supabase_jwt_iss():
+    return getattr(settings, "SUPABASE_JWT_ISS", None) or os.getenv("SUPABASE_JWT_ISS")
+def _supabase_jwks_ttl():
+    return getattr(settings, "SUPABASE_JWKS_CACHE_TTL_SECONDS", None) or int(os.getenv("SUPABASE_JWKS_CACHE_TTL_SECONDS", "300"))
+def _supabase_jwt_secret():
+    return getattr(settings, "SUPABASE_JWT_SECRET", None) or os.getenv("SUPABASE_JWT_SECRET")
+
 
 # How long (seconds) to suppress JWKS refreshes triggered by an unknown kid.
 MISSING_KID_CACHE_TTL = 60
@@ -45,8 +56,9 @@ def _get_bearer_token(request):
 
 def _fetch_jwks(jwks_url: str):
     headers = {}
-    if SUPABASE_ANON_KEY:
-        headers["apikey"] = SUPABASE_ANON_KEY
+    anon_key = _supabase_anon_key()
+    if anon_key:
+        headers["apikey"] = anon_key
 
     try:
         response = requests.get(jwks_url, timeout=5, headers=headers or None)
@@ -98,20 +110,27 @@ def _extract_subject(payload: dict | None, user_data: dict | None) -> str | None
 
 
 def _fetch_supabase_user(token: str) -> dict:
-    if not SUPABASE_URL:
+    supabase_url = _supabase_url()
+    if not supabase_url:
         logger.error("SUPABASE_URL is missing while validating a Supabase user.")
         raise AuthenticationFailed("Authentication is not configured.")
 
     headers = {"Authorization": f"Bearer {token}"}
-    if SUPABASE_ANON_KEY:
-        headers["apikey"] = SUPABASE_ANON_KEY
+    anon_key = _supabase_anon_key()
+    if anon_key:
+        headers["apikey"] = anon_key
 
-    try:
-        response = requests.get(f"{SUPABASE_URL}/auth/v1/user", timeout=5, headers=headers)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        logger.warning("Failed to fetch Supabase user profile: %s", exc)
-        raise AuthenticationFailed("Unable to validate Supabase token.")
+        try:
+            supabase_url = _supabase_url()
+            response = requests.get(
+                f"{supabase_url}/auth/v1/user",
+                timeout=5,
+                headers=headers,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Failed to fetch Supabase user profile: %s", exc)
+            raise AuthenticationFailed("Unable to validate Supabase token.")
 
     content_type = response.headers.get("content-type", "")
     if "application/json" not in content_type:
@@ -176,13 +195,14 @@ def _get_jwks_with_refresh(force_refresh: bool):
         elif _JWKS_CACHE is None and _LAST_JWKS_REFRESH_ATTEMPT:
             logger.info("JWKS refresh retrying immediately because no cache is available.")
 
-        if not SUPABASE_URL:
+        supabase_url = _supabase_url()
+        if not supabase_url:
             logger.error("SUPABASE_URL is missing while fetching Supabase JWKS.")
             raise AuthenticationFailed("Authentication is not configured.")
 
         jwks_urls = [
-            f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json",
-            f"{SUPABASE_URL}/auth/v1/keys",
+            f"{supabase_url}/auth/v1/.well-known/jwks.json",
+            f"{supabase_url}/auth/v1/keys",
         ]
 
         _LAST_JWKS_REFRESH_ATTEMPT = now
@@ -191,7 +211,9 @@ def _get_jwks_with_refresh(force_refresh: bool):
             try:
                 new_jwks = _fetch_jwks(jwks_url)
                 _JWKS_CACHE = new_jwks
-                _JWKS_CACHE_EXPIRES_AT = time.time() + SUPABASE_JWKS_CACHE_TTL_SECONDS
+                
+            _JWKS_CACHE_EXPIRES_AT = time.time() + _supabase_jwks_ttl()
+            logger.info("JWKS refresh succeeded from %s.", jwks_url)
                 return _JWKS_CACHE
             except AuthenticationFailed:
                 continue
@@ -203,8 +225,27 @@ def _get_jwks_with_refresh(force_refresh: bool):
         raise AuthenticationFailed("Unable to validate Supabase token.")
 
 
+def _verify_with_jwt_secret(token: str) -> dict | None:
+    """Fallback for Supabase projects using HS256 with JWT secret (older projects)."""
+    secret = _supabase_jwt_secret()
+    issuer = _supabase_jwt_iss()
+    if not secret or not issuer:
+        return None
+    try:
+        return jwt.decode(
+            token,
+            secret,
+            algorithms=["HS256"],
+            audience=_supabase_jwt_aud(),
+            issuer=issuer,
+            options={"verify_signature": True, "verify_exp": True, "verify_aud": True, "verify_iss": True},
+        )
+    except Exception:
+        return None
+
+
 def _require_supabase_issuer() -> str:
-    issuer = (SUPABASE_JWT_ISS or "").strip()
+    issuer = (_supabase_jwt_iss() or "").strip()
     if not issuer:
         logger.error("SUPABASE_JWT_ISS is not configured.")
         raise AuthenticationFailed("Authentication is not configured.")
@@ -276,7 +317,7 @@ def _verify_and_decode(token: str) -> dict:
             token,
             key=key,
             algorithms=allowed_algs,
-            audience=SUPABASE_JWT_AUD,
+            audience=_supabase_jwt_aud(),
             issuer=issuer,
             options={
                 "verify_signature": True,
@@ -310,9 +351,10 @@ class SupabaseJWTAuthentication(BaseAuthentication):
             payload = _verify_and_decode(token)
         except AuthenticationFailed as e:
             logger.warning(
-                "Supabase JWT local validation failed; falling back to /auth/v1/user lookup: %s",
+                "Supabase JWT local validation failed; falling back to JWT secret and /auth/v1/user: %s",
                 e,
             )
+            payload = _verify_with_jwt_secret(token)
 
         # Some valid Supabase access tokens omit claims this backend expects, so
         # fall back to the canonical user endpoint to finish validation/profile resolution.
