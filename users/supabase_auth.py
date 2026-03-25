@@ -1,5 +1,3 @@
-# backend/users/supabase_auth.py
-
 import json
 import logging
 import os
@@ -51,13 +49,13 @@ def _fetch_jwks(jwks_url: str):
         headers["apikey"] = SUPABASE_ANON_KEY
 
     try:
-        resp = requests.get(jwks_url, timeout=5, headers=headers or None)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        logger.warning("Failed to fetch Supabase JWKS from %s: %s", jwks_url, e)
+        response = requests.get(jwks_url, timeout=5, headers=headers or None)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("Failed to fetch Supabase JWKS from %s: %s", jwks_url, exc)
         raise AuthenticationFailed("Unable to validate Supabase token.")
 
-    content_type = resp.headers.get("content-type", "")
+    content_type = response.headers.get("content-type", "")
     if "application/json" not in content_type:
         logger.warning(
             "Supabase JWKS endpoint %s returned unexpected content-type %s",
@@ -67,9 +65,9 @@ def _fetch_jwks(jwks_url: str):
         raise AuthenticationFailed("Unable to validate Supabase token.")
 
     try:
-        return resp.json()
-    except ValueError as e:
-        logger.warning("Supabase JWKS endpoint %s returned invalid JSON: %s", jwks_url, e)
+        return response.json()
+    except ValueError as exc:
+        logger.warning("Supabase JWKS endpoint %s returned invalid JSON: %s", jwks_url, exc)
         raise AuthenticationFailed("Unable to validate Supabase token.")
 
 
@@ -109,17 +107,13 @@ def _fetch_supabase_user(token: str) -> dict:
         headers["apikey"] = SUPABASE_ANON_KEY
 
     try:
-        resp = requests.get(
-            f"{SUPABASE_URL}/auth/v1/user",
-            timeout=5,
-            headers=headers,
-        )
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        logger.warning("Failed to fetch Supabase user profile: %s", e)
+        response = requests.get(f"{SUPABASE_URL}/auth/v1/user", timeout=5, headers=headers)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("Failed to fetch Supabase user profile: %s", exc)
         raise AuthenticationFailed("Unable to validate Supabase token.")
 
-    content_type = resp.headers.get("content-type", "")
+    content_type = response.headers.get("content-type", "")
     if "application/json" not in content_type:
         logger.warning(
             "Supabase user endpoint returned unexpected content-type %s",
@@ -128,9 +122,9 @@ def _fetch_supabase_user(token: str) -> dict:
         raise AuthenticationFailed("Unable to validate Supabase token.")
 
     try:
-        user_data = resp.json()
-    except ValueError as e:
-        logger.warning("Supabase user endpoint returned invalid JSON: %s", e)
+        user_data = response.json()
+    except ValueError as exc:
+        logger.warning("Supabase user endpoint returned invalid JSON: %s", exc)
         raise AuthenticationFailed("Unable to validate Supabase token.")
 
     if not isinstance(user_data, dict):
@@ -149,13 +143,12 @@ def build_unique_username(base: str) -> str:
         return candidate
 
     stem = candidate.split("@", 1)[0] if "@" in candidate else candidate
-    for i in range(1, 1000):
-        next_candidate = f"{stem}-{i}"
+    for index in range(1, 1000):
+        next_candidate = f"{stem}-{index}"
         if not User.objects.filter(username=next_candidate).exists():
             return next_candidate
 
     return f"{stem}-{uuid.uuid4().hex[:8]}"
-
 
 
 def _get_jwks():
@@ -192,7 +185,6 @@ def _get_jwks_with_refresh(force_refresh: bool):
             f"{SUPABASE_URL}/auth/v1/keys",
         ]
 
-        logger.info("JWKS refresh: attempting outbound fetch.")
         _LAST_JWKS_REFRESH_ATTEMPT = now
 
         for jwks_url in jwks_urls:
@@ -200,19 +192,13 @@ def _get_jwks_with_refresh(force_refresh: bool):
                 new_jwks = _fetch_jwks(jwks_url)
                 _JWKS_CACHE = new_jwks
                 _JWKS_CACHE_EXPIRES_AT = time.time() + SUPABASE_JWKS_CACHE_TTL_SECONDS
-                logger.info("JWKS refresh succeeded from %s.", jwks_url)
                 return _JWKS_CACHE
             except AuthenticationFailed:
                 continue
 
-        # Every URL failed.  Keep the last known-good keyset to avoid a full auth outage.
         if _JWKS_CACHE is not None:
-            logger.warning(
-                "JWKS refresh failed for all endpoints; continuing with stale cached keys."
-            )
+            logger.warning("JWKS refresh failed; continuing with stale cached keys.")
             return _JWKS_CACHE
-
-        logger.warning("JWKS refresh failed for all endpoints and no cached keys are available.")
 
         raise AuthenticationFailed("Unable to validate Supabase token.")
 
@@ -239,46 +225,34 @@ def _verify_and_decode(token: str) -> dict:
             raise AuthenticationFailed("JWT missing alg header.")
     except AuthenticationFailed:
         raise
-    except Exception as e:
-        logger.warning("Failed to parse Supabase JWT header: %s", e)
+    except Exception as exc:
+        logger.warning("Failed to parse Supabase JWT header: %s", exc)
         raise AuthenticationFailed("Unable to validate Supabase token.")
 
-    jwk = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+    jwk = next((item for item in jwks.get("keys", []) if item.get("kid") == kid), None)
     if not jwk:
         now = time.time()
-
-        # Negative-kid cache: if we recently confirmed this kid is not in the JWKS,
-        # reject immediately without any outbound request.
         with _MISSING_KID_LOCK:
             cached_at = _MISSING_KID_CACHE.get(kid)
             if cached_at is not None and now - cached_at < MISSING_KID_CACHE_TTL:
-                logger.warning(
-                    "Rejected token: kid not in JWKS (negative cache hit, age=%.0fs).", now - cached_at
-                )
                 raise AuthenticationFailed("Unable to validate Supabase token.")
 
-        # Only attempt a refresh when the JWKS cache itself is stale.  If the cache is
-        # still fresh, the kid simply does not exist in the keyset — refresh would return
-        # the same keys, so skip it and go straight to rejection.
         cache_is_stale = now >= _JWKS_CACHE_EXPIRES_AT
         if cache_is_stale:
             jwks = _get_jwks_with_refresh(force_refresh=True)
-            jwk = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+            jwk = next((item for item in jwks.get("keys", []) if item.get("kid") == kid), None)
 
         if not jwk:
-            # Record the kid as unknown so subsequent requests are rejected immediately.
             with _MISSING_KID_LOCK:
                 _MISSING_KID_CACHE[kid] = now
-                # Prune stale negative-cache entries to keep memory bounded.
-                expired = [k for k, ts in list(_MISSING_KID_CACHE.items()) if now - ts >= MISSING_KID_CACHE_TTL]
-                for k in expired:
-                    del _MISSING_KID_CACHE[k]
-            logger.warning("Rejected token: kid not found in JWKS (cache_was_stale=%s).", cache_is_stale)
+                expired = [
+                    key for key, ts in list(_MISSING_KID_CACHE.items()) if now - ts >= MISSING_KID_CACHE_TTL
+                ]
+                for key in expired:
+                    del _MISSING_KID_CACHE[key]
             raise AuthenticationFailed("Unable to validate Supabase token.")
 
     kty = jwk.get("kty")
-
-    # Build the correct public key object from the JWK
     try:
         if kty == "RSA":
             key = RSAAlgorithm.from_jwk(json.dumps(jwk))
@@ -290,45 +264,38 @@ def _verify_and_decode(token: str) -> dict:
             raise AuthenticationFailed(f"Unsupported JWKS key type kty={kty}.")
     except AuthenticationFailed:
         raise
-    except Exception as e:
-        logger.warning("Failed to parse JWKS key for Supabase token: %s", e)
+    except Exception as exc:
+        logger.warning("Failed to parse JWKS key for Supabase token: %s", exc)
         raise AuthenticationFailed("Unable to validate Supabase token.")
 
-    # Extra safety: ensure token alg matches what the key type implies
     if alg not in allowed_algs:
-        raise AuthenticationFailed(
-            f"JWT alg={alg} does not match key type kty={kty} (expected one of {allowed_algs})."
-        )
-
-    options = {
-        "verify_signature": True,
-        "verify_exp": True,
-        "verify_aud": True,
-        "verify_iss": True,
-    }
+        raise AuthenticationFailed("Unable to validate Supabase token.")
 
     try:
-        payload = jwt.decode(
+        return jwt.decode(
             token,
             key=key,
             algorithms=allowed_algs,
             audience=SUPABASE_JWT_AUD,
             issuer=issuer,
-            options=options,
+            options={
+                "verify_signature": True,
+                "verify_exp": True,
+                "verify_aud": True,
+                "verify_iss": True,
+            },
         )
-        return payload
-    except Exception as e:
-        logger.warning("Supabase token validation failed: %s", e)
+    except Exception as exc:
+        logger.warning("Supabase token validation failed: %s", exc)
         raise AuthenticationFailed("Unable to validate Supabase token.")
 
 
 class SupabaseJWTAuthentication(BaseAuthentication):
     """
     DRF authentication backend for Supabase access tokens.
-    Expects: Authorization: Bearer <supabase_access_token>
 
-    Maps Supabase user (payload['sub']) to a Django User.supabase_uid.
-    Creates the Django user on first-seen Supabase login.
+    This branch still uses Django's default auth user table, so the backend links
+    Supabase sessions by verified email instead of persisting the Supabase UUID.
     """
 
     def authenticate(self, request):
@@ -391,4 +358,8 @@ class SupabaseJWTAuthentication(BaseAuthentication):
             user.email = email
             user.save(update_fields=["email"])
 
-        return (user, None)
+        auth_context = {
+            "supabase_uid": str(sub),
+            "email": email,
+        }
+        return (user, auth_context)
