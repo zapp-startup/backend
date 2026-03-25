@@ -1,6 +1,12 @@
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 
+from gamification.services import (
+    award_points_for_subscription_added,
+    award_points_for_subscription_cancelled,
+    award_points_for_subscription_paused,
+)
+
 from .models import Merchant, Subscription
 from .serializers import MerchantSerializer, SubscriptionSerializer
 
@@ -25,4 +31,16 @@ class SubscriptionViewSet(ModelViewSet):
 
     def perform_create(self, serializer):
         # Force ownership
-        serializer.save(user=self.request.user)
+        subscription = serializer.save(user=self.request.user)
+        award_points_for_subscription_added(subscription)
+
+    def perform_update(self, serializer):
+        previous = self.get_object()
+        previous_status = previous.status
+        subscription = serializer.save(user=self.request.user)
+
+        if previous_status != subscription.status:
+            if subscription.status == "canceled":
+                award_points_for_subscription_cancelled(subscription)
+            elif subscription.status == "paused":
+                award_points_for_subscription_paused(subscription)
