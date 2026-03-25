@@ -359,7 +359,7 @@ class SupabaseJWTAuthentication(BaseAuthentication):
             user.save(update_fields=["email"])
 
         auth_context = {
-            "supabase_uid": str(subject),
+            "supabase_uid": str(sub),
             "email": email,
         }
         return (user, auth_context)
