@@ -16,7 +16,12 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from datagen.agents.base import BaseAgent
-from datagen.config import GIG_DEPOSITS_PER_WEEK_LAMBDA, INCOME_NOISE_SIGMA, INCOME_SHOCK_MONTHLY_P
+from datagen.config import (
+    GIG_DEPOSITS_PER_WEEK_LAMBDA,
+    INCOME_NOISE_SIGMA,
+    INCOME_SHOCK_MONTHLY_P,
+    resolve_transaction_description,
+)
 from datagen.distributions import make_aware_dt, sample_lognormal, sample_poisson, sample_truncated_normal
 from datagen.state import UserState
 
@@ -217,6 +222,7 @@ class IncomeAgent(BaseAgent):
             "category": "other",
             "payment_channel": "bank",
             "description_raw": description.upper(),
+            "merchant_info": (resolve_transaction_description(description, direction="income") or {}).get("merchant_info"),
             "merchant_obj": None,
             "subscription_obj": None,
         }

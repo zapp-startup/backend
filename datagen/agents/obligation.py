@@ -18,6 +18,7 @@ from datagen.config import (
     RENT_RATIO_CAP,
     UTILITY_AMOUNT_MEAN,
     UTILITY_AMOUNT_STD,
+    resolve_transaction_description,
 )
 from datagen.distributions import make_aware_dt, sample_beta, sample_truncated_normal, seasonality_multiplier
 from datagen.state import UserState
@@ -221,9 +222,10 @@ class ObligationAgent(BaseAgent):
             "direction": "spend",
             "amount": abs(amount),
             "occurred_at": occurred,
-            "category": category,
+            "category": (resolve_transaction_description(description, direction="spend", fallback_category=category) or {}).get("category", category),
             "payment_channel": rng.choice(["bank", "online"]),
             "description_raw": description.upper(),
+            "merchant_info": (resolve_transaction_description(description, direction="spend", fallback_category=category) or {}).get("merchant_info"),
             "merchant_obj": None,
             "subscription_obj": None,
         }

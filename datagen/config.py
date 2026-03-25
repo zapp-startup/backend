@@ -5,6 +5,8 @@ from the rules document (Sections 4-5, 19).
 
 from __future__ import annotations
 
+import re
+
 # ---------------------------------------------------------------------------
 # Section 5.1  Archetype prior  P(a_u)
 # ---------------------------------------------------------------------------
@@ -33,7 +35,7 @@ ARCHETYPE_PRIOR = {
 # ---------------------------------------------------------------------------
 # Section 5.2  Latent trait Beta(alpha, beta) per archetype
 # Keys: impulse, budget_adherence, regret_sensitivity, quality_preference,
-#        novelty_seeking, household_pressure, credit_stress
+#        novelty_seeking, household_pressure, credit_stress, luxury_affinity
 # ---------------------------------------------------------------------------
 TRAIT_BETA_PARAMS: dict[str, dict[str, tuple[float, float]]] = {
     "salary_biweekly": {
@@ -44,6 +46,7 @@ TRAIT_BETA_PARAMS: dict[str, dict[str, tuple[float, float]]] = {
         "novelty_seeking": (2.0, 4.0),
         "household_pressure": (2.5, 4.0),
         "credit_stress": (2.0, 6.0),
+        "luxury_affinity": (1.8, 5.2),
     },
     "salary_monthly": {
         "impulse": (2.0, 5.0),
@@ -53,6 +56,7 @@ TRAIT_BETA_PARAMS: dict[str, dict[str, tuple[float, float]]] = {
         "novelty_seeking": (2.0, 4.0),
         "household_pressure": (3.0, 3.5),
         "credit_stress": (2.0, 5.5),
+        "luxury_affinity": (2.0, 5.0),
     },
     "hourly_weekly": {
         "impulse": (3.0, 4.0),
@@ -62,6 +66,7 @@ TRAIT_BETA_PARAMS: dict[str, dict[str, tuple[float, float]]] = {
         "novelty_seeking": (2.5, 3.5),
         "household_pressure": (3.5, 3.0),
         "credit_stress": (3.5, 3.5),
+        "luxury_affinity": (1.5, 5.2),
     },
     "gig": {
         "impulse": (3.5, 3.5),
@@ -71,6 +76,7 @@ TRAIT_BETA_PARAMS: dict[str, dict[str, tuple[float, float]]] = {
         "novelty_seeking": (4.0, 3.0),
         "household_pressure": (2.5, 4.0),
         "credit_stress": (3.5, 3.0),
+        "luxury_affinity": (1.7, 4.8),
     },
     "student": {
         "impulse": (3.5, 3.0),
@@ -80,6 +86,7 @@ TRAIT_BETA_PARAMS: dict[str, dict[str, tuple[float, float]]] = {
         "novelty_seeking": (5.0, 2.5),
         "household_pressure": (1.5, 5.0),
         "credit_stress": (3.0, 4.0),
+        "luxury_affinity": (1.6, 4.8),
     },
     "retired": {
         "impulse": (1.5, 5.5),
@@ -89,6 +96,7 @@ TRAIT_BETA_PARAMS: dict[str, dict[str, tuple[float, float]]] = {
         "novelty_seeking": (1.5, 5.0),
         "household_pressure": (2.0, 5.0),
         "credit_stress": (2.0, 5.0),
+        "luxury_affinity": (2.4, 4.0),
     },
     "high_income": {
         "impulse": (3.0, 3.0),
@@ -98,6 +106,7 @@ TRAIT_BETA_PARAMS: dict[str, dict[str, tuple[float, float]]] = {
         "novelty_seeking": (3.5, 3.0),
         "household_pressure": (2.0, 5.0),
         "credit_stress": (1.5, 6.0),
+        "luxury_affinity": (4.4, 2.2),
     },
     "credit_constrained": {
         "impulse": (4.0, 3.0),
@@ -107,6 +116,7 @@ TRAIT_BETA_PARAMS: dict[str, dict[str, tuple[float, float]]] = {
         "novelty_seeking": (2.5, 4.0),
         "household_pressure": (4.5, 2.5),
         "credit_stress": (5.5, 2.0),
+        "luxury_affinity": (1.2, 5.8),
     },
 }
 
@@ -531,6 +541,9 @@ FAMILY_SPEND_COMPAT: dict[tuple[str, str], str] = {
     _fs("ecommerce", "shopping"): "allowed",
     _fs("ecommerce", "groceries"): "rare",
     _fs("ecommerce", "transport"): "disallowed",
+    _fs("luxury_retail", "shopping"): "allowed",
+    _fs("luxury_retail", "dining"): "disallowed",
+    _fs("luxury_retail", "entertainment"): "rare",
     _fs("grocery_retail", "groceries"): "allowed",
     _fs("grocery_retail", "dining"): "rare",
     _fs("grocery_retail", "shopping"): "rare",
@@ -549,6 +562,7 @@ FAMILY_SPEND_COMPAT: dict[tuple[str, str], str] = {
     _fs("fitness", "health"): "allowed",
     _fs("utilities", "utilities"): "allowed",
     _fs("telecom", "utilities"): "allowed",
+    _fs("housing", "utilities"): "allowed",
     _fs("food", "dining"): "allowed",
     _fs("education", "education"): "allowed",
 }
@@ -565,6 +579,7 @@ MERCHANT_FAMILY_DEFAULT_SPEND_CATEGORY: dict[str, str] = {
     "fuel": "transport",
     "rideshare": "transport",
     "ecommerce": "shopping",
+    "luxury_retail": "shopping",
     "grocery_retail": "groceries",
     "delivery_membership": "dining",
     "food_quick": "dining",
@@ -572,6 +587,7 @@ MERCHANT_FAMILY_DEFAULT_SPEND_CATEGORY: dict[str, str] = {
     "retail_big_box": "shopping",
     "utilities": "utilities",
     "telecom": "utilities",
+    "housing": "utilities",
     "streaming": "entertainment",
     "software": "shopping",
     "fitness": "health",
@@ -630,6 +646,7 @@ AMOUNT_PRIORS_BY_FAMILY: dict[str, tuple[float, float]] = {
     "pharmacy": (3.5, 0.45),
     "grocery_retail": (3.9, 0.42),
     "ecommerce": (3.5, 0.55),
+    "luxury_retail": (6.0, 0.62),
     "food_quick": (3.0, 0.50),
     "delivery_membership": (3.2, 0.45),
     "entertainment_out": (3.5, 0.45),
@@ -724,6 +741,17 @@ MERCHANT_CATALOG: list[dict] = [
     {"name": "AT&T", "category": "utilities", "merchant_family": "telecom", "domain": "att.com", "eligibility": "utility_recurring", "yearly_billing_mode": "low"},
     {"name": "Verizon", "category": "utilities", "merchant_family": "telecom", "domain": "verizon.com", "eligibility": "utility_recurring", "yearly_billing_mode": "low"},
     {"name": "T-Mobile", "category": "utilities", "merchant_family": "telecom", "domain": "t-mobile.com", "eligibility": "utility_recurring", "yearly_billing_mode": "low"},
+    {"name": "Spectrum", "category": "utilities", "merchant_family": "telecom", "domain": "spectrum.com", "eligibility": "utility_recurring", "yearly_billing_mode": "low"},
+    {"name": "Generic Electric Utility", "category": "utilities", "merchant_family": "utilities", "domain": "", "eligibility": "not_subscribable"},
+    {"name": "Generic Water Utility", "category": "utilities", "merchant_family": "utilities", "domain": "", "eligibility": "not_subscribable"},
+    {"name": "Generic Gas Utility", "category": "utilities", "merchant_family": "utilities", "domain": "", "eligibility": "not_subscribable"},
+    {"name": "Generic Insurance Provider", "category": "utilities", "merchant_family": "utilities", "domain": "", "eligibility": "insurance_recurring"},
+    {"name": "Generic Property Manager", "category": "other", "merchant_family": "housing", "domain": "", "eligibility": "not_subscribable"},
+    {"name": "Payroll", "category": "other", "merchant_family": "income_payroll", "domain": "", "eligibility": "not_subscribable"},
+    {"name": "Client Payment", "category": "other", "merchant_family": "income_client", "domain": "", "eligibility": "not_subscribable"},
+    {"name": "Financial Aid", "category": "other", "merchant_family": "income_aid", "domain": "", "eligibility": "not_subscribable"},
+    {"name": "Reimbursement", "category": "other", "merchant_family": "income_reimbursement", "domain": "", "eligibility": "not_subscribable"},
+    {"name": "Bank Fee", "category": "other", "merchant_family": "bank_fee", "domain": "", "eligibility": "not_subscribable"},
     {"name": "DoorDash", "category": "food", "merchant_family": "delivery_membership", "domain": "doordash.com", "eligibility": "membership", "yearly_billing_mode": "forbidden"},
     {"name": "Uber Eats", "category": "food", "merchant_family": "delivery_membership", "domain": "ubereats.com", "eligibility": "membership", "yearly_billing_mode": "forbidden"},
     {"name": "Grubhub", "category": "food", "merchant_family": "delivery_membership", "domain": "grubhub.com", "eligibility": "membership", "yearly_billing_mode": "forbidden"},
@@ -743,6 +771,11 @@ MERCHANT_CATALOG: list[dict] = [
     {"name": "Regal Cinemas", "category": "other", "merchant_family": "entertainment_out", "domain": "regmovies.com", "eligibility": "not_subscribable"},
     {"name": "Cinemark", "category": "other", "merchant_family": "entertainment_out", "domain": "cinemark.com", "eligibility": "not_subscribable"},
     {"name": "Topgolf", "category": "other", "merchant_family": "entertainment_out", "domain": "topgolf.com", "eligibility": "not_subscribable"},
+    {"name": "Gucci", "category": "other", "merchant_family": "luxury_retail", "domain": "gucci.com", "eligibility": "not_subscribable"},
+    {"name": "Louis Vuitton", "category": "other", "merchant_family": "luxury_retail", "domain": "louisvuitton.com", "eligibility": "not_subscribable"},
+    {"name": "Rolex Boutique", "category": "other", "merchant_family": "luxury_retail", "domain": "rolex.com", "eligibility": "not_subscribable"},
+    {"name": "Saint Laurent", "category": "other", "merchant_family": "luxury_retail", "domain": "ysl.com", "eligibility": "not_subscribable"},
+    {"name": "Nordstrom Designer", "category": "other", "merchant_family": "luxury_retail", "domain": "nordstrom.com", "eligibility": "not_subscribable"},
     {"name": "Amazon", "category": "other", "merchant_family": "ecommerce", "domain": "amazon.com", "eligibility": "not_subscribable"},
     {"name": "Walgreens", "category": "other", "merchant_family": "pharmacy", "domain": "walgreens.com", "eligibility": "not_subscribable"},
     {"name": "CVS Pharmacy", "category": "other", "merchant_family": "pharmacy", "domain": "cvs.com", "eligibility": "not_subscribable"},
@@ -751,6 +784,143 @@ MERCHANT_CATALOG: list[dict] = [
     {"name": "Lyft", "category": "other", "merchant_family": "rideshare", "domain": "lyft.com", "eligibility": "not_subscribable"},
     {"name": "Uber", "category": "other", "merchant_family": "rideshare", "domain": "uber.com", "eligibility": "not_subscribable"},
 ]
+
+MERCHANT_CATALOG_BY_NAME: dict[str, dict] = {m["name"]: m for m in MERCHANT_CATALOG}
+
+INCOME_DESCRIPTION_RULES: tuple[tuple[str, str], ...] = (
+    ("DIRECT DEPOSIT PAYROLL", "Payroll"),
+    ("DIRECT DEPOSIT SALARY", "Payroll"),
+    ("PART TIME PAYROLL", "Payroll"),
+    ("BONUS PAYMENT", "Payroll"),
+    ("PAYMENT FROM CLIENT", "Client Payment"),
+    ("CONTRACT PAYMENT", "Client Payment"),
+    ("GIG PAYOUT", "Client Payment"),
+    ("FREELANCE PAYMENT", "Client Payment"),
+    ("SERVICE PAYMENT", "Client Payment"),
+    ("FINANCIAL AID DISBURSEMENT", "Financial Aid"),
+    ("REIMBURSEMENT", "Reimbursement"),
+)
+
+SPEND_DESCRIPTION_RULES: tuple[tuple[str, str, str], ...] = (
+    ("ELECTRIC BILL", "Generic Electric Utility", "bills"),
+    ("WATER BILL", "Generic Water Utility", "bills"),
+    ("GAS BILL", "Generic Gas Utility", "bills"),
+    ("INSURANCE PREMIUM", "Generic Insurance Provider", "bills"),
+    ("AT T WIRELESS", "AT&T", "bills"),
+    ("ATT INTERNET", "AT&T", "bills"),
+    ("T MOBILE BILL", "T-Mobile", "bills"),
+    ("XFINITY INTERNET", "Xfinity", "bills"),
+    ("SPECTRUM", "Spectrum", "bills"),
+    ("VERIZON WIRELESS", "Verizon", "bills"),
+    ("HOUSING PAYMENT", "Generic Property Manager", "bills"),
+    ("RENT PAYMENT", "Generic Property Manager", "bills"),
+    ("APT RENT", "Generic Property Manager", "bills"),
+    ("LEASE PAYMENT", "Generic Property Manager", "bills"),
+    ("PROPERTY MGMT", "Generic Property Manager", "bills"),
+    ("LATE FEE RENT", "Generic Property Manager", "bills"),
+    ("OVERDRAFT FEE", "Bank Fee", "bills"),
+)
+
+INCOME_KEYWORD_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("PAYROLL", "SALARY", "BONUS"), "Payroll"),
+    (("CLIENT", "CONTRACT", "FREELANCE", "GIG", "SERVICE PAYMENT"), "Client Payment"),
+    (("FINANCIAL AID",), "Financial Aid"),
+    (("REIMBURSEMENT",), "Reimbursement"),
+)
+
+SPEND_KEYWORD_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (("ELECTRIC",), "Generic Electric Utility", "bills"),
+    (("WATER",), "Generic Water Utility", "bills"),
+    (("GAS BILL",), "Generic Gas Utility", "bills"),
+    (("INSURANCE",), "Generic Insurance Provider", "bills"),
+    (("AT T", "ATT"), "AT&T", "bills"),
+    (("T MOBILE",), "T-Mobile", "bills"),
+    (("XFINITY",), "Xfinity", "bills"),
+    (("SPECTRUM",), "Spectrum", "bills"),
+    (("VERIZON",), "Verizon", "bills"),
+    (("RENT", "LEASE", "PROPERTY MGMT", "HOUSING PAYMENT"), "Generic Property Manager", "bills"),
+    (("OVERDRAFT", "BANK FEE"), "Bank Fee", "bills"),
+    (("AMAZON",), "Amazon", "shopping"),
+)
+
+REFUND_PREFIXES: tuple[str, ...] = ("REFUND ", "REVERSAL ")
+
+
+def normalize_description_family(description: str) -> str:
+    text = (description or "").upper().replace("&", " ")
+    text = re.sub(r"[^A-Z ]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def merchant_stub(name: str) -> dict | None:
+    merch = MERCHANT_CATALOG_BY_NAME.get(name)
+    if not merch:
+        return None
+    return {
+        "name": merch["name"],
+        "category": merch["category"],
+        "merchant_family": merch.get("merchant_family", merch.get("category", "other")),
+        "domain": merch.get("domain", ""),
+        "eligibility": merch.get("eligibility", "not_subscribable"),
+        "yearly_billing_mode": merch.get("yearly_billing_mode"),
+    }
+
+
+def resolve_transaction_description(
+    description: str,
+    *,
+    direction: str,
+    fallback_category: str | None = None,
+) -> dict | None:
+    normalized = normalize_description_family(description)
+    if not normalized:
+        return None
+
+    if direction == "income":
+        for pattern, merchant_name in INCOME_DESCRIPTION_RULES:
+            if normalized.startswith(pattern):
+                return {
+                    "description_family": pattern,
+                    "merchant_info": merchant_stub(merchant_name),
+                    "category": fallback_category or "other",
+                }
+        for tokens, merchant_name in INCOME_KEYWORD_RULES:
+            if any(token in normalized for token in tokens):
+                return {
+                    "description_family": f"KEYWORD::{merchant_name}",
+                    "merchant_info": merchant_stub(merchant_name),
+                    "category": fallback_category or "other",
+                }
+        return None
+
+    for prefix in REFUND_PREFIXES:
+        if normalized.startswith(prefix):
+            stripped = normalized[len(prefix):].strip()
+            resolved = resolve_transaction_description(
+                stripped,
+                direction="spend",
+                fallback_category=fallback_category,
+            )
+            if resolved:
+                resolved["description_family"] = f"{prefix.strip()}::{resolved['description_family']}"
+            return resolved
+
+    for pattern, merchant_name, category in SPEND_DESCRIPTION_RULES:
+        if normalized.startswith(pattern):
+            return {
+                "description_family": pattern,
+                "merchant_info": merchant_stub(merchant_name),
+                "category": category,
+            }
+    for tokens, merchant_name, category in SPEND_KEYWORD_RULES:
+        if any(token in normalized for token in tokens):
+            return {
+                "description_family": f"KEYWORD::{merchant_name}",
+                "merchant_info": merchant_stub(merchant_name),
+                "category": category,
+            }
+    return None
 
 # Processor prefixes for noisy merchant rendering (Section 9.5)
 PROCESSOR_PREFIXES = [

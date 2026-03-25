@@ -12,6 +12,7 @@ from datagen.config import (
     MERCHANT_CATEGORY_COMPAT,
     MERCHANT_FAMILY_DEFAULT_SPEND_CATEGORY,
     compat_status_family,
+    resolve_transaction_description,
     spend_to_txn_category,
 )
 from datagen.state import UserState
@@ -24,6 +25,7 @@ class AuditAgent(BaseAgent):
         repairs = []
 
         repairs.extend(self._check_profile_coherence(state, context))
+        repairs.extend(self._normalize_template_transactions(context))
         repairs.extend(self._check_sub_eligibility_cascade(state, context))
         repairs.extend(self._check_subscription_metric_consistency(state, context))
         repairs.extend(self._check_subscription_charges(context))
@@ -37,6 +39,36 @@ class AuditAgent(BaseAgent):
         repairs.extend(self._check_user_completeness(context))
 
         return {"audit_repairs": repairs}
+
+    def _normalize_template_transactions(self, context: dict) -> list[str]:
+        repairs: list[str] = []
+        txn_keys = (
+            "income_transactions",
+            "obligation_transactions",
+            "subscription_transactions",
+            "anomaly_transactions",
+            "spend_transactions",
+        )
+        for key in txn_keys:
+            for txn in context.get(key, []):
+                direction = str(txn.get("direction", "spend"))
+                fallback_category = str(txn.get("category", "other"))
+                resolved = resolve_transaction_description(
+                    txn.get("description_raw", ""),
+                    direction=direction,
+                    fallback_category=fallback_category,
+                )
+                if not resolved:
+                    continue
+                if not txn.get("merchant_info") and resolved.get("merchant_info"):
+                    txn["merchant_info"] = resolved["merchant_info"]
+                    repairs.append(f"normalize: mapped {key} description to merchant")
+                if direction != "income":
+                    new_cat = resolved.get("category")
+                    if new_cat and txn.get("category") != new_cat:
+                        txn["category"] = new_cat
+                        repairs.append(f"normalize: aligned {key} category from description")
+        return repairs
 
     def _check_profile_coherence(self, state: UserState, context: dict) -> list[str]:
         repairs = []

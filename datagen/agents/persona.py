@@ -100,6 +100,7 @@ class PersonaAgent(BaseAgent):
         state.novelty_seeking = sample_beta(rng, *traits["novelty_seeking"])
         state.household_pressure = sample_beta(rng, *traits["household_pressure"])
         state.credit_stress = sample_beta(rng, *traits["credit_stress"])
+        state.luxury_affinity = sample_beta(rng, *traits["luxury_affinity"])
 
         # Subscription engagement (Section 4.1)
         eng_weights = {
@@ -157,6 +158,23 @@ class PersonaAgent(BaseAgent):
         state.income_stability_state = INCOME_STABILITY_STATES[int(rng.choice(3, p=is_w))]
         ps_a, ps_b = PRICE_SENSITIVITY_BETA[arch]
         state.price_sensitivity = float(sample_beta(rng, ps_a, ps_b))
+        income_signal = min(1.0, max(0.0, (float(state.monthly_income) - 2500.0) / 9000.0))
+        quality_signal = max(0.0, min(1.0, state.quality_preference))
+        novelty_signal = max(0.0, min(1.0, state.novelty_seeking))
+        price_relief = max(0.0, min(1.0, 1.0 - state.price_sensitivity))
+        aspiration = 0.0
+        if state.credit_stress > 0.55 and float(state.monthly_income) < 5000:
+            aspiration = float(rng.uniform(0.0, 0.08))
+        luxury = (
+            0.42 * state.luxury_affinity
+            + 0.24 * quality_signal
+            + 0.12 * novelty_signal
+            + 0.16 * income_signal
+            + 0.10 * price_relief
+            + aspiration
+            + float(rng.normal(0, 0.035))
+        )
+        state.luxury_affinity = max(0.0, min(1.0, luxury))
 
         # Debt carry from credit_stress trait
         cs = state.credit_stress
@@ -270,6 +288,8 @@ class PersonaAgent(BaseAgent):
             spending_personality = "Impulse Prone"
         elif state.budget_adherence > 0.65:
             spending_personality = "Value Hunter"
+        elif state.luxury_affinity > 0.72 and float(state.monthly_income) > 5500 and state.credit_stress < 0.45:
+            spending_personality = "Premium Seeker"
         elif state.quality_preference > 0.6:
             spending_personality = "Brand Loyalist"
         elif state.novelty_seeking > 0.6:

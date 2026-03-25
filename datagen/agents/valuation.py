@@ -21,24 +21,28 @@ from datagen.state import UserState
 from datagen.text import generate_explanation_json
 
 ITEM_POOL = [
-    ("AirPods Pro", "electronics", 180, 250),
-    ("MacBook Air", "electronics", 900, 1300),
-    ("iPad", "electronics", 350, 600),
-    ("Running Shoes", "fitness", 80, 180),
-    ("Protein Powder", "fitness", 25, 60),
-    ("Yoga Mat", "fitness", 20, 80),
-    ("Textbook", "education", 30, 120),
-    ("Online Course Bundle", "education", 50, 200),
-    ("Coffee Maker", "home", 40, 200),
-    ("Office Chair", "home", 150, 500),
-    ("Monitor", "electronics", 200, 600),
-    ("Winter Jacket", "other", 80, 300),
-    ("Backpack", "other", 40, 120),
-    ("Noise Cancelling Headphones", "electronics", 150, 350),
-    ("Standing Desk", "home", 250, 700),
-    ("Instant Pot", "home", 60, 150),
-    ("Skincare Set", "health", 30, 100),
-    ("Vitamins Bundle", "health", 20, 60),
+    ("AirPods Pro", "electronics", 180, 250, False),
+    ("MacBook Air", "electronics", 900, 1300, False),
+    ("iPad", "electronics", 350, 600, False),
+    ("Running Shoes", "fitness", 80, 180, False),
+    ("Protein Powder", "fitness", 25, 60, False),
+    ("Yoga Mat", "fitness", 20, 80, False),
+    ("Textbook", "education", 30, 120, False),
+    ("Online Course Bundle", "education", 50, 200, False),
+    ("Coffee Maker", "home", 40, 200, False),
+    ("Office Chair", "home", 150, 500, False),
+    ("Monitor", "electronics", 200, 600, False),
+    ("Winter Jacket", "other", 80, 300, False),
+    ("Backpack", "other", 40, 120, False),
+    ("Noise Cancelling Headphones", "electronics", 150, 350, False),
+    ("Standing Desk", "home", 250, 700, False),
+    ("Instant Pot", "home", 60, 150, False),
+    ("Skincare Set", "health", 30, 100, False),
+    ("Vitamins Bundle", "health", 20, 60, False),
+    ("Designer Handbag", "luxury", 1800, 4200, True),
+    ("Swiss Watch", "luxury", 2600, 9000, True),
+    ("Luxury Sneakers", "luxury", 550, 1400, True),
+    ("Cashmere Coat", "luxury", 900, 2800, True),
 ]
 
 ITEM_PRICE_PROFILES: dict[str, tuple[float, float]] = {
@@ -47,6 +51,7 @@ ITEM_PRICE_PROFILES: dict[str, tuple[float, float]] = {
     "education": (-0.03, 0.11),
     "home": (0.01, 0.13),
     "health": (-0.02, 0.10),
+    "luxury": (0.12, 0.18),
     "other": (0.00, 0.14),
 }
 
@@ -59,6 +64,7 @@ MERCHANT_FAMILY_PRICE_PROFILES: dict[str, tuple[float, float]] = {
     "rideshare": (0.05, 0.10),
     "fuel": (0.01, 0.06),
     "entertainment_out": (0.06, 0.13),
+    "luxury_retail": (0.18, 0.18),
 }
 
 
@@ -335,6 +341,7 @@ class ValuationAgent(BaseAgent):
         score: int,
         price_fairness: float,
         need_fit: float,
+        luxury_signal: float = 0.0,
     ) -> str:
         rng = self.rng
         mi = float(state.monthly_income or 1)
@@ -343,8 +350,13 @@ class ValuationAgent(BaseAgent):
         skip_logit = (65 - score) / 25.0
         wait_logit = 0.0
         buy_logit -= state.price_sensitivity * (1.0 - price_fairness) * 1.5
+        buy_logit += luxury_signal * (0.45 * state.luxury_affinity + 0.18 * state.quality_preference)
+        skip_logit += luxury_signal * (0.55 * state.price_sensitivity + 0.50 * state.credit_stress)
         if tier in ("low", "moderate") and price_fairness < 0.5 and need_fit < 0.6:
             buy_logit -= (0.5 - price_fairness) * 1.5
+        if luxury_signal > 0 and state.liquidity in ("tight", "overdraft_risk", "overdrafted"):
+            buy_logit -= 0.8 * luxury_signal
+            skip_logit += 0.9 * luxury_signal
         return _softmax_choice(rng, [buy_logit, wait_logit, skip_logit], ("buy", "wait", "skip"))
 
     def _sample_fair_price(
@@ -354,6 +366,7 @@ class ValuationAgent(BaseAgent):
         item_category: str,
         merchant_family: str | None = None,
         state: UserState,
+        luxury_signal: float = 0.0,
     ) -> tuple[Decimal, float]:
         rng = self.rng
         base_mean, base_sigma = ITEM_PRICE_PROFILES.get(item_category, ITEM_PRICE_PROFILES["other"])
@@ -365,8 +378,10 @@ class ValuationAgent(BaseAgent):
         premium_sigma = max(base_sigma, fam_sigma, 0.06)
         premium_mean += (state.quality_preference - 0.5) * 0.10
         premium_mean -= (state.price_sensitivity - 0.5) * 0.14
+        premium_mean += luxury_signal * (0.12 + 0.14 * state.luxury_affinity)
+        premium_sigma += luxury_signal * 0.03
         premium = float(rng.normal(premium_mean, premium_sigma))
-        premium = max(-0.22, min(0.32, premium))
+        premium = max(-0.22, min(0.48 if luxury_signal > 0 else 0.32, premium))
         fair_amount = observed_amount / max(0.55, 1.0 + premium)
         fair_amount *= float(rng.uniform(0.97, 1.03))
         fair_amount = max(0.5, fair_amount)
@@ -382,8 +397,9 @@ class ValuationAgent(BaseAgent):
         if not merch:
             return None
         item_name = merch.get("name", "Unknown")
-        item_cat = merch.get("category", "other")
+        item_cat = "luxury" if merch.get("merchant_family") == "luxury_retail" else merch.get("category", "other")
         merchant_family = merch.get("merchant_family")
+        luxury_signal = 1.0 if merchant_family == "luxury_retail" or item_cat == "luxury" else 0.0
         amount = float(txn.get("amount", 50))
         usage_freq = txn.get("usage_frequency") or 2
         satisfaction = txn.get("satisfaction_rating") or 5
@@ -407,9 +423,12 @@ class ValuationAgent(BaseAgent):
             item_category=item_cat,
             merchant_family=merchant_family,
             state=state,
+            luxury_signal=luxury_signal,
         )
         need_fit = fit_proxy
-        rec = self._item_recommendation_from_score(state, score, price_fairness, need_fit)
+        rec = self._item_recommendation_from_score(
+            state, score, price_fairness, need_fit, luxury_signal=luxury_signal,
+        )
 
         observed_price = Decimal(str(round(amount, 2)))
         confidence = clip01(0.6 + 0.2 * (1 if txn.get("reflection_text") else 0) + float(rng.normal(0, 0.05)))
@@ -437,9 +456,10 @@ class ValuationAgent(BaseAgent):
     def _valuate_item(self, state: UserState) -> dict:
         rng = self.rng
 
-        item_name, item_cat, price_lo, price_hi = ITEM_POOL[
+        item_name, item_cat, price_lo, price_hi, is_luxury = ITEM_POOL[
             int(rng.integers(0, len(ITEM_POOL)))
         ]
+        luxury_signal = 1.0 if is_luxury else 0.0
 
         anchor = float(rng.uniform(price_lo, price_hi))
         fair_price, _ = self._sample_fair_price(
@@ -447,9 +467,13 @@ class ValuationAgent(BaseAgent):
             item_category=item_cat,
             merchant_family=None,
             state=state,
+            luxury_signal=luxury_signal,
         )
-        obs_multiplier = float(rng.normal(1.0 + (state.quality_preference - state.price_sensitivity) * 0.06, 0.11))
-        obs_multiplier = max(0.72, min(1.34, obs_multiplier))
+        obs_multiplier = float(rng.normal(
+            1.0 + (state.quality_preference - state.price_sensitivity) * 0.06 + luxury_signal * (0.05 + 0.07 * state.luxury_affinity),
+            0.11 + luxury_signal * 0.04,
+        ))
+        obs_multiplier = max(0.72, min(1.46 if luxury_signal > 0 else 1.34, obs_multiplier))
         observed_price = Decimal(str(round(max(price_lo * 0.85, float(fair_price) * obs_multiplier), 2)))
 
         quality_fit = clip01(
@@ -478,7 +502,7 @@ class ValuationAgent(BaseAgent):
         personal_value_score = int(max(0, min(150, personal_value_score + int(rng.normal(0, 10)))))
 
         rec = self._item_recommendation_from_score(
-            state, personal_value_score, price_fairness, need_fit,
+            state, personal_value_score, price_fairness, need_fit, luxury_signal=luxury_signal,
         )
 
         signal_count = 3
@@ -505,6 +529,7 @@ class ValuationAgent(BaseAgent):
                 "price_fairness": round(price_fairness, 3),
                 "need_fit": round(need_fit, 3),
                 "budget_strain": round(budget_strain, 3),
+                "luxury_signal": round(luxury_signal, 3),
             },
             "reasoning_json": explanation,
             "context": "one_off_purchase",

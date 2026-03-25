@@ -21,6 +21,7 @@ from datagen.config import (
     ANOMALY_OVERDRAFT_MONTHLY_P,
     ANOMALY_REFUND_P,
     ANOMALY_REVERSAL_P,
+    resolve_transaction_description,
 )
 from datagen.state import UserState
 
@@ -66,7 +67,11 @@ class AnomalyAgent(BaseAgent):
                     "category": txn.get("category", "other"),
                     "payment_channel": txn.get("payment_channel", "card"),
                     "description_raw": "REFUND " + (txn.get("description_raw", "")[:40]),
-                    "merchant_info": txn.get("merchant_info"),
+                    "merchant_info": txn.get("merchant_info") or (resolve_transaction_description(
+                        "REFUND " + (txn.get("description_raw", "")[:40]),
+                        direction="spend",
+                        fallback_category=txn.get("category", "other"),
+                    ) or {}).get("merchant_info"),
                     "subscription_obj": None,
                     "_anomaly": "refund",
                 }
@@ -83,7 +88,11 @@ class AnomalyAgent(BaseAgent):
                     "category": txn.get("category", "other"),
                     "payment_channel": txn.get("payment_channel", "card"),
                     "description_raw": "REVERSAL " + (txn.get("description_raw", "")[:35]),
-                    "merchant_info": txn.get("merchant_info"),
+                    "merchant_info": txn.get("merchant_info") or (resolve_transaction_description(
+                        "REVERSAL " + (txn.get("description_raw", "")[:35]),
+                        direction="spend",
+                        fallback_category=txn.get("category", "other"),
+                    ) or {}).get("merchant_info"),
                     "subscription_obj": None,
                     "_anomaly": "reversal",
                 }
@@ -102,9 +111,12 @@ class AnomalyAgent(BaseAgent):
                         "direction": "spend",
                         "amount": fee_amount,
                         "occurred_at": fee_date,
-                        "category": "other",
+                        "category": "bills",
                         "payment_channel": "bank",
                         "description_raw": "OVERDRAFT FEE",
+                        "merchant_info": (resolve_transaction_description(
+                            "OVERDRAFT FEE", direction="spend", fallback_category="bills"
+                        ) or {}).get("merchant_info"),
                         "merchant_obj": None,
                         "subscription_obj": None,
                         "_anomaly": "overdraft_fee",

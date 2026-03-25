@@ -282,6 +282,8 @@ class SpendAgent(BaseAgent):
         routine: SpendRoutine,
     ) -> float:
         rng = self.rng
+        if state.luxury_cooldown_days > 0:
+            state.luxury_cooldown_days = max(0, state.luxury_cooldown_days - 1)
         days_since = state.days_since_payday(current)
         payday_window = 1.0 if days_since <= 3 else 0.0
         is_weekend = 1.0 if current.weekday() >= 5 else 0.0
@@ -292,7 +294,9 @@ class SpendAgent(BaseAgent):
             if month_disc_spent >= disc_cap:
                 break
 
-            intent, merchant_family = self._discretionary_intent(cat, state, current, routine)
+            intent, merchant_family = self._discretionary_intent(
+                cat, state, current, routine, payday_window=payday_window, liq=liq, mi=mi,
+            )
 
             p = self._purchase_probability(
                 state, cat, is_weekend, payday_window, liq, essential=False,
@@ -361,6 +365,10 @@ class SpendAgent(BaseAgent):
             })
             if cat == "health":
                 routine.pharmacy_days_since_refill = 0
+            if fam == "luxury_retail":
+                state.luxury_cooldown_days = int(rng.integers(9, 22))
+                if float(amt_dec) > mi * 0.12:
+                    state.large_purchase_shock_this_month = True
             state.balance_proxy -= amt_dec
             month_disc_spent += float(amt_dec)
 
@@ -412,16 +420,60 @@ class SpendAgent(BaseAgent):
             return None
         return dict(rng.choice(candidates))
 
-    def _discretionary_intent(self, cat: str, state: UserState, current: date, routine: SpendRoutine) -> tuple[str, str]:
+    def _shopping_intent(
+        self,
+        state: UserState,
+        *,
+        payday_window: float,
+        liq: float,
+        mi: float,
+    ) -> tuple[str, str]:
+        rng = self.rng
+        luxury_signal = (
+            0.52 * state.luxury_affinity
+            + 0.20 * state.quality_preference
+            + 0.12 * state.novelty_seeking
+            + 0.10 * max(0.0, 1.0 - state.price_sensitivity)
+        )
+        if mi >= 8000 and state.liquidity in ("comfortable", "stable"):
+            luxury_signal += 0.12
+        elif mi < 3500 or state.liquidity in ("tight", "overdraft_risk", "overdrafted"):
+            luxury_signal -= 0.18
+        luxury_signal += 0.05 * payday_window
+        if state.luxury_cooldown_days > 0:
+            luxury_signal -= 0.25
+        if state.large_purchase_shock_this_month:
+            luxury_signal -= 0.10
+
+        aspirational = 0.0
+        if mi < 5000 and state.credit_stress > 0.5:
+            aspirational = 0.03 + 0.04 * state.luxury_affinity
+
+        p_luxury = min(0.24, max(0.0, luxury_signal * 0.16 + aspirational + float(rng.normal(0, 0.01))))
+        if rng.random() < p_luxury:
+            return "luxury_splurge", "luxury_retail"
+        if rng.random() < 0.88:
+            return "online_order", "ecommerce"
+        return "retail_trip", "retail_big_box"
+
+    def _discretionary_intent(
+        self,
+        cat: str,
+        state: UserState,
+        current: date,
+        routine: SpendRoutine,
+        *,
+        payday_window: float,
+        liq: float,
+        mi: float,
+    ) -> tuple[str, str]:
         rng = self.rng
         if cat == "dining":
             if rng.random() < 0.42:
                 return "meal_delivery", "delivery_membership"
             return "quick_meal", "food_quick"
         if cat == "shopping":
-            if rng.random() < 0.88:
-                return "online_order", "ecommerce"
-            return "retail_trip", "retail_big_box"
+            return self._shopping_intent(state, payday_window=payday_window, liq=liq, mi=mi)
         if cat == "health":
             return "pharmacy_refill", "pharmacy"
         if cat == "entertainment":
@@ -439,7 +491,7 @@ class SpendAgent(BaseAgent):
         merchant_family: str,
     ) -> float:
         rng = self.rng
-        large_ok = merchant_family in ("ecommerce", "travel", "retail_big_box", "grocery_retail")
+        large_ok = merchant_family in ("ecommerce", "travel", "retail_big_box", "grocery_retail", "luxury_retail")
         if amount > mi and not large_ok:
             extra = max(0.0, (amount - mi) * 0.5)
             state.balance_proxy -= Decimal(str(round(extra, 2)))
@@ -469,6 +521,9 @@ class SpendAgent(BaseAgent):
         mu += (state.quality_preference - 0.5) * 0.3
         mu -= liq * 0.2
         mu -= state.price_sensitivity * 0.25
+        if merchant_family == "luxury_retail":
+            mu += 0.35 * state.luxury_affinity
+            mu += 0.18 * state.quality_preference
         if merchant_family == "grocery_retail":
             mu += 0.22 * max(0, state.household_size - 1)
             mu += 0.08 * state.dependents_count

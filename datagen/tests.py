@@ -12,7 +12,10 @@ from django.utils import timezone
 from datagen.agents.audit import AuditAgent
 from datagen.agents.anomaly import AnomalyAgent
 from datagen.agents.conversation import ConversationAgent
+from datagen.agents.income import IncomeAgent
 from datagen.agents.merchant import MerchantAgent
+from datagen.agents.obligation import ObligationAgent
+from datagen.agents.persona import PersonaAgent
 from datagen.agents.spend import SpendAgent
 from datagen.agents.valuation import ValuationAgent
 from datagen.config import (
@@ -20,6 +23,7 @@ from datagen.config import (
     CANCEL_OVERLOAD_GAMMA,
     MERCHANT_CATEGORY_COMPAT,
     compat_status_family,
+    resolve_transaction_description,
 )
 from datagen.distributions import make_rng
 from datagen.pipeline import run_pipeline
@@ -258,6 +262,16 @@ class SyntheticRealismPatchTests(TestCase):
         }
         repairs = agent._check_merchant_category_compat(ctx)
         self.assertTrue(any("compat" in r for r in repairs))
+
+    def test_description_resolver_maps_income_and_bills_templates(self):
+        income = resolve_transaction_description("Direct Deposit - Payroll", direction="income")
+        bill = resolve_transaction_description("AT&T WIRELESS", direction="spend", fallback_category="bills")
+        refund = resolve_transaction_description("REFUND AMAZON AMAZON COM", direction="refund", fallback_category="shopping")
+        self.assertEqual(income["merchant_info"]["name"], "Payroll")
+        self.assertEqual(bill["merchant_info"]["name"], "AT&T")
+        self.assertEqual(bill["category"], "bills")
+        self.assertEqual(refund["merchant_info"]["name"], "Amazon")
+        self.assertEqual(refund["category"], "shopping")
 
     def test_item_valuation_softmax_stochastic_and_score_band_monotonic(self):
         state = UserState(monthly_income=Decimal("5500"), price_sensitivity=0.35)
@@ -514,6 +528,102 @@ class IntentFirstRealismTests(TestCase):
                     t["merchant_info"]["name"],
                     ("Uber", "Lyft", "Shell", "Chevron"),
                 )
+
+    def test_persona_samples_higher_luxury_affinity_for_high_income_than_constrained(self):
+        ctx = {"end_date": date(2025, 12, 31)}
+        hi_vals = []
+        cc_vals = []
+        for seed in range(30):
+            with patch("datagen.agents.persona.sample_archetype", return_value="high_income"):
+                st = UserState()
+                PersonaAgent(make_rng(seed), use_llm=False).run(st, ctx)
+                hi_vals.append(st.luxury_affinity)
+            with patch("datagen.agents.persona.sample_archetype", return_value="credit_constrained"):
+                st = UserState()
+                PersonaAgent(make_rng(100 + seed), use_llm=False).run(st, ctx)
+                cc_vals.append(st.luxury_affinity)
+        self.assertGreater(sum(hi_vals) / len(hi_vals), sum(cc_vals) / len(cc_vals))
+
+    def test_shopping_intent_routes_luxury_more_for_high_affinity_users(self):
+        agent = SpendAgent(make_rng(120), use_llm=False)
+        rich = UserState(
+            monthly_income=Decimal("9500.00"),
+            quality_preference=0.85,
+            novelty_seeking=0.72,
+            luxury_affinity=0.88,
+            price_sensitivity=0.18,
+            liquidity="comfortable",
+        )
+        cautious = UserState(
+            monthly_income=Decimal("4200.00"),
+            quality_preference=0.42,
+            novelty_seeking=0.30,
+            luxury_affinity=0.08,
+            price_sensitivity=0.78,
+            liquidity="stable",
+        )
+        rich_hits = sum(
+            1 for _ in range(60)
+            if agent._shopping_intent(rich, payday_window=1.0, liq=rich.liquidity_numeric(), mi=float(rich.monthly_income))[1] == "luxury_retail"
+        )
+        cautious_hits = sum(
+            1 for _ in range(60)
+            if agent._shopping_intent(cautious, payday_window=1.0, liq=cautious.liquidity_numeric(), mi=float(cautious.monthly_income))[1] == "luxury_retail"
+        )
+        self.assertGreater(rich_hits, cautious_hits)
+        self.assertLess(rich_hits, 30)
+
+    def test_luxury_retail_transactions_remain_shopping(self):
+        agent = SpendAgent(make_rng(121), use_llm=False)
+        merchant_agent = MerchantAgent(make_rng(121), use_llm=False)
+        catalog = merchant_agent.run(UserState(), {})["merchant_catalog"]
+        txns = []
+        state = UserState(
+            monthly_income=Decimal("10000.00"),
+            quality_preference=0.9,
+            novelty_seeking=0.75,
+            luxury_affinity=0.95,
+            price_sensitivity=0.12,
+            liquidity="comfortable",
+        )
+        agent._emit_transaction(
+            state,
+            date(2025, 1, 15),
+            spend_category="shopping",
+            intent="luxury_splurge",
+            merchant_family="luxury_retail",
+            transactions=txns,
+            merchant_agent=merchant_agent,
+            merchant_catalog=catalog,
+            days_since=2,
+            liq=state.liquidity_numeric(),
+            mi=float(state.monthly_income),
+        )
+        self.assertEqual(txns[0]["merchant_family"], "luxury_retail")
+        self.assertEqual(txns[0]["category"], "shopping")
+
+    def test_income_transactions_get_normalized_income_merchants(self):
+        rng = make_rng(111)
+        state = UserState(monthly_income=Decimal("5200.00"), archetype="salary_biweekly")
+        out = IncomeAgent(rng, use_llm=False).run(
+            state,
+            {"start_date": date(2025, 1, 1), "end_date": date(2025, 2, 28)},
+        )["income_transactions"]
+        self.assertTrue(out)
+        self.assertTrue(all(t.get("merchant_info") for t in out))
+        self.assertIn(out[0]["merchant_info"]["name"], ("Payroll", "Reimbursement"))
+
+    def test_obligation_transactions_get_normalized_bill_merchants(self):
+        rng = make_rng(112)
+        state = UserState(monthly_income=Decimal("5200.00"))
+        out = ObligationAgent(rng, use_llm=False).run(
+            state,
+            {"start_date": date(2025, 1, 1), "end_date": date(2025, 2, 28)},
+        )["obligation_transactions"]
+        self.assertTrue(out)
+        bill_like = [t for t in out if t["category"] == "bills"]
+        self.assertTrue(bill_like)
+        self.assertTrue(all(t.get("merchant_info") for t in bill_like))
 
     def test_spend_groceries_use_grocery_retailers_only(self):
         rng = make_rng(91)
@@ -802,6 +912,47 @@ class IntentFirstRealismTests(TestCase):
             fair = float(item["estimated_fair_price"])
             ratios.append(round((observed - fair) / max(1.0, fair), 4))
         self.assertGreater(len(set(ratios)), 20)
+
+    def test_high_luxury_affinity_users_are_more_tolerant_of_luxury_premium(self):
+        high = UserState(
+            monthly_income=Decimal("9000.00"),
+            quality_preference=0.88,
+            luxury_affinity=0.92,
+            price_sensitivity=0.18,
+        )
+        low = UserState(
+            monthly_income=Decimal("9000.00"),
+            quality_preference=0.55,
+            luxury_affinity=0.05,
+            price_sensitivity=0.62,
+        )
+        high_agent = ValuationAgent(make_rng(130), use_llm=False)
+        low_agent = ValuationAgent(make_rng(130), use_llm=False)
+        high_buys = sum(
+            1 for _ in range(80)
+            if high_agent._item_recommendation_from_score(high, 104, 0.63, 0.71, luxury_signal=1.0) == "buy"
+        )
+        low_buys = sum(
+            1 for _ in range(80)
+            if low_agent._item_recommendation_from_score(low, 104, 0.63, 0.71, luxury_signal=1.0) == "buy"
+        )
+        self.assertGreater(high_buys, low_buys)
+
+    def test_budget_constrained_users_do_not_overbuy_luxury_items(self):
+        state = UserState(
+            monthly_income=Decimal("2800.00"),
+            quality_preference=0.72,
+            luxury_affinity=0.68,
+            price_sensitivity=0.64,
+            credit_stress=0.7,
+            liquidity="tight",
+        )
+        agent = ValuationAgent(make_rng(131), use_llm=False)
+        buys = sum(
+            1 for _ in range(80)
+            if agent._item_recommendation_from_score(state, 108, 0.56, 0.62, luxury_signal=1.0) == "buy"
+        )
+        self.assertLessEqual(buys, 25)
 
     def test_subscription_churner_fact_requires_real_churn_signal(self):
         agent = ConversationAgent(make_rng(10), use_llm=False)

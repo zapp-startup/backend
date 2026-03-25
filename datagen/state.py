@@ -32,6 +32,7 @@ class UserState:
     regret_sensitivity: float = 0.5
     quality_preference: float = 0.5
     novelty_seeking: float = 0.5
+    luxury_affinity: float = 0.5
     subscription_engagement: str = "moderate"
     household_pressure: float = 0.5
     credit_stress: float = 0.5
@@ -60,6 +61,7 @@ class UserState:
     _consecutive_deficit_months: int = 0
     _consecutive_surplus_months: int = 0
     large_purchase_shock_this_month: bool = False
+    luxury_cooldown_days: int = 0
 
     def update_liquidity(self) -> None:
         """Section 18.1: Update liquidity state based on balance proxy vs fixed expenses."""
