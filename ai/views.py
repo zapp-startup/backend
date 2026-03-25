@@ -1,10 +1,14 @@
 from collections import defaultdict
 from datetime import timedelta
 from decimal import Decimal
+import json
+import logging
+from pathlib import Path
 
 from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+import requests
 from subscriptions.models import Subscription
 from transactions.models import Transaction, TransactionDirection
 from rest_framework import status
@@ -33,6 +37,9 @@ SAFETY_GUARDRAILS = {
         "advice_scope": "general_financial_guidance",
     },
 }
+
+logger = logging.getLogger(__name__)
+DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 
 
 def _format_recent_transaction(transaction):
@@ -354,6 +361,125 @@ def _build_record_transaction_response() -> dict:
     }
 
 
+def _load_system_prompt() -> str:
+    prompt_path = Path(__file__).resolve().parent / "prompts" / "system_prompt_v1.txt"
+    return prompt_path.read_text(encoding="utf-8").strip()
+
+
+def _build_openai_payload(conversation, user_message: str, financial_context: dict, purchase_advisor_report: dict | None):
+    raw_explicit = getattr(conversation.user, "raw_explicit", None)
+
+    category_spend_30d = []
+    for category_totals in purchase_advisor_report.get("overspending_categories", []) if purchase_advisor_report else []:
+        category_spend_30d.append(
+            {
+                "category": category_totals["category"],
+                "amount": float(category_totals["total_spend"]),
+            }
+        )
+
+    subscriptions = []
+    for subscription in financial_context.get("active_subscriptions", []):
+        subscriptions.append(
+            {
+                "name": subscription["merchant"],
+                "status": subscription["status"],
+                "billing_cycle": subscription["billing_cycle"],
+                "price": float(subscription["price"]),
+                "currency": subscription["currency"],
+                "renewal_date": subscription["renewal_date"],
+                "usage_frequency": None,
+            }
+        )
+
+    return {
+        "schema_version": "zapp_prompt_v1",
+        "conversation": {
+            "conversation_id": conversation.id,
+            "context_type": conversation.context_type,
+            "user_message": user_message,
+        },
+        "profile": {
+            "monthly_income": float(raw_explicit.monthly_income) if raw_explicit and raw_explicit.monthly_income is not None else None,
+            "monthly_fixed_expenses": float(raw_explicit.monthly_fixed_expenses)
+            if raw_explicit and raw_explicit.monthly_fixed_expenses is not None
+            else None,
+            "financial_goal": raw_explicit.financial_goal if raw_explicit and raw_explicit.financial_goal else None,
+            "risk_tolerance": raw_explicit.risk_tolerance if raw_explicit and raw_explicit.risk_tolerance else None,
+            "budget_style": raw_explicit.budget_style if raw_explicit and raw_explicit.budget_style else None,
+        },
+        "spending": {
+            "category_spend_30d": category_spend_30d,
+        },
+        "subscriptions": subscriptions,
+        "policy": {
+            "must_not_fabricate_data": True,
+            "ask_clarifying_question_when_missing_data": True,
+            "disclaimer_required_for_specialized_guidance": True,
+            "confidence_min": SAFETY_GUARDRAILS["safe_bounds"]["confidence"]["min"],
+            "confidence_max": SAFETY_GUARDRAILS["safe_bounds"]["confidence"]["max"],
+            "safe_next_step_bias": "reversible_actions_only",
+        },
+    }
+
+
+def _format_openai_response_text(payload: dict) -> str:
+    recommendation = payload.get("recommendation", "investigate")
+    reasoning = payload.get("reasoning", [])
+    next_steps = payload.get("next_steps", [])
+    missing_data_questions = payload.get("missing_data_questions", [])
+    disclaimer = payload.get("disclaimer") or SAFETY_GUARDRAILS["disclaimer"]
+    confidence = payload.get("confidence")
+
+    parts = [f"Recommendation: {recommendation}."]
+    if reasoning:
+        parts.append("Why: " + " ".join(f"- {item}" for item in reasoning))
+    if next_steps:
+        parts.append("Next steps: " + " ".join(f"- {item}" for item in next_steps))
+    if missing_data_questions:
+        parts.append("Missing data: " + " ".join(f"- {item}" for item in missing_data_questions[:1]))
+    if confidence is not None:
+        parts.append(f"Confidence: {confidence}.")
+    parts.append(disclaimer)
+    return " ".join(parts)
+
+
+def build_openai_assistant_response(*, conversation, user_message: str, financial_context: dict, purchase_advisor_report: dict | None) -> dict:
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise ValueError("OpenAI API key is missing.")
+
+    payload = _build_openai_payload(conversation, user_message, financial_context, purchase_advisor_report)
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": DEFAULT_OPENAI_MODEL,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": _load_system_prompt()},
+                {"role": "user", "content": json.dumps(payload)},
+            ],
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    body = response.json()
+    content = body["choices"][0]["message"]["content"]
+    parsed = json.loads(content)
+
+    return {
+        "assistant_text": _format_openai_response_text(parsed),
+        "response_style": "direct_answer",
+        "frontend_hint": "Render a normal assistant reply view.",
+        "safety_guardrails": SAFETY_GUARDRAILS,
+        "model_response_json": parsed,
+    }
+
+
 def build_assistant_placeholder_response(intent: str, openai_configured: bool) -> dict:
     base_suffix = (
         "OpenAI call wiring is the next step."
@@ -506,7 +632,19 @@ class ConversationViewSet(ModelViewSet):
         if intent == "record_transaction":
             assistant_placeholder = _build_record_transaction_response()
         else:
-            assistant_placeholder = build_assistant_placeholder_response(intent, openai_configured)
+            if openai_configured:
+                try:
+                    assistant_placeholder = build_openai_assistant_response(
+                        conversation=convo,
+                        user_message=content,
+                        financial_context=financial_context,
+                        purchase_advisor_report=purchase_advisor_report,
+                    )
+                except (requests.RequestException, ValueError, KeyError, json.JSONDecodeError) as exc:
+                    logger.warning("OpenAI request failed; falling back to placeholder response: %s", exc)
+                    assistant_placeholder = build_assistant_placeholder_response(intent, openai_configured=False)
+            else:
+                assistant_placeholder = build_assistant_placeholder_response(intent, openai_configured=False)
 
         # placeholder assistant response for now (OpenAI integration still pending)
         assistant_text = assistant_placeholder["assistant_text"]
@@ -516,8 +654,9 @@ class ConversationViewSet(ModelViewSet):
             role=MessageRole.ASSISTANT,
             content=assistant_text,
             metadata_json={
-                "mode": "placeholder",
+                "mode": "openai" if assistant_placeholder.get("model_response_json") else "placeholder",
                 "openai_configured": openai_configured,
+                "model_response_json": assistant_placeholder.get("model_response_json"),
                 "financial_context": financial_context,
                 "conversation_memory": refresh_conversation_memory(convo),
                 "intent_detection": intent_detection,

@@ -1,5 +1,6 @@
 from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import Mock, patch
 
 from django.conf import settings
 from django.core.cache import cache
@@ -186,6 +187,40 @@ class ConversationMessagesTests(TestCase):
         self.assertIsNotNone(self.conversation.last_summarized_message_id)
         self.assertEqual(self.conversation.session_state_json["active_goal"], "general_guidance")
         self.assertLessEqual(len(self.conversation.session_state_json["open_loops"]), 3)
+
+    @patch("ai.views.requests.post")
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_messages_post_uses_openai_when_configured(self, mock_post):
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"recommendation":"investigate","reasoning":["Review recent costs"],'
+                            '"next_steps":["Check top categories"],"confidence":0.72,'
+                            '"missing_data_questions":[],"disclaimer":"General financial guidance only.",'
+                            '"safe_bounds_acknowledged":true}'
+                        )
+                    }
+                }
+            ]
+        }
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/",
+            {"content": "Can you help me optimize spending?"},
+            format="json",
+            HTTP_X_DEV_USER="seed_user_0",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        assistant_message = response.data["assistant_message"]
+        self.assertEqual(assistant_message["metadata_json"]["mode"], "openai")
+        self.assertIn("Recommendation:", assistant_message["content"])
+        self.assertIn("model_response_json", assistant_message["metadata_json"])
 
 
 class AIRateLimitingTests(TestCase):
