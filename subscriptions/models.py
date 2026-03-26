@@ -134,6 +134,16 @@ class Subscription(models.Model):
         null=True,
         help_text="0-1 confidence in feedback_value_score",
     )
+    subscription_utilization = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 normalized utilization score derived from valuation runs.",
+    )
+    subscription_cost_benefit = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 bounded value-vs-cost score derived from valuation runs.",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -153,6 +163,14 @@ class Subscription(models.Model):
             models.CheckConstraint(
                 condition=models.Q(feedback_confidence__gte=0, feedback_confidence__lte=1) | models.Q(feedback_confidence__isnull=True),
                 name="valid_subscription_feedback_confidence",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(subscription_utilization__gte=0, subscription_utilization__lte=1) | models.Q(subscription_utilization__isnull=True),
+                name="valid_subscription_utilization",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(subscription_cost_benefit__gte=0, subscription_cost_benefit__lte=1) | models.Q(subscription_cost_benefit__isnull=True),
+                name="valid_subscription_cost_benefit",
             ),
             # Prevent duplicate active subscriptions to the same merchant for a user.
             # If you later want multiple (e.g., multiple Netflix profiles), loosen this.

@@ -31,7 +31,6 @@ django.setup()
 from django.contrib.auth import get_user_model
 
 from ai.models import Conversation, Message, UserFact
-from datagen.export_utils import compute_subscription_utilization
 from subscriptions.models import Merchant, Subscription
 from transactions.models import Transaction
 from users.models import UserComputed, UserPreference, UserRawExplicit, UserRawInferred
@@ -98,59 +97,27 @@ def get_csv_fields(model_class):
     return names
 
 
-def subscription_export_fields():
-    return get_csv_fields(Subscription) + ["subscription_utilization"]
-
-
-def subscription_export_row(subscription):
-    row = []
-    fields = get_csv_fields(Subscription)
-    for field_name in fields:
-        val = getattr(subscription, field_name, None)
-        if val is not None and hasattr(val, "isoformat"):
-            val = val.isoformat()
-        elif val is not None and hasattr(val, "__float__") and type(val).__name__ == "Decimal":
-            val = float(val)
-        elif hasattr(val, "pk"):
-            val = val.pk
-        row.append(val)
-
-    row.append(
-        compute_subscription_utilization(
-            subscription,
-            getattr(getattr(subscription, "merchant", None), "category", None),
-        )
-    )
-    return row
-
-
 def write_csv(output_path: Path, model_class, rows, filename: str):
     path = output_path / filename
     if not rows:
         path.write_text("", encoding="utf-8")
         return
 
-    if model_class is Subscription and filename == "subscriptions_subscription.csv":
-        fields = subscription_export_fields()
-    else:
-        fields = get_csv_fields(model_class)
+    fields = get_csv_fields(model_class)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(fields)
         for obj in rows:
-            if model_class is Subscription and filename == "subscriptions_subscription.csv":
-                row = subscription_export_row(obj)
-            else:
-                row = []
-                for field_name in fields:
-                    val = getattr(obj, field_name, None)
-                    if val is not None and hasattr(val, "isoformat"):
-                        val = val.isoformat()
-                    elif val is not None and hasattr(val, "__float__") and type(val).__name__ == "Decimal":
-                        val = float(val)
-                    elif hasattr(val, "pk"):
-                        val = val.pk
-                    row.append(val)
+            row = []
+            for field_name in fields:
+                val = getattr(obj, field_name, None)
+                if val is not None and hasattr(val, "isoformat"):
+                    val = val.isoformat()
+                elif val is not None and hasattr(val, "__float__") and type(val).__name__ == "Decimal":
+                    val = float(val)
+                elif hasattr(val, "pk"):
+                    val = val.pk
+                row.append(val)
             writer.writerow(row)
     print(f"  Wrote {filename} ({len(rows)} rows)")
 
@@ -276,17 +243,13 @@ def run_export(
                         }
                         for t in user_transactions
                     ],
-                    "subscriptions": [
-                        {
-                            **model_to_dict_safe(s),
-                            "merchant_name": merchants_by_id.get(s.merchant_id).name if s.merchant_id in merchants_by_id else None,
-                            "subscription_utilization": compute_subscription_utilization(
-                                s,
-                                merchants_by_id.get(s.merchant_id).category if s.merchant_id in merchants_by_id else None,
-                            ),
-                        }
-                        for s in user_subscriptions
-                    ],
+                     "subscriptions": [
+                         {
+                             **model_to_dict_safe(s),
+                             "merchant_name": merchants_by_id.get(s.merchant_id).name if s.merchant_id in merchants_by_id else None,
+                         }
+                         for s in user_subscriptions
+                     ],
                     "subscription_valuations": [
                         model_to_dict_safe(sv) for sv in subscription_valuations if sv.user_id == uid
                     ],

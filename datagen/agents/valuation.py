@@ -17,6 +17,7 @@ from datagen.config import (
     VALUATION_SCORE_BANDS,
 )
 from datagen.distributions import clip01
+from datagen.export_utils import compute_subscription_cost_benefit
 from datagen.state import UserState
 from datagen.text import generate_explanation_json
 
@@ -195,6 +196,10 @@ class ValuationAgent(BaseAgent):
             confidence = clip01(logistic_simple(
                 0.5 + 0.2 * signal_count - 0.3 * (1 - ambiguity)
             ))
+            subscription_utilization = round(usage, 4)
+            subscription_cost_benefit = compute_subscription_cost_benefit(
+                estimated_value, total_cost
+            )
 
             usage_fit = (usage + fit) / 2.0
             habit_friction = habit - friction
@@ -222,9 +227,13 @@ class ValuationAgent(BaseAgent):
                 "personal_value_score": sub_score,
                 "recommendation": rec,
                 "confidence": round(confidence, 2),
+                "subscription_utilization": subscription_utilization,
+                "subscription_cost_benefit": subscription_cost_benefit,
                 "explanation_json": explanation,
                 "evidence_json": {
                     "usage_frequency": round(usage, 3),
+                    "subscription_utilization": subscription_utilization,
+                    "subscription_cost_benefit": subscription_cost_benefit,
                     "fit_score": round(fit, 3),
                     "habit_score": round(habit, 3),
                     "friction_score": round(friction, 3),

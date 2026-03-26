@@ -357,6 +357,11 @@ def _generate_one_user(
         sub_by_merchant, sub_model,
     )
     stats["sub_valuations"] = len(db_sub_vals)
+    _sync_subscription_rollups_from_valuations(
+        db_subs,
+        valuation_result.get("subscription_valuations", []),
+        sub_by_merchant,
+    )
 
     # === Persist item valuations ===
     db_item_vals = _persist_item_valuations(
@@ -509,6 +514,8 @@ def _persist_subscriptions(user, sub_dicts: list[dict], merchant_db_map: dict):
             cancelled_on=sd.get("cancelled_on"),
             usage_frequency=sd.get("usage_frequency"),
             reactivation_count=sd.get("reactivation_count", 0),
+            subscription_utilization=sd.get("subscription_utilization"),
+            subscription_cost_benefit=sd.get("subscription_cost_benefit"),
         ))
 
     db_subs = []
@@ -635,6 +642,42 @@ def _persist_subscription_valuations(user, val_dicts: list[dict],
         SubscriptionValuation.objects.bulk_create(objs, batch_size=500, ignore_conflicts=True)
 
     return objs
+
+
+def _sync_subscription_rollups_from_valuations(db_subs: list, val_dicts: list[dict], sub_by_merchant: dict) -> None:
+    """Mirror the latest generated valuation rollups onto the subscription row for flat exports."""
+    from subscriptions.models import Subscription
+
+    latest_by_subscription_id = {}
+    for valuation in val_dicts:
+        merchant_name = valuation.get("_sub_ref", {}).get("merchant_info", {}).get("name", "")
+        subscription = sub_by_merchant.get(merchant_name)
+        if subscription is None:
+            continue
+        subscription_id = subscription.pk
+        current = latest_by_subscription_id.get(subscription_id)
+        valuation_key = (valuation["period_end"], valuation.get("subscription_utilization"), valuation.get("subscription_cost_benefit"))
+        current_key = None
+        if current is not None:
+            current_key = (current["period_end"], current.get("subscription_utilization"), current.get("subscription_cost_benefit"))
+        if current is None or valuation_key >= current_key:
+            latest_by_subscription_id[subscription_id] = valuation
+
+    to_update = []
+    for sub in db_subs:
+        latest = latest_by_subscription_id.get(sub.pk)
+        if latest is None:
+            continue
+        sub.subscription_utilization = latest.get("subscription_utilization")
+        sub.subscription_cost_benefit = latest.get("subscription_cost_benefit")
+        to_update.append(sub)
+
+    if to_update:
+        Subscription.objects.bulk_update(
+            to_update,
+            ["subscription_utilization", "subscription_cost_benefit"],
+            batch_size=50,
+        )
 
 
 def _persist_item_valuations(user, val_dicts: list[dict], item_model):

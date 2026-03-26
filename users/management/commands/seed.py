@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from django.core.management.base import BaseCommand
 
+from datagen.csv_seed import run_csv_export
 from datagen.llm import is_llm_available
 from datagen.pipeline import run_pipeline
 
@@ -55,6 +56,14 @@ class Command(BaseCommand):
             "--seed", type=int, default=None,
             help="Random seed for reproducibility.",
         )
+        parser.add_argument(
+            "--csv-output-dir", type=str, default=None,
+            help="Write generated data directly to CSVs in this directory instead of persisting to the database.",
+        )
+        parser.add_argument(
+            "--include-summary-json", action="store_true", default=False,
+            help="When using --csv-output-dir, also write summary_by_user.json.",
+        )
 
     def handle(self, *args, **opts):
         if opts["use_llm"] and not is_llm_available():
@@ -63,24 +72,44 @@ class Command(BaseCommand):
                 "Add it to .env for richer text generation. Falling back to templates."
             ))
 
-        self.stdout.write(self.style.NOTICE(
-            f"Starting agent-based data generation: "
-            f"{opts['users']} users, {opts['months']} months, prefix='{opts['prefix']}'"
-        ))
-
-        stats = run_pipeline(
-            num_users=opts["users"],
-            months=opts["months"],
-            prefix=opts["prefix"],
-            password=opts["password"],
-            use_llm=opts["use_llm"],
-            max_llm_reflections=opts["max_llm_reflections"],
-            seed=opts["seed"],
-            log=lambda msg: self.stdout.write(msg),
-        )
+        if opts["csv_output_dir"]:
+            self.stdout.write(self.style.NOTICE(
+                f"Starting agent-based CSV generation: "
+                f"{opts['users']} users, {opts['months']} months, prefix='{opts['prefix']}', "
+                f"output='{opts['csv_output_dir']}'"
+            ))
+            stats = run_csv_export(
+                num_users=opts["users"],
+                months=opts["months"],
+                prefix=opts["prefix"],
+                password=opts["password"],
+                use_llm=opts["use_llm"],
+                max_llm_reflections=opts["max_llm_reflections"],
+                seed=opts["seed"],
+                output_dir=opts["csv_output_dir"],
+                include_summary_json=opts["include_summary_json"],
+                log=lambda msg: self.stdout.write(msg),
+            )
+            completion_label = "CSV export complete!"
+        else:
+            self.stdout.write(self.style.NOTICE(
+                f"Starting agent-based data generation: "
+                f"{opts['users']} users, {opts['months']} months, prefix='{opts['prefix']}'"
+            ))
+            stats = run_pipeline(
+                num_users=opts["users"],
+                months=opts["months"],
+                prefix=opts["prefix"],
+                password=opts["password"],
+                use_llm=opts["use_llm"],
+                max_llm_reflections=opts["max_llm_reflections"],
+                seed=opts["seed"],
+                log=lambda msg: self.stdout.write(msg),
+            )
+            completion_label = "Seed complete!"
 
         self.stdout.write(self.style.SUCCESS(
-            f"\nSeed complete!\n"
+            f"\n{completion_label}\n"
             f"  Users created:           {stats['users_created']}\n"
             f"  Transactions:            {stats['transactions']}\n"
             f"  Subscriptions:           {stats['subscriptions']}\n"
