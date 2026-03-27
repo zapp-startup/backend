@@ -421,9 +421,18 @@ def _sync_subscription_rollups_from_generated_valuations(subscription_rows: list
         subscription["subscription_cost_benefit"] = latest.get("subscription_cost_benefit")
 
 
+def _is_behavioral_spend_row(txn: dict) -> bool:
+    if txn.get("direction") != "spend":
+        return False
+    if txn.get("subscription_id") is not None:
+        return False
+    return txn.get("category") != "bills"
+
+
 def _compute_raw_inferred_row(user_id: int, transaction_rows: list[dict], subscription_rows: list[dict], merchant_rows_by_id: dict, state: UserState, now: datetime):
     spend_txns = [txn for txn in transaction_rows if txn["direction"] == "spend"]
-    if not spend_txns:
+    behavioral_spend = [txn for txn in spend_txns if _is_behavioral_spend_row(txn)]
+    if not behavioral_spend:
         return {
             "user_id": user_id,
             "window_days": 90,
@@ -444,32 +453,37 @@ def _compute_raw_inferred_row(user_id: int, transaction_rows: list[dict], subscr
             "computed_at": now,
         }
 
-    amounts = [float(txn["amount"]) for txn in spend_txns]
+    amounts = [float(txn["amount"]) for txn in behavioral_spend]
     avg_price = sum(amounts) / len(amounts)
     variance = sum((amount - avg_price) ** 2 for amount in amounts) / max(1, len(amounts) - 1)
 
     category_counts: dict[str, int] = {}
-    for txn in spend_txns:
+    for txn in behavioral_spend:
         category = txn["category"]
         category_counts[category] = category_counts.get(category, 0) + 1
-    category_distribution = {key: round(value / len(spend_txns), 3) for key, value in category_counts.items()}
+    category_distribution = {key: round(value / len(behavioral_spend), 3) for key, value in category_counts.items()}
 
-    impulse_scores = [txn["impulse_score"] for txn in spend_txns if txn.get("impulse_score") is not None]
-    regret_scores = [txn["regret_score"] for txn in spend_txns if txn.get("regret_score") is not None]
+    impulse_scores = [txn["impulse_score"] for txn in behavioral_spend if txn.get("impulse_score") is not None]
+    regret_events = []
+    for txn in behavioral_spend:
+        score_event = bool(txn.get("regret_score") is not None and float(txn["regret_score"]) >= 0.25)
+        rating_event = bool(txn.get("regret_rating") is not None and int(txn["regret_rating"]) >= 5)
+        if txn.get("regret_score") is not None or txn.get("regret_rating") is not None:
+            regret_events.append(score_event or rating_event)
     percent_impulsive = (
         sum(1 for score in impulse_scores if score > 0.5) / max(1, len(impulse_scores))
         if impulse_scores else None
     )
     regret_frequency = (
-        sum(1 for score in regret_scores if score > 0.4) / max(1, len(regret_scores))
-        if regret_scores else None
+        sum(1 for flag in regret_events if flag) / max(1, len(regret_events))
+        if regret_events else None
     )
 
-    late_night_count = sum(1 for txn in spend_txns if txn["occurred_at"].hour >= 22 or txn["occurred_at"].hour < 5)
-    late_night_frequency = late_night_count / len(spend_txns)
+    late_night_count = sum(1 for txn in behavioral_spend if txn["occurred_at"].hour >= 22 or txn["occurred_at"].hour < 5)
+    late_night_frequency = late_night_count / len(behavioral_spend)
 
     merchant_counts: dict[str, int] = {}
-    for txn in spend_txns:
+    for txn in behavioral_spend:
         merchant_id = txn.get("merchant_id")
         if merchant_id is not None:
             key = str(merchant_id)
@@ -492,7 +506,7 @@ def _compute_raw_inferred_row(user_id: int, transaction_rows: list[dict], subscr
     monthly_income = max(1, float(state.monthly_income))
 
     decision_times = []
-    for txn in spend_txns:
+    for txn in behavioral_spend:
         considered_at = txn.get("considered_at")
         occurred_at = txn.get("occurred_at")
         if considered_at and occurred_at:
@@ -504,7 +518,7 @@ def _compute_raw_inferred_row(user_id: int, transaction_rows: list[dict], subscr
     spend_dates = [txn["occurred_at"].date() for txn in spend_txns]
     window_days = max(1, (max(spend_dates) - min(spend_dates)).days + 1)
     months_in_window = max(1.0, window_days / 30.0)
-    actual_monthly_spending = sum(amounts) / months_in_window
+    actual_monthly_spending = sum(float(txn["amount"]) for txn in spend_txns) / months_in_window
 
     subscription_usage = {}
     for sub in active_subscriptions:
@@ -613,7 +627,7 @@ def run_csv_export(
         user_rng = make_rng(user_seed)
         faker = _build_faker(user_seed)
         state = UserState()
-        context = {"start_date": start_date, "end_date": end_date, "merchant_agent": MerchantAgent(user_rng, use_llm), "merchant_catalog": merchant_catalog, "max_llm_reflections": max_llm_reflections}
+        context = {"start_date": start_date, "end_date": end_date, "generated_at": now, "merchant_agent": MerchantAgent(user_rng, use_llm), "merchant_catalog": merchant_catalog, "max_llm_reflections": max_llm_reflections}
 
         persona_result = PersonaAgent(user_rng, use_llm).run(state, context)
         context.update(persona_result)

@@ -13,6 +13,15 @@ import numpy as np
 
 from datagen.agents.base import BaseAgent
 from datagen.config import (
+    SUBSCRIPTION_COST_BENEFIT_ADJUSTMENTS,
+    SUBSCRIPTION_MERCHANT_PRICE_TIERS,
+    SUBSCRIPTION_PRICE_LOGNORMAL,
+    SUBSCRIPTION_UTILIZATION_BURDEN_SENSITIVITY,
+    SUBSCRIPTION_UTILIZATION_CATEGORY_FLOORS,
+    SUBSCRIPTION_UTILIZATION_CATEGORY_SOFT_CAPS,
+    SUBSCRIPTION_UTILIZATION_SOFT_CAP,
+    SUBSCRIPTION_UTILIZATION_STATUS_MULTIPLIERS,
+    SUBSCRIPTION_UTILIZATION_WEIGHTS,
     SUBSCRIPTION_VALUE_WEIGHTS,
     VALUATION_SCORE_BANDS,
 )
@@ -119,6 +128,190 @@ class ValuationAgent(BaseAgent):
             "item_valuations": item_valuations,
         }
 
+    @staticmethod
+    def _monthly_subscription_cost(sub: dict) -> float:
+        price = float(sub.get("price", 0) or 0)
+        billing_cycle = sub.get("billing_cycle", "monthly")
+        if billing_cycle == "yearly":
+            return price / 12.0
+        if billing_cycle == "weekly":
+            return price * 52.0 / 12.0
+        return price
+
+    @staticmethod
+    def _subscription_category_key(sub: dict) -> str:
+        merch = sub.get("merchant_info") or {}
+        for raw_key in (
+            merch.get("merchant_family"),
+            merch.get("category"),
+            sub.get("category"),
+        ):
+            if not raw_key:
+                continue
+            key = str(raw_key)
+            if key == "delivery_membership":
+                return "food_delivery"
+            return key
+        return "default"
+
+    def _expected_subscription_monthly_cost(self, sub: dict, category_key: str) -> float:
+        merch = sub.get("merchant_info") or {}
+        tiers = SUBSCRIPTION_MERCHANT_PRICE_TIERS.get(merch.get("name", ""))
+        if tiers:
+            total_weight = sum(weight for _price_s, weight in tiers) or 1.0
+            return sum(float(price_s) * weight for price_s, weight in tiers) / total_weight
+
+        mu, sig = SUBSCRIPTION_PRICE_LOGNORMAL.get(
+            category_key,
+            SUBSCRIPTION_PRICE_LOGNORMAL["streaming"],
+        )
+        return float(np.exp(mu + (sig ** 2) / 2.0))
+
+    @staticmethod
+    def _soft_cap_unit_interval(value: float, *, status: str, category_key: str) -> float:
+        cfg = SUBSCRIPTION_UTILIZATION_SOFT_CAP
+        capped = max(0.0, float(value))
+        soft_start = cfg["start"]
+        if capped > soft_start:
+            capped = soft_start + (capped - soft_start) * cfg["slope"]
+
+        status_cap = cfg.get(f"max_{status}", cfg["max_active"])
+        category_cap = SUBSCRIPTION_UTILIZATION_CATEGORY_SOFT_CAPS.get(category_key, 1.0)
+        return round(max(0.0, min(1.0, capped, status_cap, category_cap)), 4)
+
+    def _compute_subscription_utilization(
+        self,
+        *,
+        sub: dict,
+        usage: float,
+        usage_frequency: int,
+        fit_signal: float,
+        friction_signal: float,
+        support_confidence: float,
+        monthly_cost_equivalent: float,
+        cost_share: float,
+    ) -> dict[str, float | None | str]:
+        weights = SUBSCRIPTION_UTILIZATION_WEIGHTS
+        status = str(sub.get("status", "active"))
+        category_key = self._subscription_category_key(sub)
+        status_multiplier = SUBSCRIPTION_UTILIZATION_STATUS_MULTIPLIERS.get(status, 1.0)
+        burden_sensitivity = SUBSCRIPTION_UTILIZATION_BURDEN_SENSITIVITY.get(
+            category_key,
+            SUBSCRIPTION_UTILIZATION_BURDEN_SENSITIVITY["default"],
+        )
+        feedback_value = sub.get("feedback_value_score")
+        feedback_confidence = sub.get("feedback_confidence")
+
+        usage_score = clip01(0.72 * usage + 0.28 * (max(0, usage_frequency) / 7.0))
+        category_floor_base = SUBSCRIPTION_UTILIZATION_CATEGORY_FLOORS.get(
+            category_key,
+            SUBSCRIPTION_UTILIZATION_CATEGORY_FLOORS["default"],
+        )
+        if status == "paused":
+            category_floor_base *= 0.60
+        elif status == "canceled":
+            category_floor_base *= 0.25
+        category_floor_component = weights["category_floor_weight"] * category_floor_base
+
+        feedback_bonus = 0.0
+        if feedback_value is not None and feedback_confidence is not None:
+            feedback_bonus = (
+                weights["feedback_bonus_weight"]
+                * max(0.0, float(feedback_value) - 0.55)
+                * max(0.0, float(feedback_confidence))
+            )
+
+        expected_monthly_cost = max(0.01, self._expected_subscription_monthly_cost(sub, category_key))
+        price_ratio = monthly_cost_equivalent / expected_monthly_cost
+        price_penalty = (
+            weights["price_penalty_weight"]
+            * burden_sensitivity
+            * max(0.0, price_ratio - 1.05)
+            * min(1.35, 0.65 + cost_share * 6.0)
+        )
+        friction_penalty = weights["friction_penalty_weight"] * max(0.0, friction_signal - 0.38)
+        fit_penalty = weights["fit_penalty_weight"] * max(0.0, 0.60 - fit_signal)
+
+        confidence_penalty = 0.0
+        if feedback_confidence is not None:
+            confidence_penalty += (
+                weights["confidence_penalty_weight"]
+                * max(0.0, 0.62 - float(feedback_confidence))
+                * 0.6
+            )
+        confidence_penalty += (
+            weights["confidence_penalty_weight"]
+            * max(0.0, 0.58 - support_confidence)
+        )
+
+        util_raw = (
+            weights["usage_weight"] * usage_score
+            + category_floor_component
+            + feedback_bonus
+        )
+        util_adjusted = (
+            util_raw * status_multiplier
+            - price_penalty
+            - friction_penalty
+            - fit_penalty
+            - confidence_penalty
+        )
+        util_final = self._soft_cap_unit_interval(
+            util_adjusted,
+            status=status,
+            category_key=category_key,
+        )
+
+        return {
+            "category_key": category_key,
+            "input_usage_score": round(usage_score, 4),
+            "input_status_multiplier": round(status_multiplier, 4),
+            "input_price_ratio": round(price_ratio, 4),
+            "input_feedback_value": None if feedback_value is None else round(float(feedback_value), 4),
+            "input_feedback_confidence": None if feedback_confidence is None else round(float(feedback_confidence), 4),
+            "penalty_price": round(price_penalty, 4),
+            "penalty_friction": round(friction_penalty, 4),
+            "penalty_fit": round(fit_penalty, 4),
+            "penalty_confidence": round(confidence_penalty, 4),
+            "utilization_raw": round(util_raw, 4),
+            "utilization_final": util_final,
+        }
+
+    def _compute_adjusted_subscription_cost_benefit(
+        self,
+        *,
+        estimated_value: Decimal,
+        total_cost: Decimal,
+        status: str,
+        category_key: str,
+        price_ratio: float,
+    ) -> tuple[float | None, float | None]:
+        raw = compute_subscription_cost_benefit(estimated_value, total_cost)
+        if raw is None:
+            return None, None
+
+        cfg = SUBSCRIPTION_COST_BENEFIT_ADJUSTMENTS
+        burden_sensitivity = SUBSCRIPTION_UTILIZATION_BURDEN_SENSITIVITY.get(
+            category_key,
+            SUBSCRIPTION_UTILIZATION_BURDEN_SENSITIVITY["default"],
+        )
+        adjustment_penalty = cfg["status_penalty"].get(status, 0.0)
+        adjustment_penalty += (
+            cfg["price_penalty_weight"]
+            * max(0.0, price_ratio - 1.10)
+            * burden_sensitivity
+            * cfg["nonessential_multiplier"]
+        )
+
+        final = compute_subscription_cost_benefit(
+            estimated_value,
+            total_cost,
+            adjustment_penalty=adjustment_penalty,
+            spread_gain=cfg["spread_gain"],
+            spread_center=cfg["spread_center"],
+        )
+        return raw, final
+
     def _valuate_subscription(self, state: UserState, sub: dict,
                                start: date, end: date) -> list[dict]:
         rng = self.rng
@@ -138,71 +331,96 @@ class ValuationAgent(BaseAgent):
                 lifecycle_end,
             )
 
-            usage = clip01(float(rng.beta(2, 3)) * (1 + (sub.get("usage_frequency", 3) / 7.0)))
+            usage_frequency = int(sub.get("usage_frequency", 0) or 0)
+            usage = clip01(float(rng.beta(2, 3)) * (1 + (usage_frequency / 7.0)))
             total_cost = self._period_cost(sub, period_start, period_end)
             total_cost_float = float(total_cost)
             monthly_income = max(1, float(state.monthly_income))
 
-            fit = clip01(
+            fit_signal = clip01(
                 state.quality_preference * 0.4
                 + (1 - state.credit_stress) * 0.3
+                + usage * 0.15
                 + float(rng.normal(0, 0.1))
             )
             habit = clip01(usage * 0.7 + 0.3 * float(rng.beta(3, 2)))
-            friction = clip01(
-                (1 - usage) * 0.5
-                + state.regret_sensitivity * 0.2
-                + float(rng.normal(0, 0.1))
-            )
             monthly_cost_equivalent = max(0.01, self._monthly_subscription_cost(sub))
             cost_share = monthly_cost_equivalent / monthly_income
+            friction_signal = clip01(
+                (1 - usage) * 0.35
+                + state.regret_sensitivity * 0.2
+                + min(0.2, cost_share * 1.4)
+                + float(rng.normal(0, 0.1))
+            )
             cost_ratio = min(1.0, monthly_cost_equivalent / (monthly_income * 0.05))
-
-            burden_penalty = {
-                "light": 0.0,
-                "normal": 0.1,
-                "stretched": 0.5,
-                "overloaded": 1.2,
-            }.get(state.subscription_burden_state, 0.1)
-            price_pressure = state.price_sensitivity * cost_share * 2.0
+            support_confidence = clip01(
+                0.35
+                + 0.18 * int(usage > 0.3)
+                + 0.15 * int(usage_frequency >= 3)
+                + 0.22 * fit_signal
+                - 0.18 * friction_signal
+            )
+            utilization_debug = self._compute_subscription_utilization(
+                sub=sub,
+                usage=usage,
+                usage_frequency=usage_frequency,
+                fit_signal=fit_signal,
+                friction_signal=friction_signal,
+                support_confidence=support_confidence,
+                monthly_cost_equivalent=monthly_cost_equivalent,
+                cost_share=cost_share,
+            )
+            subscription_utilization = float(utilization_debug["utilization_final"])
 
             raw_value = (
-                w["w_usage"] * usage
-                + w["w_fit"] * fit
+                w["w_usage"] * subscription_utilization
+                + w["w_fit"] * fit_signal
                 + w["w_habit"] * habit
-                - w["w_friction"] * friction
+                - w["w_friction"] * friction_signal
                 - w["w_cost"] * cost_ratio
+            )
+            contradiction_drag = (
+                max(0.0, subscription_utilization - 0.65)
+                * (
+                    0.18 * max(0.0, float(utilization_debug["input_price_ratio"]) - 1.0)
+                    + 0.12 * max(0.0, friction_signal - 0.45)
+                    + 0.10 * max(0.0, 0.58 - fit_signal)
+                )
             )
 
             noise = float(rng.normal(0, 0.05))
             estimated_value = Decimal(str(round(
-                max(0, (0.5 + raw_value + noise) * total_cost_float), 2
+                max(0, (0.38 + raw_value + noise + subscription_utilization * 0.30 - contradiction_drag) * total_cost_float), 2
             )))
             net_value = estimated_value - total_cost
 
             rec = self._subscription_recommendation(
                 state=state,
                 net_value=net_value,
-                usage=usage,
+                usage=subscription_utilization,
                 cost_share=cost_share,
                 monthly_income=monthly_income,
-                fit=fit,
-                friction=friction,
+                fit=fit_signal,
+                friction=friction_signal,
             )
 
             signal_count = 3 + int(usage > 0.3) + int(habit > 0.5)
             net_ratio = float(net_value) / max(0.01, float(total_cost))
             ambiguity = abs(net_ratio)
-            confidence = clip01(logistic_simple(
-                0.5 + 0.2 * signal_count - 0.3 * (1 - ambiguity)
-            ))
-            subscription_utilization = round(usage, 4)
-            subscription_cost_benefit = compute_subscription_cost_benefit(
-                estimated_value, total_cost
+            confidence = clip01(
+                0.55 * logistic_simple(0.5 + 0.2 * signal_count - 0.3 * (1 - ambiguity))
+                + 0.45 * support_confidence
+            )
+            cost_benefit_raw, subscription_cost_benefit = self._compute_adjusted_subscription_cost_benefit(
+                estimated_value=estimated_value,
+                total_cost=total_cost,
+                status=str(sub.get("status", "active")),
+                category_key=str(utilization_debug["category_key"]),
+                price_ratio=float(utilization_debug["input_price_ratio"]),
             )
 
-            usage_fit = (usage + fit) / 2.0
-            habit_friction = habit - friction
+            usage_fit = (subscription_utilization + fit_signal) / 2.0
+            habit_friction = habit - friction_signal
             combo = clip01(0.5 + 0.5 * (usage_fit + habit_friction) / 2)
             sb = VALUATION_SCORE_BANDS
             if combo > 0.75:
@@ -214,8 +432,8 @@ class ValuationAgent(BaseAgent):
             sub_score = int(max(0, min(150, sub_score + int(rng.normal(0, 8)))))
 
             explanation = generate_explanation_json(rng, "subscription", {
-                "usage": usage, "fit": fit, "habit": habit,
-                "friction": friction, "cost_ratio": cost_ratio,
+                "usage": subscription_utilization, "fit": fit_signal, "habit": habit,
+                "friction": friction_signal, "cost_ratio": cost_ratio,
             })
 
             valuations.append({
@@ -231,14 +449,27 @@ class ValuationAgent(BaseAgent):
                 "subscription_cost_benefit": subscription_cost_benefit,
                 "explanation_json": explanation,
                 "evidence_json": {
-                    "usage_frequency": round(usage, 3),
+                    "usage_frequency": usage_frequency,
                     "subscription_utilization": subscription_utilization,
                     "subscription_cost_benefit": subscription_cost_benefit,
-                    "fit_score": round(fit, 3),
+                    "fit_score": round(fit_signal, 3),
                     "habit_score": round(habit, 3),
-                    "friction_score": round(friction, 3),
+                    "friction_score": round(friction_signal, 3),
                     "cost_ratio": round(cost_ratio, 3),
                     "billing_cycle": sub.get("billing_cycle", "monthly"),
+                    "input_usage_score": utilization_debug["input_usage_score"],
+                    "input_status_multiplier": utilization_debug["input_status_multiplier"],
+                    "input_price_ratio": utilization_debug["input_price_ratio"],
+                    "input_feedback_value": utilization_debug["input_feedback_value"],
+                    "input_feedback_confidence": utilization_debug["input_feedback_confidence"],
+                    "penalty_price": utilization_debug["penalty_price"],
+                    "penalty_friction": utilization_debug["penalty_friction"],
+                    "penalty_fit": utilization_debug["penalty_fit"],
+                    "penalty_confidence": utilization_debug["penalty_confidence"],
+                    "utilization_raw": utilization_debug["utilization_raw"],
+                    "utilization_final": utilization_debug["utilization_final"],
+                    "cost_benefit_raw": cost_benefit_raw,
+                    "cost_benefit_final": subscription_cost_benefit,
                 },
                 "context": (
                     "subscription_cancel"
@@ -281,7 +512,7 @@ class ValuationAgent(BaseAgent):
         income_rel = min(1.5, monthly_income / max(1.0, 4000.0))
 
         buy = (
-            1.15 * usage
+            1.30 * usage
             + 0.45 * fit
             - 0.85 * friction
             - 8.5 * cost_share
@@ -298,7 +529,8 @@ class ValuationAgent(BaseAgent):
 
         wait = (
             -0.12 * net_f / max(8.0, abs(net_f) * 0.15 + 8.0)
-            - 0.25 * abs(usage - 0.45)
+            - 0.32 * abs(usage - 0.42)
+            - 0.18 * max(0.0, usage - 0.58)
             + 0.15 * friction
             + float(rng.normal(0, 0.08))
         )

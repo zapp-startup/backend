@@ -39,6 +39,14 @@ def _txn_date_from_dict(t: dict):
     return oc.date() if hasattr(oc, "date") else oc
 
 
+def _is_behavioral_spend_db_txn(txn) -> bool:
+    if txn.direction != "spend":
+        return False
+    if getattr(txn, "subscription_id", None):
+        return False
+    return str(getattr(txn, "category", "")) != "bills"
+
+
 def _apply_monthly_debt_transitions(state: UserState, context: dict, start_date: date, end_date: date) -> None:
     """Single call site for apply_debt_transition: month-end surplus from ledger context."""
     from collections import defaultdict
@@ -218,6 +226,7 @@ def _generate_one_user(
     context = {
         "start_date": start_date,
         "end_date": end_date,
+        "generated_at": timezone.now(),
         "merchant_agent": merchant_agent,
         "merchant_catalog": merchant_catalog,
         "max_llm_reflections": max_llm_reflections,
@@ -954,44 +963,50 @@ def _compute_raw_inferred(user, db_txns: list, db_subs: list, state: UserState):
     from users.models import UserRawInferred
 
     spend_txns = [t for t in db_txns if t.direction == "spend"]
-    if not spend_txns:
+    behavioral_spend_txns = [t for t in spend_txns if _is_behavioral_spend_db_txn(t)]
+    if not behavioral_spend_txns:
         UserRawInferred.objects.update_or_create(
             user=user,
             defaults={"window_days": 90},
         )
         return
 
-    amounts = [float(t.amount) for t in spend_txns]
+    amounts = [float(t.amount) for t in behavioral_spend_txns]
     avg_price = sum(amounts) / len(amounts)
     variance = sum((a - avg_price) ** 2 for a in amounts) / max(1, len(amounts) - 1)
 
     # Category distribution
     cat_counts: dict[str, int] = {}
-    total_count = len(spend_txns)
-    for t in spend_txns:
+    total_count = len(behavioral_spend_txns)
+    for t in behavioral_spend_txns:
         cat_counts[t.category] = cat_counts.get(t.category, 0) + 1
     cat_dist = {k: round(v / total_count, 3) for k, v in cat_counts.items()}
 
     # Impulse / regret metrics
-    impulse_scores = [t.impulse_score for t in spend_txns if t.impulse_score is not None]
-    regret_scores = [t.regret_score for t in spend_txns if t.regret_score is not None]
+    impulse_scores = [t.impulse_score for t in behavioral_spend_txns if t.impulse_score is not None]
+    regret_events = []
+    for t in behavioral_spend_txns:
+        score_event = bool(t.regret_score is not None and float(t.regret_score) >= 0.25)
+        rating_event = bool(t.regret_rating is not None and int(t.regret_rating) >= 5)
+        if t.regret_score is not None or t.regret_rating is not None:
+            regret_events.append(score_event or rating_event)
 
     pct_impulse = (
         sum(1 for s in impulse_scores if s > 0.5) / max(1, len(impulse_scores))
         if impulse_scores else None
     )
     regret_freq = (
-        sum(1 for s in regret_scores if s > 0.4) / max(1, len(regret_scores))
-        if regret_scores else None
+        sum(1 for flag in regret_events if flag) / max(1, len(regret_events))
+        if regret_events else None
     )
 
     # Late night
-    late_night = sum(1 for t in spend_txns if t.occurred_at.hour >= 22 or t.occurred_at.hour < 5)
+    late_night = sum(1 for t in behavioral_spend_txns if t.occurred_at.hour >= 22 or t.occurred_at.hour < 5)
     late_night_freq = late_night / total_count if total_count > 0 else None
 
     # Brand repetition
     merchant_counts: dict[str, int] = {}
-    for t in spend_txns:
+    for t in behavioral_spend_txns:
         if t.merchant_id:
             key = str(t.merchant_id)
             merchant_counts[key] = merchant_counts.get(key, 0) + 1
@@ -1021,7 +1036,7 @@ def _compute_raw_inferred(user, db_txns: list, db_subs: list, state: UserState):
                 decision_times.append(diff)
     avg_decision = sum(decision_times) / len(decision_times) if decision_times else None
 
-    total_spend = sum(amounts)
+    total_spend = sum(float(t.amount) for t in spend_txns)
     dmin = min(t.occurred_at.date() if hasattr(t.occurred_at, "date") else t.occurred_at for t in spend_txns)
     dmax = max(t.occurred_at.date() if hasattr(t.occurred_at, "date") else t.occurred_at for t in spend_txns)
     window_days = max(1, (dmax - dmin).days + 1)

@@ -18,6 +18,8 @@ from datagen.config import (
     AMOUNT_LOGNORMAL,
     AMOUNT_PRIORS_BY_FAMILY,
     SPEND_LOGISTIC,
+    TRANSACTION_VARIABLE_ESSENTIAL_SHARE_BY_HOUSING,
+    TRANSACTION_VARIABLE_FLOOR_BY_HOUSING,
     spend_to_txn_category,
 )
 from datagen.distributions import (
@@ -76,6 +78,7 @@ class SpendRoutine:
     pharmacy_days_since_refill: int = field(default_factory=lambda: 14)
     fuel_days_since: int = 0
     grocery_trip_index: int = 0
+    grocery_days_since: int = field(default_factory=lambda: 3)
     commuter: bool = True
 
 
@@ -88,6 +91,7 @@ class SpendAgent(BaseAgent):
         end_date: date = context["end_date"]
         merchant_agent = context.get("merchant_agent")
         merchant_catalog = context.get("merchant_catalog", [])
+        generated_at = context.get("generated_at")
 
         transactions: list[dict] = []
         mi = float(state.monthly_income or 1)
@@ -97,6 +101,16 @@ class SpendAgent(BaseAgent):
 
         for _ym, seg_start, seg_end in _iter_month_segments(start_date, end_date):
             state.large_purchase_shock_this_month = False
+            sub_m = _monthly_subscription_cost_from_context(context)
+            fixed_m = float(state.monthly_fixed_expenses)
+            income_m = mi
+            variable_budget = self._monthly_variable_budget(
+                state,
+                monthly_income=income_m,
+                fixed_monthly=fixed_m,
+                subscription_monthly=sub_m,
+            )
+            essential_cap = variable_budget * self._essential_budget_share(state, routine)
             essential_month = 0.0
 
             d = seg_start
@@ -110,16 +124,24 @@ class SpendAgent(BaseAgent):
                     merchant_catalog,
                     routine,
                     mi,
+                    essential_month,
+                    essential_cap,
+                    generated_at,
                 )
                 d += timedelta(days=1)
 
-            sub_m = _monthly_subscription_cost_from_context(context)
-            fixed_m = float(state.monthly_fixed_expenses)
-            income_m = mi
-            reserve = income_m * (0.05 + 0.05 * state.income_stability_numeric())
-            debt_cap = state.debt_capacity_monthly()
-            available = income_m - fixed_m - essential_month - sub_m + debt_cap
-            disc_cap = max(0.0, available - reserve)
+            reserve = min(
+                income_m * (0.04 + 0.05 * state.income_stability_numeric()),
+                variable_budget * 0.18,
+            )
+            remaining_variable = max(0.0, variable_budget - essential_month)
+            disc_cap = max(0.0, remaining_variable - reserve)
+            if state.budget_adherence >= 0.65:
+                disc_cap *= 0.80
+            elif state.budget_adherence >= 0.45:
+                disc_cap *= 0.86
+            else:
+                disc_cap *= 0.93
             month_disc_spent = 0.0
 
             d = seg_start
@@ -135,6 +157,7 @@ class SpendAgent(BaseAgent):
                     disc_cap,
                     mi,
                     routine,
+                    generated_at,
                 )
                 d += timedelta(days=1)
 
@@ -149,6 +172,50 @@ class SpendAgent(BaseAgent):
         if state.budget_adherence < 0.45:
             return 1.0
         return 0.52
+
+    def _monthly_variable_budget(
+        self,
+        state: UserState,
+        *,
+        monthly_income: float,
+        fixed_monthly: float,
+        subscription_monthly: float,
+    ) -> float:
+        target_ratio = float(getattr(state, "transaction_spend_target_ratio", 0.56) or 0.56)
+        target_ratio = max(0.42, min(0.76, target_ratio))
+        base_budget = monthly_income * target_ratio - fixed_monthly - subscription_monthly
+
+        floor_ratio = TRANSACTION_VARIABLE_FLOOR_BY_HOUSING.get(
+            state.housing_independence_state,
+            TRANSACTION_VARIABLE_FLOOR_BY_HOUSING["independent"],
+        )
+        floor_ratio += 0.015 * max(0, state.household_size - 1)
+        floor_ratio += 0.01 * state.dependents_count
+        if state.archetype == "student":
+            floor_ratio -= 0.015
+        elif state.archetype == "retired":
+            floor_ratio += 0.01
+        floor_ratio = max(0.10, min(0.30, floor_ratio))
+
+        debt_flex = state.debt_capacity_monthly() * 0.12
+        return max(monthly_income * floor_ratio, base_budget + debt_flex)
+
+    def _essential_budget_share(self, state: UserState, routine: SpendRoutine) -> float:
+        share = TRANSACTION_VARIABLE_ESSENTIAL_SHARE_BY_HOUSING.get(
+            state.housing_independence_state,
+            TRANSACTION_VARIABLE_ESSENTIAL_SHARE_BY_HOUSING["independent"],
+        )
+        share += 0.025 * max(0, state.household_size - 1)
+        share += 0.015 * state.dependents_count
+        share += 0.05 * max(0.0, state.price_sensitivity - 0.5)
+        share += 0.03 * max(0.0, state.household_pressure - 0.5)
+        share -= 0.04 * max(0.0, state.novelty_seeking - 0.5)
+        share -= 0.05 * max(0.0, state.luxury_affinity - 0.5)
+        if not routine.commuter:
+            share -= 0.03
+        if state.archetype == "student":
+            share -= 0.02
+        return max(0.48, min(0.82, share))
 
     def _intent_for_essential_transport(self, state: UserState, current: date, routine: SpendRoutine) -> str:
         rng = self.rng
@@ -179,6 +246,8 @@ class SpendAgent(BaseAgent):
         liq: float,
         mi: float,
         anomaly_mode: bool = False,
+        budget_remaining: float | None = None,
+        generated_at=None,
     ) -> float:
         rng = self.rng
         if not merchant_agent or not merchant_catalog:
@@ -193,12 +262,19 @@ class SpendAgent(BaseAgent):
             state, current, spend_category, fam, days_since, liq, mi,
         )
         amount = self._attenuate_large_purchase(state, amount, mi=mi, merchant_family=fam)
+        if budget_remaining is not None:
+            budget_remaining = max(0.0, float(budget_remaining))
+            if budget_remaining < 0.5:
+                return 0.0
+            amount = min(amount, budget_remaining)
         desc = merchant_agent.render_description_raw(merch["name"], merch.get("domain", ""))
         hour = self._sample_hour(spend_category)
         minute = int(rng.integers(0, 60))
         occurred = make_aware_dt(
             datetime(current.year, current.month, current.day, hour, minute)
         )
+        if generated_at is not None and occurred > generated_at:
+            occurred = generated_at
         amt_dec = Decimal(str(round(amount, 2)))
         transactions.append({
             "direction": "spend",
@@ -226,6 +302,9 @@ class SpendAgent(BaseAgent):
         merchant_catalog: list,
         routine: SpendRoutine,
         mi: float,
+        month_essential_spent: float,
+        essential_cap: float,
+        generated_at=None,
     ) -> float:
         rng = self.rng
         day_total = 0.0
@@ -245,8 +324,21 @@ class SpendAgent(BaseAgent):
             p = self._purchase_probability(
                 state, cat, is_weekend, payday_window, liq, essential=True,
             )
+            if essential_cap > 0:
+                essential_pressure = clip01((month_essential_spent + day_total) / essential_cap)
+                if cat == "groceries":
+                    p *= max(0.08, 1.0 - 0.88 * essential_pressure)
+                else:
+                    p *= max(0.14, 1.0 - 0.72 * essential_pressure)
             if cat == "groceries":
-                p *= 1.12 if is_weekend > 0 else 0.92
+                routine.grocery_days_since += 1
+                if routine.grocery_days_since <= 1:
+                    p *= 0.08
+                elif routine.grocery_days_since == 2:
+                    p *= 0.35
+                elif routine.grocery_days_since == 3:
+                    p *= 0.72
+                p *= 1.05 if is_weekend > 0 else 0.78
                 routine.grocery_trip_index += 1
             if rng.random() >= p:
                 continue
@@ -263,7 +355,11 @@ class SpendAgent(BaseAgent):
                 days_since=days_since,
                 liq=liq,
                 mi=mi,
+                budget_remaining=None if essential_cap <= 0 else max(0.0, essential_cap - month_essential_spent - day_total),
+                generated_at=generated_at,
             )
+            if cat == "groceries":
+                routine.grocery_days_since = 0
 
         state.update_liquidity()
         return day_total
@@ -280,6 +376,7 @@ class SpendAgent(BaseAgent):
         disc_cap: float,
         mi: float,
         routine: SpendRoutine,
+        generated_at=None,
     ) -> float:
         rng = self.rng
         if state.luxury_cooldown_days > 0:
@@ -349,6 +446,8 @@ class SpendAgent(BaseAgent):
             occurred = make_aware_dt(
                 datetime(current.year, current.month, current.day, hour, minute)
             )
+            if generated_at is not None and occurred > generated_at:
+                occurred = generated_at
             amt_dec = Decimal(str(round(amount, 2)))
             transactions.append({
                 "direction": "spend",
@@ -479,7 +578,7 @@ class SpendAgent(BaseAgent):
         if cat == "entertainment":
             return "night_out", "entertainment_out"
         if cat == "travel":
-            return "travel", "ecommerce"
+            return "travel", "travel"
         return "misc", "ecommerce"
 
     def _attenuate_large_purchase(
@@ -525,9 +624,11 @@ class SpendAgent(BaseAgent):
             mu += 0.35 * state.luxury_affinity
             mu += 0.18 * state.quality_preference
         if merchant_family == "grocery_retail":
-            mu += 0.22 * max(0, state.household_size - 1)
-            mu += 0.08 * state.dependents_count
+            mu += 0.14 * max(0, state.household_size - 1)
+            mu += 0.05 * state.dependents_count
         base_amount = sample_lognormal(rng, mu, sigma)
+        if merchant_family == "grocery_retail":
+            base_amount *= 0.78
         pm = payday_multiplier(days_since, state.payday_eta, state.payday_tau)
         wm = weekend_multiplier(day, spend_category)
         sm = seasonality_multiplier(day.month, spend_category)
@@ -566,6 +667,11 @@ class SpendAgent(BaseAgent):
         p = logistic(z)
         budget_share = state.category_budgets.get(category, 0.05)
         p *= (0.5 + budget_share * 5)
+        target_ratio = float(getattr(state, "transaction_spend_target_ratio", 0.56) or 0.56)
+        if essential:
+            p *= max(0.82, min(1.10, 0.95 + (target_ratio - 0.56) * 0.9))
+        else:
+            p *= max(0.70, min(1.18, 0.90 + (target_ratio - 0.56) * 1.4))
 
         if state.liquidity == "overdrafted" and state.impulse < 0.7:
             p *= 0.15

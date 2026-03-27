@@ -12,7 +12,7 @@ from datagen.agents.base import BaseAgent
 from datagen.config import CONVERSATION_LAMBDA_BASE, CONVERSATION_LAMBDA_ENGAGED, MESSAGE_COUNT_NU
 from datagen.distributions import make_aware_dt, sample_poisson
 from datagen.state import UserState
-from datagen.text import generate_conversation_messages
+from datagen.text import generate_conversation_messages, generate_conversation_title
 
 
 CONTEXT_TYPES = ["subscription", "product", "budgeting", "general"]
@@ -68,6 +68,7 @@ class ConversationAgent(BaseAgent):
         sub_valuations = context.get("subscription_valuations", [])
         start_date = context["start_date"]
         end_date = context["end_date"]
+        generated_at = context.get("generated_at")
 
         lam = CONVERSATION_LAMBDA_ENGAGED if state.subscription_engagement in (
             "heavy", "churn_prone",
@@ -107,6 +108,8 @@ class ConversationAgent(BaseAgent):
                     int(rng.integers(0, 60)),
                 ) + timedelta(days=int(rng.integers(0, days_range)))
             )
+            if generated_at is not None and convo_start > generated_at:
+                convo_start = generated_at
 
             linked_sub_idx = None
             linked_item_idx = None
@@ -153,15 +156,11 @@ class ConversationAgent(BaseAgent):
             for i, msg in enumerate(messages):
                 if i > 0:
                     msg_time += timedelta(minutes=int(rng.integers(1, 5)))
+                    if generated_at is not None and msg_time > generated_at:
+                        msg_time = generated_at
                 msg["created_at"] = msg_time
 
-            title_map = {
-                "subscription_review": f"Review: {template_vars.get('merchant', 'subscription')}",
-                "item_valuation": f"Should I buy {template_vars.get('item', 'this')}?",
-                "budget_advice": "Budget review",
-                "spending_regret": "Spending concerns",
-            }
-            title = title_map.get(msg_context, "Chat with Zapp")
+            title = generate_conversation_title(rng, msg_context, template_vars)
 
             conversations.append({
                 "title": title,

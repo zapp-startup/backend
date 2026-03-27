@@ -40,6 +40,7 @@ class UserState:
     monthly_income: Decimal = Decimal("0")
     monthly_fixed_expenses: Decimal = Decimal("0")
     balance_proxy: Decimal = Decimal("0")
+    transaction_spend_target_ratio: float = 0.56
 
     category_budgets: dict[str, float] = field(default_factory=dict)
     last_paydays: list[date] = field(default_factory=list)

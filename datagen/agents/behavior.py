@@ -123,7 +123,14 @@ class BehaviorAgent(BaseAgent):
             # Reflection text (cap LLM calls per user when --use-llm)
             use_llm_this = self.use_llm and (llm_reflection_count < max_llm_reflections)
             reflection = generate_reflection(
-                rng, impulse_score, regret_score, cat, use_llm_this
+                rng,
+                impulse_score,
+                regret_score,
+                cat,
+                use_llm_this,
+                merchant_name=(txn.get("merchant_info") or {}).get("name"),
+                amount=float(txn.get("amount", 0) or 0),
+                satisfaction=satisfaction,
             )
             if use_llm_this:
                 llm_reflection_count += 1

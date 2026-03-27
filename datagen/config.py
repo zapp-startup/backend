@@ -357,6 +357,83 @@ SUBSCRIPTION_VALUE_WEIGHTS = {
     "w_friction": 0.15, "w_cost": 0.15,
 }
 
+SUBSCRIPTION_UTILIZATION_WEIGHTS = {
+    "usage_weight": 0.78,
+    "category_floor_weight": 0.12,
+    "feedback_bonus_weight": 0.10,
+    "price_penalty_weight": 0.18,
+    "friction_penalty_weight": 0.16,
+    "fit_penalty_weight": 0.12,
+    "confidence_penalty_weight": 0.10,
+}
+
+SUBSCRIPTION_UTILIZATION_STATUS_MULTIPLIERS = {
+    "active": 1.00,
+    "paused": 0.75,
+    "canceled": 0.42,
+}
+
+SUBSCRIPTION_UTILIZATION_CATEGORY_FLOORS = {
+    "utilities": 0.14,
+    "telecom": 0.12,
+    "software": 0.10,
+    "cloud_storage": 0.09,
+    "education": 0.07,
+    "productivity": 0.07,
+    "music": 0.05,
+    "news": 0.05,
+    "gaming": 0.04,
+    "streaming": 0.04,
+    "fitness": 0.03,
+    "food_delivery": 0.02,
+    "food": 0.02,
+    "default": 0.03,
+}
+
+SUBSCRIPTION_UTILIZATION_BURDEN_SENSITIVITY = {
+    "utilities": 0.55,
+    "telecom": 0.60,
+    "software": 0.72,
+    "cloud_storage": 0.78,
+    "education": 0.85,
+    "productivity": 0.88,
+    "music": 1.00,
+    "news": 1.00,
+    "gaming": 1.08,
+    "streaming": 1.15,
+    "fitness": 1.18,
+    "food_delivery": 1.24,
+    "food": 1.24,
+    "default": 1.0,
+}
+
+SUBSCRIPTION_UTILIZATION_SOFT_CAP = {
+    "start": 0.82,
+    "slope": 0.35,
+    "max_active": 0.995,
+    "max_paused": 0.92,
+    "max_canceled": 0.78,
+}
+
+SUBSCRIPTION_UTILIZATION_CATEGORY_SOFT_CAPS = {
+    "streaming": 0.97,
+    "fitness": 0.96,
+    "food_delivery": 0.95,
+    "food": 0.95,
+}
+
+SUBSCRIPTION_COST_BENEFIT_ADJUSTMENTS = {
+    "status_penalty": {
+        "active": 0.0,
+        "paused": 0.03,
+        "canceled": 0.08,
+    },
+    "spread_gain": 1.08,
+    "spread_center": 0.50,
+    "price_penalty_weight": 0.08,
+    "nonessential_multiplier": 1.10,
+}
+
 ITEM_VALUE_WEIGHTS = {
     "l_quality_fit": 0.30, "l_price_fairness": 0.30,
     "l_need_fit": 0.25, "l_budget_strain": 0.15,
@@ -404,13 +481,52 @@ DEBT_RECOVER_MONTHS = 4
 # Fixed expense ratio by housing (primary band); global [0.10, 0.80] is sanity clamp
 # ---------------------------------------------------------------------------
 FIXED_EXPENSE_RATIO_BY_HOUSING: dict[str, tuple[float, float]] = {
-    "dependent": (0.10, 0.35),
-    "shared": (0.25, 0.55),
-    "independent": (0.35, 0.75),
-    "homeowner": (0.45, 0.80),
+    "dependent": (0.08, 0.28),
+    "shared": (0.20, 0.45),
+    "independent": (0.28, 0.60),
+    "homeowner": (0.36, 0.68),
 }
 
-FIXED_EXPENSE_RATIO_GLOBAL = (0.10, 0.80)
+FIXED_EXPENSE_RATIO_GLOBAL = (0.08, 0.72)
+
+# ---------------------------------------------------------------------------
+# Transaction spend target ratio by archetype
+# Calibrates total monthly raw spend (obligations + subscriptions + variable spend)
+# as a share of monthly income, before per-user trait adjustments.
+# ---------------------------------------------------------------------------
+TRANSACTION_SPEND_TARGET_RATIO_BY_ARCHETYPE: dict[str, tuple[float, float]] = {
+    "salary_biweekly": (0.54, 0.64),
+    "salary_monthly": (0.50, 0.62),
+    "hourly_weekly": (0.56, 0.68),
+    "gig": (0.55, 0.68),
+    "student": (0.46, 0.59),
+    "retired": (0.50, 0.63),
+    "high_income": (0.43, 0.56),
+    "credit_constrained": (0.60, 0.74),
+}
+
+TRANSACTION_SPEND_TARGET_RATIO_GLOBAL = (0.42, 0.76)
+
+TRANSACTION_VARIABLE_FLOOR_BY_HOUSING: dict[str, float] = {
+    "dependent": 0.14,
+    "shared": 0.18,
+    "independent": 0.20,
+    "homeowner": 0.22,
+}
+
+TRANSACTION_VARIABLE_ESSENTIAL_SHARE_BY_HOUSING: dict[str, float] = {
+    "dependent": 0.56,
+    "shared": 0.58,
+    "independent": 0.60,
+    "homeowner": 0.63,
+}
+
+TRANSACTION_SUBSCRIPTION_BUFFER_BY_ENGAGEMENT: dict[str, float] = {
+    "minimal": 0.02,
+    "moderate": 0.03,
+    "heavy": 0.05,
+    "churn_prone": 0.025,
+}
 
 # Housing independence priors per archetype (weights for dependent, shared, independent, homeowner)
 HOUSING_INDEPENDENCE_PRIORS: dict[str, list[float]] = {
@@ -565,6 +681,7 @@ FAMILY_SPEND_COMPAT: dict[tuple[str, str], str] = {
     _fs("housing", "utilities"): "allowed",
     _fs("food", "dining"): "allowed",
     _fs("education", "education"): "allowed",
+    _fs("travel", "travel"): "allowed",
 }
 
 
@@ -622,7 +739,7 @@ def spend_to_txn_category(spend_category: str) -> str:
         "education": "education",
         "utilities": "bills",
         "subscriptions": "subscriptions",
-        "travel": "other",
+        "travel": "transport",
     }.get(spend_category, "other")
 
 
@@ -776,7 +893,10 @@ MERCHANT_CATALOG: list[dict] = [
     {"name": "Rolex Boutique", "category": "other", "merchant_family": "luxury_retail", "domain": "rolex.com", "eligibility": "not_subscribable"},
     {"name": "Saint Laurent", "category": "other", "merchant_family": "luxury_retail", "domain": "ysl.com", "eligibility": "not_subscribable"},
     {"name": "Nordstrom Designer", "category": "other", "merchant_family": "luxury_retail", "domain": "nordstrom.com", "eligibility": "not_subscribable"},
-    {"name": "Amazon", "category": "other", "merchant_family": "ecommerce", "domain": "amazon.com", "eligibility": "not_subscribable"},
+    {"name": "Expedia", "category": "other", "merchant_family": "travel", "domain": "expedia.com", "eligibility": "not_subscribable"},
+    {"name": "Airbnb", "category": "other", "merchant_family": "travel", "domain": "airbnb.com", "eligibility": "not_subscribable"},
+    {"name": "Southwest Airlines", "category": "other", "merchant_family": "travel", "domain": "southwest.com", "eligibility": "not_subscribable"},
+    {"name": "Amazon", "category": "shopping", "merchant_family": "ecommerce", "domain": "amazon.com", "eligibility": "not_subscribable"},
     {"name": "Walgreens", "category": "other", "merchant_family": "pharmacy", "domain": "walgreens.com", "eligibility": "not_subscribable"},
     {"name": "CVS Pharmacy", "category": "other", "merchant_family": "pharmacy", "domain": "cvs.com", "eligibility": "not_subscribable"},
     {"name": "Shell", "category": "other", "merchant_family": "fuel", "domain": "shell.com", "eligibility": "not_subscribable"},
@@ -840,6 +960,9 @@ SPEND_KEYWORD_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
     (("VERIZON",), "Verizon", "bills"),
     (("RENT", "LEASE", "PROPERTY MGMT", "HOUSING PAYMENT"), "Generic Property Manager", "bills"),
     (("OVERDRAFT", "BANK FEE"), "Bank Fee", "bills"),
+    (("AIRBNB",), "Airbnb", "transport"),
+    (("EXPEDIA",), "Expedia", "transport"),
+    (("SOUTHWEST",), "Southwest Airlines", "transport"),
     (("AMAZON",), "Amazon", "shopping"),
 )
 

@@ -44,6 +44,7 @@ class IncomeAgent(BaseAgent):
         rng = self.rng
         start_date: date = context["start_date"]
         end_date: date = context["end_date"]
+        generated_at = context.get("generated_at")
         arch = state.archetype
         monthly_income = float(state.monthly_income)
 
@@ -59,27 +60,29 @@ class IncomeAgent(BaseAgent):
                 period_days=14 if arch == "salary_biweekly" else 7,
                 divisor=26 if arch == "salary_biweekly" else 52,
                 noise_sigma=noise_sigma,
+                generated_at=generated_at,
             )
         elif arch == "salary_monthly":
             transactions = self._generate_monthly_salary(
-                state, start_date, end_date, monthly_income, noise_sigma
+                state, start_date, end_date, monthly_income, noise_sigma, generated_at
             )
         elif arch == "gig":
             transactions = self._generate_gig(
-                state, start_date, end_date, monthly_income, noise_sigma
+                state, start_date, end_date, monthly_income, noise_sigma, generated_at
             )
         elif arch == "student":
             transactions = self._generate_student(
-                state, start_date, end_date, monthly_income, noise_sigma
+                state, start_date, end_date, monthly_income, noise_sigma, generated_at
             )
         elif arch == "retired":
             transactions = self._generate_monthly_salary(
-                state, start_date, end_date, monthly_income, noise_sigma
+                state, start_date, end_date, monthly_income, noise_sigma, generated_at
             )
         else:
             transactions = self._generate_periodic(
                 state, start_date, end_date, monthly_income,
                 period_days=14, divisor=26, noise_sigma=noise_sigma,
+                generated_at=generated_at,
             )
 
         # Income shocks (Section 8.5)
@@ -91,10 +94,10 @@ class IncomeAgent(BaseAgent):
                 shock_type = rng.choice(["bonus", "missed", "reduced", "reimbursement"])
                 if shock_type == "bonus":
                     amount = Decimal(str(round(monthly_income * float(rng.uniform(0.1, 0.5)), 2)))
-                    transactions.append(self._make_txn(shock_date, amount, "Bonus payment", state))
+                    transactions.append(self._make_txn(shock_date, amount, "Bonus payment", state, generated_at))
                 elif shock_type == "reimbursement":
                     amount = Decimal(str(round(float(rng.uniform(50, 500)), 2)))
-                    transactions.append(self._make_txn(shock_date, amount, "Reimbursement", state))
+                    transactions.append(self._make_txn(shock_date, amount, "Reimbursement", state, generated_at))
 
         # Record paydays in state
         state.last_paydays = sorted(set(
@@ -111,7 +114,7 @@ class IncomeAgent(BaseAgent):
 
     def _generate_periodic(self, state: UserState, start: date, end: date,
                            monthly: float, period_days: int, divisor: int,
-                           noise_sigma: float) -> list[dict]:
+                           noise_sigma: float, generated_at=None) -> list[dict]:
         rng = self.rng
         paycheck = 12 * monthly / divisor
         txns = []
@@ -124,12 +127,12 @@ class IncomeAgent(BaseAgent):
             eps = float(rng.normal(0, noise_sigma))
             amount = Decimal(str(round(paycheck * (1 + eps), 2)))
             if amount > 0:
-                txns.append(self._make_txn(current, amount, "Direct Deposit - Payroll", state))
+                txns.append(self._make_txn(current, amount, "Direct Deposit - Payroll", state, generated_at))
             current += timedelta(days=period_days)
         return txns
 
     def _generate_monthly_salary(self, state: UserState, start: date, end: date,
-                                 monthly: float, noise_sigma: float) -> list[dict]:
+                                 monthly: float, noise_sigma: float, generated_at=None) -> list[dict]:
         rng = self.rng
         txns = []
         current = date(start.year, start.month, 1)
@@ -147,7 +150,7 @@ class IncomeAgent(BaseAgent):
                 eps = float(rng.normal(0, noise_sigma))
                 amount = Decimal(str(round(monthly * (1 + eps), 2)))
                 if amount > 0:
-                    txns.append(self._make_txn(pay_date, amount, "Direct Deposit - Salary", state))
+                    txns.append(self._make_txn(pay_date, amount, "Direct Deposit - Salary", state, generated_at))
 
             if current.month == 12:
                 current = date(current.year + 1, 1, 1)
@@ -156,7 +159,7 @@ class IncomeAgent(BaseAgent):
         return txns
 
     def _generate_gig(self, state: UserState, start: date, end: date,
-                      monthly: float, noise_sigma: float) -> list[dict]:
+                      monthly: float, noise_sigma: float, generated_at=None) -> list[dict]:
         rng = self.rng
         txns = []
         # Weekly target income
@@ -177,12 +180,12 @@ class IncomeAgent(BaseAgent):
                         "Payment from client", "Gig payout", "Freelance payment",
                         "Service payment", "Contract payment",
                     ])
-                    txns.append(self._make_txn(dep_date, amount, desc, state))
+                    txns.append(self._make_txn(dep_date, amount, desc, state, generated_at))
             current = week_end + timedelta(days=1)
         return txns
 
     def _generate_student(self, state: UserState, start: date, end: date,
-                          monthly: float, noise_sigma: float) -> list[dict]:
+                          monthly: float, noise_sigma: float, generated_at=None) -> list[dict]:
         rng = self.rng
         txns = []
 
@@ -192,7 +195,7 @@ class IncomeAgent(BaseAgent):
                 term_date = date(year, month, int(rng.integers(1, 15)))
                 if start <= term_date <= end:
                     amount = Decimal(str(round(monthly * float(rng.uniform(3, 6)), 2)))
-                    txns.append(self._make_txn(term_date, amount, "Financial Aid Disbursement", state))
+                    txns.append(self._make_txn(term_date, amount, "Financial Aid Disbursement", state, generated_at))
 
         # Small part-time job income (biweekly)
         job_income = monthly * 0.4
@@ -201,19 +204,21 @@ class IncomeAgent(BaseAgent):
             eps = float(rng.normal(0, noise_sigma))
             amount = Decimal(str(round(job_income * 12 / 26 * (1 + eps), 2)))
             if amount > 0:
-                txns.append(self._make_txn(current, amount, "Part-time payroll", state))
+                txns.append(self._make_txn(current, amount, "Part-time payroll", state, generated_at))
             current += timedelta(days=14)
 
         return txns
 
     def _make_txn(self, txn_date: date, amount: Decimal, description: str,
-                  state: UserState) -> dict:
+                  state: UserState, generated_at=None) -> dict:
         rng = self.rng
         hour = int(rng.integers(7, 18))
         minute = int(rng.integers(0, 60))
         occurred_at = make_aware_dt(
             datetime(txn_date.year, txn_date.month, txn_date.day, hour, minute)
         )
+        if generated_at is not None and occurred_at > generated_at:
+            occurred_at = generated_at
 
         return {
             "direction": "income",

@@ -62,6 +62,33 @@ _REFLECTION_TEMPLATES = {
     ],
 }
 
+_REFLECTION_CATEGORY_NOTES = {
+    "groceries": ["for the house", "for the week", "for basics"],
+    "transport": ["for getting around", "to get where I needed", "for the commute"],
+    "dining": ["for takeout", "for a quick meal", "for going out"],
+    "shopping": ["for something non-essential", "for a want, not a need", "for a random pickup"],
+    "entertainment": ["for fun", "for a night out", "for downtime"],
+    "health": ["for health stuff", "for a refill", "for something practical"],
+    "travel": ["for a trip", "for travel plans", "for getting away"],
+}
+
+_REFLECTION_OPENERS = [
+    "Honestly,",
+    "Looking back,",
+    "In hindsight,",
+    "At the time,",
+    "Now that I think about it,",
+]
+
+_REFLECTION_CLOSERS = [
+    "Need to watch that pattern.",
+    "Would probably handle it the same way.",
+    "Not the end of the world, but worth noting.",
+    "That one stands out more than usual.",
+    "It fit the moment better than I expected.",
+    "Still not totally sure about it.",
+]
+
 _CONVERSATION_USER_TEMPLATES = {
     "subscription_review": [
         "I'm paying ${price}/mo for {merchant}. Is it worth keeping?",
@@ -128,6 +155,43 @@ _CONVERSATION_ASSISTANT_TEMPLATES = {
     ],
 }
 
+_CONVERSATION_TITLE_TEMPLATES = {
+    "subscription_review": [
+        "{merchant}: keep or cut?",
+        "Reviewing {merchant}",
+        "{merchant} value check",
+        "Do I still use {merchant} enough?",
+        "{merchant} subscription decision",
+    ],
+    "item_valuation": [
+        "Worth buying: {item}?",
+        "Decision on {item}",
+        "{item} price check",
+        "Should I wait on {item}?",
+        "{item} fit review",
+    ],
+    "budget_advice": [
+        "Monthly spending reset",
+        "Where the budget is slipping",
+        "Cash flow check-in",
+        "Expense trim ideas",
+        "Spending pattern review",
+    ],
+    "spending_regret": [
+        "Impulse spend check-in",
+        "Regret pattern review",
+        "Late-night spending habit",
+        "Recovering from overspending",
+        "Cooling-off plan",
+    ],
+    "general": [
+        "Money check-in",
+        "Planning the next month",
+        "Personal finance review",
+        "Spending questions",
+    ],
+}
+
 # ---------------------------------------------------------------------------
 # User fact templates (Behavior Agent + Conversation Agent)
 # ---------------------------------------------------------------------------
@@ -147,7 +211,10 @@ USER_FACT_TEMPLATES = [
 
 def generate_reflection(rng: Generator, impulse_score: float,
                         regret_score: float, category: str,
-                        use_llm: bool = False) -> str | None:
+                        use_llm: bool = False,
+                        merchant_name: str | None = None,
+                        amount: float | None = None,
+                        satisfaction: int | None = None) -> str | None:
     """Generate reflection text based on impulse/regret scores."""
     if rng.random() < 0.6:
         return None
@@ -175,7 +242,39 @@ def generate_reflection(rng: Generator, impulse_score: float,
         if result and len(result) < 200:
             return result
 
-    return rng.choice(_REFLECTION_TEMPLATES[key])
+    base = str(rng.choice(_REFLECTION_TEMPLATES[key]))
+    category_notes = _REFLECTION_CATEGORY_NOTES.get(category, ["for this purchase", "for that spend"])
+    merchant_fragment = merchant_name if merchant_name and rng.random() < 0.45 else None
+    amount_fragment = None
+    if amount is not None and rng.random() < 0.40:
+        if amount < 15:
+            amount_fragment = "for a small amount"
+        elif amount < 75:
+            amount_fragment = "for a moderate amount"
+        else:
+            amount_fragment = "for more than I usually spend"
+
+    note = rng.choice(category_notes)
+    parts = []
+    if rng.random() < 0.35:
+        parts.append(str(rng.choice(_REFLECTION_OPENERS)))
+    parts.append(base.rstrip("."))
+    if merchant_fragment and rng.random() < 0.5:
+        parts.append(f"Especially at {merchant_fragment},")
+    else:
+        parts.append(note)
+    if amount_fragment:
+        parts.append(amount_fragment)
+    if satisfaction is not None and rng.random() < 0.35:
+        if satisfaction >= 8:
+            parts.append("and it mostly paid off")
+        elif satisfaction <= 4:
+            parts.append("and the result was underwhelming")
+    if rng.random() < 0.55:
+        parts.append(str(rng.choice(_REFLECTION_CLOSERS)))
+
+    text = " ".join(str(part).strip() for part in parts if part).replace(" ,", ",")
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def generate_conversation_messages(
@@ -220,12 +319,95 @@ def generate_conversation_messages(
         except (KeyError, IndexError):
             content = tpl.split("{")[0].strip() or tpl
 
+        content = _embellish_conversation_message(
+            rng,
+            role,
+            context_type,
+            content,
+            template_vars,
+        )
+
         if role == "assistant":
             content = _register_assistant_sentence(content)
 
         messages.append({"role": role, "content": content})
 
     return messages
+
+
+def generate_conversation_title(rng: Generator, context_type: str, template_vars: dict) -> str:
+    templates = _CONVERSATION_TITLE_TEMPLATES.get(
+        context_type,
+        _CONVERSATION_TITLE_TEMPLATES["general"],
+    )
+    tpl = str(rng.choice(templates))
+    try:
+        title = tpl.format(**template_vars)
+    except (KeyError, IndexError):
+        title = tpl
+    return re.sub(r"\s+", " ", title).strip()
+
+
+def _embellish_conversation_message(
+    rng: Generator,
+    role: str,
+    context_type: str,
+    content: str,
+    template_vars: dict,
+) -> str:
+    if role == "user":
+        addons = {
+            "subscription_review": [
+                "I want the honest version.",
+                "I'm trying to cut waste.",
+                "This one has been on my mind for a while.",
+            ],
+            "budget_advice": [
+                "I need something practical, not generic.",
+                "I'm trying to get ahead before next month.",
+                "I don't want to keep repeating this pattern.",
+            ],
+            "item_valuation": [
+                "I can wait if the math says wait.",
+                "I'm trying not to rationalize this one.",
+                "I only want it if it actually fits my budget.",
+            ],
+            "spending_regret": [
+                "The pattern is getting predictable.",
+                "I notice it most when I'm tired.",
+                "I want a fix I can stick to.",
+            ],
+        }.get(context_type, [])
+    else:
+        category = template_vars.get("category", "spending")
+        addons = {
+            "subscription_review": [
+                "The main driver here is usage versus price.",
+                "Status and recent activity matter more than the label.",
+                "If you keep it, it should earn its place each month.",
+            ],
+            "budget_advice": [
+                f"I'd start with {category} before cutting essentials.",
+                "Small recurring leaks usually matter more than one-off wins.",
+                "The goal is a plan you can repeat next month.",
+            ],
+            "item_valuation": [
+                "I'm weighting fit and budget more than hype here.",
+                "The recommendation is about value in your context, not just sticker price.",
+                "If this is optional, patience is part of the decision.",
+            ],
+            "spending_regret": [
+                "The useful fix is to interrupt the pattern before checkout.",
+                "A short cooling-off rule usually beats willpower alone.",
+                "You do not need a perfect month to improve the pattern.",
+            ],
+        }.get(context_type, [])
+
+    if addons and rng.random() < 0.55:
+        addon = str(rng.choice(addons))
+        if addon not in content:
+            content = f"{content} {addon}"
+    return content
 
 
 def _format_context_for_llm(context_type: str, template_vars: dict) -> str:

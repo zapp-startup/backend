@@ -29,6 +29,10 @@ from datagen.config import (
     PRICE_SENSITIVITY_BETA,
     SPEND_CATEGORIES,
     SUBSCRIPTION_ENGAGEMENT_STATES,
+    TRANSACTION_SPEND_TARGET_RATIO_BY_ARCHETYPE,
+    TRANSACTION_SPEND_TARGET_RATIO_GLOBAL,
+    TRANSACTION_SUBSCRIPTION_BUFFER_BY_ENGAGEMENT,
+    TRANSACTION_VARIABLE_FLOOR_BY_HOUSING,
     TRAIT_BETA_PARAMS,
 )
 from datagen.distributions import (
@@ -85,6 +89,46 @@ def _sample_life_stage(rng, arch: str, age: int) -> str:
 
 class PersonaAgent(BaseAgent):
     """Build a coherent user profile and initialize latent state."""
+
+    def _sample_transaction_spend_target_ratio(self, state: UserState) -> float:
+        rng = self.rng
+        lo, hi = TRANSACTION_SPEND_TARGET_RATIO_BY_ARCHETYPE[state.archetype]
+        ratio = lo + float(rng.beta(3.2, 3.2)) * (hi - lo)
+        ratio += 0.10 * (0.5 - state.budget_adherence)
+        ratio += 0.05 * (state.impulse - 0.5)
+        ratio += 0.04 * (state.luxury_affinity - 0.5)
+        ratio += 0.03 * (state.novelty_seeking - 0.5)
+        ratio -= 0.05 * (state.price_sensitivity - 0.5)
+        ratio += 0.03 * (state.household_pressure - 0.5)
+        ratio += 0.02 * max(0, state.household_size - 1)
+        ratio += 0.015 * state.dependents_count
+
+        if state.housing_independence_state == "homeowner":
+            ratio += 0.04
+        elif state.housing_independence_state == "dependent":
+            ratio -= 0.04
+
+        if state.income_stability_state == "stable":
+            ratio += 0.01
+        elif state.income_stability_state == "fragile":
+            ratio -= 0.02
+
+        lo_cap, hi_cap = TRANSACTION_SPEND_TARGET_RATIO_GLOBAL
+        return max(lo_cap, min(hi_cap, ratio))
+
+    @staticmethod
+    def _variable_floor_ratio_for_state(state: UserState) -> float:
+        ratio = TRANSACTION_VARIABLE_FLOOR_BY_HOUSING.get(
+            state.housing_independence_state,
+            TRANSACTION_VARIABLE_FLOOR_BY_HOUSING["independent"],
+        )
+        ratio += 0.015 * max(0, state.household_size - 1)
+        ratio += 0.01 * state.dependents_count
+        if state.archetype == "student":
+            ratio -= 0.015
+        elif state.archetype == "retired":
+            ratio += 0.01
+        return max(0.10, min(0.32, ratio))
 
     def run(self, state: UserState, context: dict) -> dict:
         rng = self.rng
@@ -187,6 +231,8 @@ class PersonaAgent(BaseAgent):
         else:
             state.debt_carry_state = "stressed"
 
+        state.transaction_spend_target_ratio = self._sample_transaction_spend_target_ratio(state)
+
         # Fixed expense ratio: housing-conditioned band (primary), global sanity clamp
         lo_r, hi_r = FIXED_EXPENSE_RATIO_BY_HOUSING[state.housing_independence_state]
         fe_a, fe_b = FIXED_EXPENSE_RATIO_BETA[arch]
@@ -195,6 +241,14 @@ class PersonaAgent(BaseAgent):
         g_lo, g_hi = FIXED_EXPENSE_RATIO_GLOBAL
         if ratio < g_lo or ratio > g_hi:
             ratio = max(g_lo, min(g_hi, ratio))
+        variable_floor_ratio = self._variable_floor_ratio_for_state(state)
+        sub_buffer_ratio = TRANSACTION_SUBSCRIPTION_BUFFER_BY_ENGAGEMENT.get(
+            state.subscription_engagement,
+            0.03,
+        )
+        max_fixed_ratio = max(g_lo, state.transaction_spend_target_ratio - variable_floor_ratio - sub_buffer_ratio)
+        if ratio > max_fixed_ratio:
+            ratio = max(g_lo, max_fixed_ratio)
         state.monthly_fixed_expenses = Decimal(str(
             round(float(state.monthly_income) * ratio, 2)
         ))
@@ -271,11 +325,19 @@ class PersonaAgent(BaseAgent):
 
         employment_type = str(rng.choice(ARCHETYPE_EMPLOYMENT[arch]))
 
-        reference_year = context["end_date"].year
-        dob = date(
-            reference_year - state.age,
-            int(rng.integers(1, 13)),
+        reference_date = context["end_date"]
+        birth_year = reference_date.year - state.age
+        latest_birthday = date(
+            reference_date.year,
+            int(rng.integers(1, reference_date.month + 1)),
             int(rng.integers(1, 29)),
+        )
+        if latest_birthday > reference_date:
+            latest_birthday = reference_date
+        dob = date(
+            birth_year,
+            latest_birthday.month,
+            min(latest_birthday.day, 28),
         )
 
         # Value priority sliders (0-100) conditioned on traits

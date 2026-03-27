@@ -100,6 +100,7 @@ class SubscriptionAgent(BaseAgent):
         end_date: date = context["end_date"]
         merchant_catalog = context.get("merchant_catalog", [])
         merchant_agent = context.get("merchant_agent")
+        generated_at = context.get("generated_at")
 
         eng = state.subscription_engagement
         lam_lo, lam_hi = SUBSCRIPTION_COUNT_LAMBDA[eng]
@@ -134,7 +135,7 @@ class SubscriptionAgent(BaseAgent):
             # Simulate lifecycle
             sub_data, charges = self._simulate_lifecycle(
                 state, started_on, end_date, base_price,
-                billing_cycle, has_trial, merch, merchant_agent, sub_key,
+                billing_cycle, has_trial, merch, merchant_agent, sub_key, generated_at,
             )
             sub_data["merchant_info"] = merch
             sub_data["_sub_key"] = sub_key
@@ -171,7 +172,7 @@ class SubscriptionAgent(BaseAgent):
 
     def _simulate_lifecycle(self, state: UserState, started: date, end: date,
                             price: Decimal, billing_cycle: str, has_trial: bool,
-                            merch: dict, merchant_agent, sub_key: str) -> tuple[dict, list[dict]]:
+                            merch: dict, merchant_agent, sub_key: str, generated_at=None) -> tuple[dict, list[dict]]:
         rng = self.rng
         charges: list[dict] = []
         current_price = price
@@ -208,14 +209,14 @@ class SubscriptionAgent(BaseAgent):
                 retry_date = current + timedelta(days=retry_lag)
                 if retry_date <= end:
                     charges.append(self._make_charge(
-                        retry_date, current_price, merch, merchant_agent, state, sub_key,
+                        retry_date, current_price, merch, merchant_agent, state, sub_key, generated_at,
                     ))
                 current += timedelta(days=period_days)
                 continue
 
             # Normal charge
             charges.append(self._make_charge(
-                current, current_price, merch, merchant_agent, state, sub_key,
+                current, current_price, merch, merchant_agent, state, sub_key, generated_at,
             ))
 
             # Price increase check (yearly)
@@ -266,13 +267,15 @@ class SubscriptionAgent(BaseAgent):
         }, charges
 
     def _make_charge(self, charge_date: date, price: Decimal, merch: dict,
-                     merchant_agent, state: UserState, sub_key: str) -> dict:
+                     merchant_agent, state: UserState, sub_key: str, generated_at=None) -> dict:
         rng = self.rng
         hour = int(rng.integers(0, 6))
         minute = int(rng.integers(0, 60))
         occurred = make_aware_dt(
             datetime(charge_date.year, charge_date.month, charge_date.day, hour, minute)
         )
+        if generated_at is not None and occurred > generated_at:
+            occurred = generated_at
 
         desc = merch["name"].upper()
         if merchant_agent:

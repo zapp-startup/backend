@@ -17,6 +17,7 @@ from datagen.agents.merchant import MerchantAgent
 from datagen.agents.obligation import ObligationAgent
 from datagen.agents.persona import PersonaAgent
 from datagen.agents.spend import SpendAgent
+from datagen.agents.subscription import SubscriptionAgent
 from datagen.agents.valuation import ValuationAgent
 from datagen.config import (
     CANCEL_BASE_GAMMA,
@@ -25,10 +26,12 @@ from datagen.config import (
     compat_status_family,
     resolve_transaction_description,
 )
+from datagen.csv_seed import _compute_raw_inferred_row
 from datagen.distributions import make_rng
+from datagen.export_utils import compute_subscription_cost_benefit
 from datagen.pipeline import run_pipeline
 from datagen.state import UserState
-from datagen.text import reset_conversation_dedup
+from datagen.text import generate_conversation_title, generate_reflection, reset_conversation_dedup
 from subscriptions.models import Subscription, SubscriptionEligibility, SubscriptionStatus
 from transactions.models import Transaction, TransactionDirection
 from users.models import UserComputed, UserRawInferred
@@ -162,6 +165,127 @@ class ValuationAgentTests(TestCase):
             self.assertLessEqual(valuation["total_cost"], Decimal("120.00"))
             self.assertIn(valuation["context"], {"subscription_renewal", "subscription_cancel"})
 
+    def test_subscription_utilization_orders_status_and_emits_diagnostics(self):
+        state = UserState(
+            monthly_income=Decimal("6500.00"),
+            quality_preference=0.66,
+            credit_stress=0.22,
+            regret_sensitivity=0.30,
+        )
+        base_subscription = {
+            "billing_cycle": "monthly",
+            "price": Decimal("15.99"),
+            "started_on": date(2025, 1, 1),
+            "cancelled_on": date(2025, 3, 20),
+            "usage_frequency": 6,
+            "feedback_value_score": 0.82,
+            "feedback_confidence": 0.88,
+            "merchant_info": {
+                "name": "Netflix",
+                "category": "streaming",
+                "merchant_family": "streaming",
+            },
+        }
+
+        outputs = {}
+        for status in ("active", "paused", "canceled"):
+            sub = dict(base_subscription, status=status)
+            if status != "canceled":
+                sub["cancelled_on"] = None
+            agent = ValuationAgent(make_rng(33), use_llm=False)
+            valuation = agent._valuate_subscription(
+                state=state,
+                sub=sub,
+                start=date(2025, 1, 1),
+                end=date(2025, 3, 31),
+            )[0]
+            outputs[status] = valuation
+
+        self.assertGreater(
+            outputs["active"]["subscription_utilization"],
+            outputs["paused"]["subscription_utilization"],
+        )
+        self.assertGreater(
+            outputs["paused"]["subscription_utilization"],
+            outputs["canceled"]["subscription_utilization"],
+        )
+        self.assertGreater(
+            outputs["active"]["subscription_cost_benefit"],
+            outputs["canceled"]["subscription_cost_benefit"],
+        )
+
+        evidence = outputs["active"]["evidence_json"]
+        for key in (
+            "input_usage_score",
+            "input_status_multiplier",
+            "input_price_ratio",
+            "input_feedback_value",
+            "input_feedback_confidence",
+            "penalty_price",
+            "penalty_friction",
+            "penalty_fit",
+            "penalty_confidence",
+            "utilization_raw",
+            "utilization_final",
+            "cost_benefit_raw",
+            "cost_benefit_final",
+        ):
+            self.assertIn(key, evidence)
+
+    def test_subscription_utilization_penalizes_overpriced_nonessential_rows(self):
+        state = UserState(
+            monthly_income=Decimal("5200.00"),
+            quality_preference=0.64,
+            credit_stress=0.26,
+            regret_sensitivity=0.34,
+        )
+        common = {
+            "status": "active",
+            "billing_cycle": "monthly",
+            "started_on": date(2025, 1, 1),
+            "usage_frequency": 6,
+            "merchant_info": {
+                "name": "Netflix",
+                "category": "streaming",
+                "merchant_family": "streaming",
+            },
+        }
+        cheap = dict(common, price=Decimal("15.49"))
+        expensive = dict(common, price=Decimal("39.99"))
+
+        cheap_val = ValuationAgent(make_rng(41), use_llm=False)._valuate_subscription(
+            state=state,
+            sub=cheap,
+            start=date(2025, 1, 1),
+            end=date(2025, 3, 31),
+        )[0]
+        expensive_val = ValuationAgent(make_rng(41), use_llm=False)._valuate_subscription(
+            state=state,
+            sub=expensive,
+            start=date(2025, 1, 1),
+            end=date(2025, 3, 31),
+        )[0]
+
+        self.assertLess(
+            expensive_val["subscription_utilization"],
+            cheap_val["subscription_utilization"],
+        )
+        self.assertLess(
+            expensive_val["subscription_cost_benefit"],
+            cheap_val["subscription_cost_benefit"],
+        )
+
+    def test_cost_benefit_helper_neutral_defaults_preserve_existing_behavior(self):
+        baseline = compute_subscription_cost_benefit(Decimal("20.00"), Decimal("10.00"))
+        neutral = compute_subscription_cost_benefit(
+            Decimal("20.00"),
+            Decimal("10.00"),
+            adjustment_penalty=0.0,
+            spread_gain=1.0,
+            spread_center=0.5,
+        )
+        self.assertEqual(baseline, neutral)
+
 
 def _monthlyize_subscription_row(sub: Subscription) -> float:
     p = float(sub.price)
@@ -231,6 +355,75 @@ class SyntheticRealismPatchTests(TestCase):
         inferred = UserRawInferred.objects.get(user=user)
         self.assertAlmostEqual(float(inferred.actual_monthly_spending), expected, places=1)
 
+    def test_reflection_generator_has_meaningful_variation(self):
+        reflections = {
+            generate_reflection(
+                make_rng(seed),
+                0.72,
+                0.63,
+                "shopping",
+                merchant_name="Amazon",
+                amount=78.0,
+                satisfaction=4,
+            )
+            for seed in range(60)
+        }
+        reflections.discard(None)
+        self.assertGreaterEqual(len(reflections), 20)
+
+    def test_conversation_title_generator_varies_budget_titles(self):
+        titles = {
+            generate_conversation_title(
+                make_rng(seed),
+                "budget_advice",
+                {"category": "dining", "merchant": "Netflix", "item": "AirPods"},
+            )
+            for seed in range(25)
+        }
+        self.assertGreaterEqual(len(titles), 4)
+
+    def test_subscription_rollups_show_rebalanced_utilization_distribution(self):
+        prefix = "subcal_"
+        self._run_seed(prefix=prefix, seed=404, months=4, users=8)
+        rows = list(
+            Subscription.objects.filter(
+                user__username__startswith=prefix,
+                subscription_utilization__isnull=False,
+                subscription_cost_benefit__isnull=False,
+            ).values("status", "subscription_utilization", "subscription_cost_benefit")
+        )
+        self.assertTrue(rows)
+
+        utils = [float(row["subscription_utilization"]) for row in rows]
+        costs = [float(row["subscription_cost_benefit"]) for row in rows]
+        self.assertTrue(all(0.0 <= value <= 1.0 for value in utils))
+        self.assertTrue(all(0.0 <= value <= 1.0 for value in costs))
+
+        by_status: dict[str, list[float]] = {}
+        for row in rows:
+            by_status.setdefault(row["status"], []).append(float(row["subscription_utilization"]))
+
+        if SubscriptionStatus.ACTIVE in by_status and SubscriptionStatus.CANCELED in by_status:
+            active_mean = sum(by_status[SubscriptionStatus.ACTIVE]) / len(by_status[SubscriptionStatus.ACTIVE])
+            canceled_mean = sum(by_status[SubscriptionStatus.CANCELED]) / len(by_status[SubscriptionStatus.CANCELED])
+            self.assertGreater(active_mean, canceled_mean)
+
+        if (
+            SubscriptionStatus.ACTIVE in by_status
+            and SubscriptionStatus.PAUSED in by_status
+            and SubscriptionStatus.CANCELED in by_status
+        ):
+            paused_mean = sum(by_status[SubscriptionStatus.PAUSED]) / len(by_status[SubscriptionStatus.PAUSED])
+            active_mean = sum(by_status[SubscriptionStatus.ACTIVE]) / len(by_status[SubscriptionStatus.ACTIVE])
+            canceled_mean = sum(by_status[SubscriptionStatus.CANCELED]) / len(by_status[SubscriptionStatus.CANCELED])
+            self.assertGreater(active_mean, paused_mean)
+            self.assertGreater(paused_mean, canceled_mean)
+
+        exact_one_share = sum(1 for value in utils if value == 1.0) / len(utils)
+        top_tail_share = sum(1 for value in utils if value > 0.95) / len(utils)
+        self.assertLess(exact_one_share, 0.05)
+        self.assertLess(top_tail_share, 0.20)
+
     def test_overloaded_cancel_probability_exceeds_light_burden(self):
         """Cancellation p includes overload gamma; Monte Carlo mean should be higher."""
         rng = np.random.default_rng(7)
@@ -289,17 +482,81 @@ class SyntheticRealismPatchTests(TestCase):
 
         self.assertEqual(digital["description_family"], "amazon_digital_media")
         self.assertEqual(digital["merchant_info"]["name"], "Amazon")
+        self.assertEqual(digital["merchant_info"]["category"], "shopping")
         self.assertEqual(digital["category"], "entertainment")
 
         self.assertEqual(aws["description_family"], "amazon_web_services")
         self.assertEqual(aws["merchant_info"]["name"], "Amazon Web Services")
         self.assertEqual(aws["category"], "bills")
 
+    def test_description_resolver_maps_travel_merchants_out_of_other(self):
+        airbnb = resolve_transaction_description("AIRBNB HOST RESERVATION", direction="spend")
+        expedia = resolve_transaction_description("EXPEDIA TRAVEL", direction="spend")
+        southwest = resolve_transaction_description("SOUTHWEST AIRLINES", direction="spend")
+
+        self.assertEqual(airbnb["merchant_info"]["name"], "Airbnb")
+        self.assertEqual(airbnb["category"], "transport")
+        self.assertEqual(expedia["merchant_info"]["name"], "Expedia")
+        self.assertEqual(expedia["category"], "transport")
+        self.assertEqual(southwest["merchant_info"]["name"], "Southwest Airlines")
+        self.assertEqual(southwest["category"], "transport")
+
     def test_description_resolver_amazon_refunds_inherit_cleaned_classification(self):
         refund = resolve_transaction_description("REVERSAL AMAZON WHOLE FOODS MARKET", direction="refund")
         self.assertEqual(refund["description_family"], "amazon_refund::amazon_whole_foods")
         self.assertEqual(refund["merchant_info"]["name"], "Whole Foods")
         self.assertEqual(refund["category"], "groceries")
+
+    def test_travel_family_merchants_do_not_fall_back_to_amazon(self):
+        agent = MerchantAgent(make_rng(19), use_llm=False)
+        catalog = agent.run(UserState(), {"start_date": date(2025, 1, 1), "end_date": date(2025, 3, 1)})["merchant_catalog"]
+        merchant = agent.pick_merchant_for_family("travel", "travel", catalog)
+        self.assertIsNotNone(merchant)
+        self.assertNotEqual(merchant["name"], "Amazon")
+
+    def test_raw_inferred_regret_frequency_uses_bounded_rating_signal(self):
+        state = UserState(monthly_income=Decimal("5000.00"))
+        now = timezone.make_aware(datetime(2026, 3, 21, 12, 0, 0))
+        rows = [
+            {
+                "direction": "spend",
+                "amount": Decimal("25.00"),
+                "occurred_at": now - timedelta(days=2),
+                "category": "shopping",
+                "subscription_id": None,
+                "impulse_score": 0.3,
+                "regret_score": 0.12,
+                "regret_rating": 44,
+                "merchant_id": 1,
+                "considered_at": now - timedelta(days=2, hours=1),
+            },
+            {
+                "direction": "spend",
+                "amount": Decimal("18.00"),
+                "occurred_at": now - timedelta(days=1),
+                "category": "shopping",
+                "subscription_id": None,
+                "impulse_score": 0.2,
+                "regret_score": 0.08,
+                "regret_rating": 35,
+                "merchant_id": 1,
+                "considered_at": now - timedelta(days=1, hours=2),
+            },
+            {
+                "direction": "spend",
+                "amount": Decimal("12.00"),
+                "occurred_at": now,
+                "category": "shopping",
+                "subscription_id": None,
+                "impulse_score": 0.1,
+                "regret_score": 0.05,
+                "regret_rating": 2,
+                "merchant_id": 2,
+                "considered_at": now - timedelta(hours=3),
+            },
+        ]
+        out = _compute_raw_inferred_row(1, rows, [], {}, state, now)
+        self.assertEqual(out["regret_frequency"], 0.667)
 
     def test_item_valuation_softmax_stochastic_and_score_band_monotonic(self):
         state = UserState(monthly_income=Decimal("5500"), price_sensitivity=0.35)
@@ -572,6 +829,23 @@ class IntentFirstRealismTests(TestCase):
                 cc_vals.append(st.luxury_affinity)
         self.assertGreater(sum(hi_vals) / len(hi_vals), sum(cc_vals) / len(cc_vals))
 
+    def test_persona_sets_lower_spend_targets_for_high_income_than_constrained(self):
+        ctx = {"end_date": date(2025, 12, 31)}
+        hi_vals = []
+        cc_vals = []
+        for seed in range(30):
+            with patch("datagen.agents.persona.sample_archetype", return_value="high_income"):
+                st = UserState()
+                PersonaAgent(make_rng(seed), use_llm=False).run(st, ctx)
+                hi_vals.append(st.transaction_spend_target_ratio)
+            with patch("datagen.agents.persona.sample_archetype", return_value="credit_constrained"):
+                st = UserState()
+                PersonaAgent(make_rng(100 + seed), use_llm=False).run(st, ctx)
+                cc_vals.append(st.transaction_spend_target_ratio)
+
+        self.assertLess(sum(hi_vals) / len(hi_vals), sum(cc_vals) / len(cc_vals))
+        self.assertLess(sum(hi_vals) / len(hi_vals), 0.60)
+
     def test_shopping_intent_routes_luxury_more_for_high_affinity_users(self):
         agent = SpendAgent(make_rng(120), use_llm=False)
         rich = UserState(
@@ -716,6 +990,40 @@ class IntentFirstRealismTests(TestCase):
             for i in range(12)
         ]
         self.assertIn("DoorDash", picked)
+
+    def test_seeded_budget_calibration_keeps_total_spend_ratio_below_old_regime(self):
+        ratios = []
+        for seed in range(10):
+            rng = make_rng(400 + seed)
+            state = UserState()
+            start = date(2025, 1, 1)
+            end = date(2025, 3, 31)
+            merchant_agent = MerchantAgent(rng, use_llm=False)
+            catalog = merchant_agent.run(UserState(), {"start_date": start, "end_date": end})["merchant_catalog"]
+            context = {
+                "start_date": start,
+                "end_date": end,
+                "merchant_agent": merchant_agent,
+                "merchant_catalog": catalog,
+                "subscriptions": [],
+            }
+            context.update(PersonaAgent(rng, use_llm=False).run(state, {"end_date": end}))
+            context.update(IncomeAgent(rng, use_llm=False).run(state, context))
+            subs = SubscriptionAgent(rng, use_llm=False).run(state, context)["subscriptions"]
+            context["subscriptions"] = subs
+            obligation_txns = ObligationAgent(rng, use_llm=False).run(state, context)["obligation_transactions"]
+            spend_txns = SpendAgent(rng, use_llm=False).run(state, context)["spend_transactions"]
+
+            spend_total = sum(float(t["amount"]) for t in obligation_txns + spend_txns)
+            sub_monthly = sum(
+                _monthlyize_subscription_row(type("SubRow", (), sub)())
+                for sub in subs
+                if sub.get("status") == "active"
+            )
+            ratio = (spend_total / 3.0 + sub_monthly) / max(1.0, float(state.monthly_income))
+            ratios.append(ratio)
+
+        self.assertLess(sum(ratios) / len(ratios), 0.70)
 
     def test_subscription_netflix_price_from_tier_table(self):
         from datagen.agents.subscription import SubscriptionAgent
