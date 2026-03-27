@@ -8,4 +8,7 @@ PyJWT==2.10.1
 cryptography==46.0.5
 psycopg2-binary==2.9.11
 Faker==40.4.0
+numpy>=1.26.0
+scipy>=1.12.0
+openai>=1.0.0
 plaid-python>=20.0.0

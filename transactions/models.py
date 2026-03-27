@@ -145,6 +145,17 @@ class Transaction(models.Model):
         help_text="0-1 computed regret likelihood for this transaction",
     )
 
+    feedback_value_score = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 derived from reflection_text + ratings (user feedback on value)",
+    )
+    feedback_confidence = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 confidence in feedback_value_score",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -179,6 +190,14 @@ class Transaction(models.Model):
             models.CheckConstraint(
                 condition=models.Q(regret_score__gte=0, regret_score__lte=1) | models.Q(regret_score__isnull=True),
                 name="valid_regret_score",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(feedback_value_score__gte=0, feedback_value_score__lte=1) | models.Q(feedback_value_score__isnull=True),
+                name="valid_feedback_value_score",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(feedback_confidence__gte=0, feedback_confidence__lte=1) | models.Q(feedback_confidence__isnull=True),
+                name="valid_feedback_confidence",
             ),
         ]
 

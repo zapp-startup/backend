@@ -120,17 +120,16 @@ def _fetch_supabase_user(token: str) -> dict:
     if anon_key:
         headers["apikey"] = anon_key
 
-        try:
-            supabase_url = _supabase_url()
-            response = requests.get(
-                f"{supabase_url}/auth/v1/user",
-                timeout=5,
-                headers=headers,
-            )
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            logger.warning("Failed to fetch Supabase user profile: %s", exc)
-            raise AuthenticationFailed("Unable to validate Supabase token.")
+    try:
+        response = requests.get(
+            f"{supabase_url}/auth/v1/user",
+            timeout=5,
+            headers=headers,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("Failed to fetch Supabase user profile: %s", exc)
+        raise AuthenticationFailed("Unable to validate Supabase token.")
 
     content_type = response.headers.get("content-type", "")
     if "application/json" not in content_type:
@@ -211,9 +210,8 @@ def _get_jwks_with_refresh(force_refresh: bool):
             try:
                 new_jwks = _fetch_jwks(jwks_url)
                 _JWKS_CACHE = new_jwks
-                
-            _JWKS_CACHE_EXPIRES_AT = time.time() + _supabase_jwks_ttl()
-            logger.info("JWKS refresh succeeded from %s.", jwks_url)
+                _JWKS_CACHE_EXPIRES_AT = time.time() + _supabase_jwks_ttl()
+                logger.info("JWKS refresh succeeded from %s.", jwks_url)
                 return _JWKS_CACHE
             except AuthenticationFailed:
                 continue

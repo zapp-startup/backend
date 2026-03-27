@@ -21,6 +21,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 
+def _clean_env_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return value.strip().strip("'\"")
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
@@ -91,7 +97,7 @@ WSGI_APPLICATION = 'zapp.wsgi.application'
 
 DATABASES = {
     "default": dj_database_url.config(
-        default=os.environ.get("DATABASE_URL"),
+        default=_clean_env_url(os.environ.get("DATABASE_URL")),
         conn_max_age=600,
         ssl_require=True,
     )
