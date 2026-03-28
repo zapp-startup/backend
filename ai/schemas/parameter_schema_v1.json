@@ -5,6 +5,7 @@
   "type": "object",
   "required": [
     "schema_version",
+    "request",
     "conversation",
     "profile",
     "spending",
@@ -15,6 +16,34 @@
     "schema_version": {
       "type": "string",
       "const": "zapp_prompt_v1"
+    },
+    "request": {
+      "type": "object",
+      "required": [
+        "intent",
+        "response_style"
+      ],
+      "properties": {
+        "intent": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "edit",
+            "recommend",
+            "summarize"
+          ]
+        },
+        "response_style": {
+          "type": "string",
+          "enum": [
+            "direct_answer",
+            "transformation",
+            "ranked_recommendations",
+            "summary"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "conversation": {
       "type": "object",
@@ -39,9 +68,61 @@
         "user_message": {
           "type": "string",
           "minLength": 1
+        },
+        "linked_context": {
+          "type": "object"
+        },
+        "memory": {
+          "type": "object",
+          "properties": {
+            "summary_text": {
+              "type": "string"
+            },
+            "session_state": {
+              "type": "object"
+            },
+            "recent_messages": {
+              "type": "array"
+            },
+            "recalled_memories": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "memory_kind",
+                  "summary_text",
+                  "tags",
+                  "importance",
+                  "updated_at"
+                ],
+                "properties": {
+                  "memory_kind": {
+                    "type": "string"
+                  },
+                  "summary_text": {
+                    "type": "string"
+                  },
+                  "tags": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "importance": {
+                    "type": "integer"
+                  },
+                  "updated_at": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": true
         }
       },
-      "additionalProperties": false
+      "additionalProperties": true
     },
     "profile": {
       "type": "object",
@@ -82,9 +163,64 @@
     "spending": {
       "type": "object",
       "required": [
-        "category_spend_30d"
+        "summary",
+        "category_spend_30d",
+        "recent_transactions"
       ],
       "properties": {
+        "summary": {
+          "type": "object",
+          "required": [
+            "recent_spend_total",
+            "spend_last_30_days",
+            "spend_transaction_count_last_30_days",
+            "spend_month_to_date",
+            "spend_transaction_count_month_to_date",
+            "requested_spend_window_days",
+            "spend_in_requested_window",
+            "spend_transaction_count_in_requested_window",
+            "active_subscription_monthly_commitment"
+          ],
+          "properties": {
+            "recent_spend_total": {
+              "type": "number"
+            },
+            "spend_last_30_days": {
+              "type": "number"
+            },
+            "spend_transaction_count_last_30_days": {
+              "type": "integer"
+            },
+            "spend_month_to_date": {
+              "type": "number"
+            },
+            "spend_transaction_count_month_to_date": {
+              "type": "integer"
+            },
+            "requested_spend_window_days": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "spend_in_requested_window": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "spend_transaction_count_in_requested_window": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "active_subscription_monthly_commitment": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        },
         "category_spend_30d": {
           "type": "array",
           "items": {
@@ -103,6 +239,51 @@
             },
             "additionalProperties": false
           }
+        },
+        "recent_transactions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "merchant",
+              "amount",
+              "currency",
+              "direction",
+              "occurred_at",
+              "category",
+              "description"
+            ],
+            "properties": {
+              "merchant": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "amount": {
+                "type": "number"
+              },
+              "currency": {
+                "type": "string"
+              },
+              "direction": {
+                "type": "string"
+              },
+              "occurred_at": {
+                "type": "string"
+              },
+              "category": {
+                "type": "string"
+              },
+              "description": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
@@ -116,7 +297,9 @@
           "status",
           "billing_cycle",
           "price",
-          "currency"
+          "currency",
+          "renewal_date",
+          "usage_frequency"
         ],
         "properties": {
           "name": {
@@ -157,9 +340,10 @@
       "required": [
         "must_not_fabricate_data",
         "ask_clarifying_question_when_missing_data",
+        "max_follow_up_questions",
         "disclaimer_required_for_specialized_guidance",
-        "confidence_min",
-        "confidence_max",
+        "answer_based_on_available_context_when_possible",
+        "state_context_scope_when_data_is_partial",
         "safe_next_step_bias"
       ],
       "properties": {
@@ -169,18 +353,18 @@
         "ask_clarifying_question_when_missing_data": {
           "type": "boolean"
         },
+        "max_follow_up_questions": {
+          "type": "integer",
+          "const": 1
+        },
         "disclaimer_required_for_specialized_guidance": {
           "type": "boolean"
         },
-        "confidence_min": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
+        "answer_based_on_available_context_when_possible": {
+          "type": "boolean"
         },
-        "confidence_max": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
+        "state_context_scope_when_data_is_partial": {
+          "type": "boolean"
         },
         "safe_next_step_bias": {
           "type": "string",

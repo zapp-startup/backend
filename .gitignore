@@ -10,3 +10,4 @@ staticfiles/
 .env/
 *.log
 *.pot
+exports/

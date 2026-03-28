@@ -4,58 +4,41 @@
   "title": "Zapp AI Response Schema v1",
   "type": "object",
   "required": [
-    "recommendation",
-    "reasoning",
-    "next_steps",
-    "confidence",
-    "missing_data_questions",
+    "response_style",
+    "message",
+    "follow_up_question",
     "disclaimer",
     "safe_bounds_acknowledged"
   ],
   "properties": {
-    "recommendation": {
+    "response_style": {
       "type": "string",
       "enum": [
-        "keep",
-        "pause",
-        "cancel",
-        "defer",
-        "investigate"
+        "direct_answer",
+        "ranked_recommendations",
+        "summary",
+        "transformation"
       ]
     },
-    "reasoning": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      },
-      "minItems": 1
+    "message": {
+      "type": "string",
+      "minLength": 1
     },
-    "next_steps": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      },
-      "minItems": 1
-    },
-    "confidence": {
-      "type": "number",
-      "minimum": 0,
-      "maximum": 1
-    },
-    "missing_data_questions": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      },
-      "maxItems": 1
-      }
+    "follow_up_question": {
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "disclaimer": {
-      "type": "string"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "safe_bounds_acknowledged": {
+      "type": "boolean",
       "const": true
-      "type": "boolean"
     }
   },
   "additionalProperties": false

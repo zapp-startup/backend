@@ -170,3 +170,86 @@ class UserFact(models.Model):
 
     def __str__(self) -> str:
         return f"{self.user} • {self.fact_key}"
+
+
+class ConversationMemoryKind(models.TextChoices):
+    TOPIC = "topic", "Topic"
+    DECISION = "decision", "Decision"
+    FACT = "fact", "Fact"
+    GOAL = "goal", "Goal"
+    PREFERENCE = "preference", "Preference"
+
+
+class ConversationMemoryItem(models.Model):
+    """
+    Durable memory items extracted from important turns.
+    These are concise, retrieval-friendly notes used to maintain continuity.
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="conversation_memory_items",
+    )
+    conversation = models.ForeignKey(
+        Conversation,
+        on_delete=models.CASCADE,
+        related_name="memory_items",
+        blank=True,
+        null=True,
+    )
+    source_message = models.ForeignKey(
+        Message,
+        on_delete=models.SET_NULL,
+        related_name="memory_items",
+        blank=True,
+        null=True,
+    )
+    memory_kind = models.CharField(
+        max_length=32,
+        choices=ConversationMemoryKind.choices,
+        default=ConversationMemoryKind.TOPIC,
+    )
+    dedupe_key = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Optional stable key used to upsert durable memories.",
+    )
+    summary_text = models.TextField(
+        help_text="Short retrieval-friendly summary of the memory.",
+    )
+    detail_json = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Optional structured details extracted from the turn.",
+    )
+    tags_json = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Normalized tags used for lightweight retrieval.",
+    )
+    importance = models.PositiveSmallIntegerField(
+        default=1,
+        help_text="Relative salience from 1 (low) to 5 (high).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "updated_at"]),
+            models.Index(fields=["user", "memory_kind"]),
+            models.Index(fields=["conversation", "updated_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "dedupe_key"],
+                condition=models.Q(dedupe_key__isnull=False),
+                name="uniq_user_conversation_memory_dedupe_key",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user} • {self.memory_kind} • {self.summary_text[:48]}"
