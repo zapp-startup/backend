@@ -1,7 +1,11 @@
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
+
+from gamification.services import award_points_for_onboarding
 
 from .models import UserRawExplicit, UserRawInferred, UserComputed, UserPreference
 from .serializers import (
@@ -20,7 +24,8 @@ class UserRawExplicitViewSet(ModelViewSet):
         return UserRawExplicit.objects.filter(user=self.request.user)
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        profile = serializer.save(user=self.request.user)
+        award_points_for_onboarding(profile.user)
 
     def perform_update(self, serializer):
         serializer.save(user=self.request.user)
@@ -52,22 +57,24 @@ class UserPreferenceViewSet(ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
-    def perform_update(self, serializer):
-        serializer.save(user=self.request.user)
+    def get_object(self):
+        obj = super().get_object()
+        if obj.user_id != self.request.user.id:
+            raise PermissionDenied("You can only access your own preferences.")
+        return obj
 
 
 class SupabaseUserSyncView(APIView):
     """
-    Lightweight endpoint the frontend can call right after Supabase login.
-
-    Authentication is handled by `SupabaseJWTAuthentication` globally; that class
-    creates/links a Django user row on first login using the Supabase `sub` UUID.
+    Sync the authenticated Supabase session into a backend user profile payload.
     """
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         user = request.user
+        auth_context = request.auth or {}
+
         return Response(
             {
                 "id": user.id,

@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class TransactionDirection(models.TextChoices):
@@ -144,6 +145,17 @@ class Transaction(models.Model):
         help_text="0-1 computed regret likelihood for this transaction",
     )
 
+    feedback_value_score = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 derived from reflection_text + ratings (user feedback on value)",
+    )
+    feedback_confidence = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 confidence in feedback_value_score",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -179,7 +191,52 @@ class Transaction(models.Model):
                 condition=models.Q(regret_score__gte=0, regret_score__lte=1) | models.Q(regret_score__isnull=True),
                 name="valid_regret_score",
             ),
+            models.CheckConstraint(
+                condition=models.Q(feedback_value_score__gte=0, feedback_value_score__lte=1) | models.Q(feedback_value_score__isnull=True),
+                name="valid_feedback_value_score",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(feedback_confidence__gte=0, feedback_confidence__lte=1) | models.Q(feedback_confidence__isnull=True),
+                name="valid_feedback_confidence",
+            ),
         ]
 
     def __str__(self) -> str:
         return f"{self.user} • {self.direction} {self.amount} {self.currency} @ {self.occurred_at}"
+
+class TransactionReflection(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="transaction_reflections",
+    )
+    transaction = models.ForeignKey(
+        Transaction,
+        on_delete=models.CASCADE,
+        related_name="reflections",
+    )
+    reflected_at = models.DateTimeField(default=timezone.now)
+    regret_score = models.PositiveSmallIntegerField(blank=True, null=True)
+    was_worth_it = models.BooleanField(blank=True, null=True)
+    notes = models.TextField(blank=True)
+    reflected_same_day = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["-reflected_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["user", "transaction"], name="uniq_user_transaction_reflection"),
+        ]
+        indexes = [
+            models.Index(fields=["user", "reflected_at"]),
+            models.Index(fields=["transaction", "reflected_at"]),
+            models.Index(fields=["user", "reflected_same_day"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.transaction_id and self.reflected_at:
+            self.reflected_same_day = self.transaction.occurred_at.date() == self.reflected_at.date()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.user} reflection for txn {self.transaction_id}"

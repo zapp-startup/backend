@@ -2,6 +2,14 @@ from django.conf import settings
 from django.db import models
 
 
+class SubscriptionEligibility(models.TextChoices):
+    NOT_SUBSCRIBABLE = "not_subscribable", "Not Subscribable"
+    MEMBERSHIP = "membership", "Membership"
+    STANDARD_SUBSCRIPTION = "standard_subscription", "Standard Subscription"
+    UTILITY_RECURRING = "utility_recurring", "Utility Recurring"
+    INSURANCE_RECURRING = "insurance_recurring", "Insurance Recurring"
+
+
 class MerchantCategory(models.TextChoices):
     STREAMING = "streaming", "Streaming"
     GROCERY = "grocery", "Grocery"
@@ -44,6 +52,12 @@ class Merchant(models.Model):
         blank=True,
         null=True,
         help_text="Optional domain like 'netflix.com' used for matching/inference.",
+    )
+    subscription_eligibility = models.CharField(
+        max_length=32,
+        choices=SubscriptionEligibility.choices,
+        default=SubscriptionEligibility.NOT_SUBSCRIBABLE,
+        help_text="Whether this merchant can appear as a recurring subscription in synthetic data.",
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -110,6 +124,27 @@ class Subscription(models.Model):
         help_text="Number of times this subscription has been reactivated",
     )
 
+    feedback_value_score = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 derived from reflection_text + ratings (user feedback on value)",
+    )
+    feedback_confidence = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 confidence in feedback_value_score",
+    )
+    subscription_utilization = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 normalized utilization score derived from valuation runs.",
+    )
+    subscription_cost_benefit = models.FloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 bounded value-vs-cost score derived from valuation runs.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -121,6 +156,22 @@ class Subscription(models.Model):
             models.Index(fields=["user", "renewal_date"]),
         ]
         constraints = [
+            models.CheckConstraint(
+                condition=models.Q(feedback_value_score__gte=0, feedback_value_score__lte=1) | models.Q(feedback_value_score__isnull=True),
+                name="valid_subscription_feedback_value_score",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(feedback_confidence__gte=0, feedback_confidence__lte=1) | models.Q(feedback_confidence__isnull=True),
+                name="valid_subscription_feedback_confidence",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(subscription_utilization__gte=0, subscription_utilization__lte=1) | models.Q(subscription_utilization__isnull=True),
+                name="valid_subscription_utilization",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(subscription_cost_benefit__gte=0, subscription_cost_benefit__lte=1) | models.Q(subscription_cost_benefit__isnull=True),
+                name="valid_subscription_cost_benefit",
+            ),
             # Prevent duplicate active subscriptions to the same merchant for a user.
             # If you later want multiple (e.g., multiple Netflix profiles), loosen this.
             models.UniqueConstraint(
