@@ -209,3 +209,34 @@ class SupabaseAuthenticationSecurityTests(APITestCase):
 
         self.assertEqual(keys["keys"][0]["kid"], "cached")
         mock_fetch_jwks.assert_not_called()
+
+
+class UserPreferenceSerializerValidationTests(APITestCase):
+    def test_purchase_advisor_logic_requires_boolean_enabled(self):
+        from users.serializers import UserPreferenceSerializer
+
+        serializer = UserPreferenceSerializer(data={
+            "key": "purchase_advisor_logic",
+            "value_type": "json",
+            "value": {"enabled": "yes"},
+            "source": "manual",
+            "confidence": 1.0,
+        })
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("value", serializer.errors)
+
+
+    def test_purchase_advisor_logic_rejects_unknown_focus_categories(self):
+        from users.serializers import UserPreferenceSerializer
+
+        serializer = UserPreferenceSerializer(data={
+            "key": "purchase_advisor_logic",
+            "value_type": "json",
+            "value": {"enabled": True, "focus_categories": ["shopping"]},
+            "source": "manual",
+            "confidence": 1.0,
+        })
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("value", serializer.errors)

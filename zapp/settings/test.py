@@ -1,5 +1,8 @@
-from .development import *  # noqa: F401,F403
+from .base import *
 
+
+DEBUG = False
+ALLOWED_HOSTS = ["testserver", "localhost", "127.0.0.1"]
 
 DATABASES = {
     "default": {
@@ -7,6 +10,8 @@ DATABASES = {
         "NAME": BASE_DIR / "test.sqlite3",
     }
 }
+
+OPENAI_API_KEY = None
 
 PASSWORD_HASHERS = [
     "django.contrib.auth.hashers.MD5PasswordHasher",
