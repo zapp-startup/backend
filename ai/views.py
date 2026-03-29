@@ -1,4 +1,3 @@
-from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.decorators import action
@@ -7,21 +6,7 @@ from rest_framework.viewsets import ModelViewSet
 
 from .models import Conversation, Message, UserFact, MessageRole, ConversationContext
 from .serializers import ConversationSerializer, MessageSerializer, UserFactSerializer
-
-
-def get_dev_user(request):
-    """
-    Temporary dev auth:
-    Frontend sends header: X-Dev-User: seed_user_0
-    """
-    username = request.headers.get("X-Dev-User")
-    if not username:
-        return None
-    User = get_user_model()
-    try:
-        return User.objects.get(username=username)
-    except User.DoesNotExist:
-        return None
+from users.dev_auth import get_dev_user
 
 class ConversationViewSet(ModelViewSet):
     serializer_class = ConversationSerializer

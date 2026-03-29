@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'valuations',
     'transactions',
     'banking',
+    'compliance',
     'gamification',
 ]
 
@@ -126,6 +127,12 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "users.supabase_auth.SupabaseJWTAuthentication",
     ),
+    "DEFAULT_THROTTLE_RATES": {
+        # Banking / compliance: per-user; tune per environment
+        "banking_sensitive": os.getenv("THROTTLE_BANKING_SENSITIVE", "120/hour"),
+        "banking_link_token": os.getenv("THROTTLE_BANKING_LINK_TOKEN", "30/hour"),
+        "compliance_consent": os.getenv("THROTTLE_COMPLIANCE_CONSENT", "60/hour"),
+    },
 }
 
 
@@ -163,3 +170,27 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_JWT_ISS = os.getenv("SUPABASE_JWT_ISS")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")  # For HS256 fallback (older Supabase projects)
 SUPABASE_JWKS_CACHE_TTL_SECONDS = int(os.getenv("SUPABASE_JWKS_CACHE_TTL_SECONDS", "300"))
+
+# --- Privacy policy (hosted document; version drives consent validity) ---
+PRIVACY_POLICY_URL = os.getenv("PRIVACY_POLICY_URL", "")
+PRIVACY_POLICY_VERSION = os.getenv("PRIVACY_POLICY_VERSION", "1.0.0")
+PRIVACY_POLICY_EFFECTIVE_DATE = os.getenv("PRIVACY_POLICY_EFFECTIVE_DATE", "")
+
+# --- Banking security policy (overridden in development/production) ---
+BANKING_REQUIRE_MFA = os.getenv("BANKING_REQUIRE_MFA", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+BANKING_REQUIRE_FINANCIAL_CONSENT = os.getenv(
+    "BANKING_REQUIRE_FINANCIAL_CONSENT", "true"
+).lower() in ("1", "true", "yes")
+
+# Optional Fernet key (urlsafe base64) for app-layer encryption of Plaid access tokens at rest.
+# Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+PLAID_TOKEN_ENCRYPTION_KEY = os.getenv("PLAID_TOKEN_ENCRYPTION_KEY", "")
+
+# Retention hints (operational; actual deletion uses management commands / legal process)
+BANKING_DATA_RETENTION_DAYS_AFTER_DISCONNECT = int(
+    os.getenv("BANKING_DATA_RETENTION_DAYS_AFTER_DISCONNECT", "0")
+)

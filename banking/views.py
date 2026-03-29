@@ -1,13 +1,12 @@
 import logging
 
 from rest_framework import status
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import BankAccount, BankConnection, BankTransaction
-
-logger = logging.getLogger(__name__)
+from .security_checks import enforce_banking_policies
 from .serializers import (
     BankAccountListSerializer,
     BankConnectionSerializer,
@@ -19,6 +18,9 @@ from .services import (
     exchange_public_token_for_user,
     sync_transactions_for_connection,
 )
+from .throttles import BankingLinkTokenThrottle, BankingSensitiveThrottle
+
+logger = logging.getLogger(__name__)
 
 
 class LinkTokenView(APIView):
@@ -28,17 +30,23 @@ class LinkTokenView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [BankingLinkTokenThrottle]
 
     def post(self, request):
+        enforce_banking_policies(request)
         try:
             link_token = create_link_token_for_user(request.user)
+            logger.info(
+                "banking_link_token_created user_id=%s",
+                request.user.pk,
+            )
             return Response({"link_token": link_token})
         except ValueError as e:
             return Response(
                 {"error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        except Exception as e:
+        except Exception:
             return Response(
                 {"error": "Failed to create link token"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -53,8 +61,10 @@ class ExchangePublicTokenView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [BankingSensitiveThrottle]
 
     def post(self, request):
+        enforce_banking_policies(request)
         serializer = ExchangePublicTokenSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -62,6 +72,12 @@ class ExchangePublicTokenView(APIView):
         public_token = serializer.validated_data["public_token"]
         try:
             connection = exchange_public_token_for_user(request.user, public_token)
+            logger.info(
+                "banking_connection_created user_id=%s connection_id=%s plaid_item_id=%s",
+                request.user.pk,
+                connection.pk,
+                connection.plaid_item_id,
+            )
             return Response(
                 {
                     "success": True,
@@ -83,6 +99,7 @@ class BankConnectionsView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [BankingSensitiveThrottle]
 
     def get(self, request):
         connections = BankConnection.objects.filter(user=request.user).order_by(
@@ -98,6 +115,7 @@ class BankAccountsView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [BankingSensitiveThrottle]
 
     def get(self, request):
         accounts = BankAccount.objects.filter(
@@ -114,6 +132,7 @@ class BankTransactionsView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [BankingSensitiveThrottle]
 
     def get(self, request):
         qs = (
@@ -161,6 +180,7 @@ class ManualSyncView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [BankingSensitiveThrottle]
 
     def post(self, request, connection_id):
         try:
@@ -175,6 +195,11 @@ class ManualSyncView(APIView):
             )
 
         try:
+            logger.info(
+                "banking_manual_sync user_id=%s connection_id=%s",
+                request.user.pk,
+                connection_id,
+            )
             result = sync_transactions_for_connection(connection, cursor=None)
             return Response(
                 {
