@@ -82,6 +82,12 @@ class SubscriptionValuation(models.Model):
     estimated_value = models.DecimalField(max_digits=12, decimal_places=2)
     net_value = models.DecimalField(max_digits=12, decimal_places=2)
 
+    personal_value_score = models.PositiveSmallIntegerField(
+        blank=True,
+        null=True,
+        help_text="0-150 personalized fit score (match ~100, underused <80, extremely useful >100)",
+    )
+
     recommendation = models.CharField(
         max_length=16,
         choices=Recommendation.choices,
@@ -124,6 +130,10 @@ class SubscriptionValuation(models.Model):
             models.CheckConstraint(
                 condition=models.Q(confidence__gte=0, confidence__lte=1),
                 name="valid_subscription_confidence",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(personal_value_score__gte=0, personal_value_score__lte=150) | models.Q(personal_value_score__isnull=True),
+                name="valid_subscription_personal_value_score",
             ),
         ]
 
@@ -179,7 +189,7 @@ class ItemValuation(models.Model):
     )
 
     personal_value_score = models.PositiveSmallIntegerField(
-        help_text="0-100 personalized fit score for this user",
+        help_text="0-150 personalized fit score (match ~100, underused <80, extremely useful >100)",
     )
 
 
@@ -218,7 +228,7 @@ class ItemValuation(models.Model):
         ]
         constraints = [
             models.CheckConstraint(
-                condition=models.Q(personal_value_score__gte=0, personal_value_score__lte=100),
+                condition=models.Q(personal_value_score__gte=0, personal_value_score__lte=150),
                 name="valid_personal_value_score",
             ),
             models.CheckConstraint(

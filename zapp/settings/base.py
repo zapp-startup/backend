@@ -21,6 +21,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 
+def _clean_env_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return value.strip().strip("'\"")
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
@@ -57,6 +63,8 @@ INSTALLED_APPS = [
     'subscriptions',
     'valuations',
     'transactions',
+    'banking',
+    'gamification',
 ]
 
 MIDDLEWARE = [
@@ -95,7 +103,7 @@ WSGI_APPLICATION = 'zapp.wsgi.application'
 
 DATABASES = {
     "default": dj_database_url.config(
-        default=os.environ.get("DATABASE_URL"),
+        default=_clean_env_url(os.environ.get("DATABASE_URL")),
         conn_max_age=600,
         ssl_require=True,
     )
@@ -153,3 +161,21 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+# Plaid (bank connectivity)
+PLAID_CLIENT_ID = os.getenv("PLAID_CLIENT_ID")
+PLAID_SECRET = os.getenv("PLAID_SECRET")
+PLAID_ENV = os.getenv("PLAID_ENV", "sandbox")
+PLAID_PRODUCTS = os.getenv("PLAID_PRODUCTS", "transactions")
+PLAID_COUNTRY_CODES = os.getenv("PLAID_COUNTRY_CODES", "US")
+PLAID_WEBHOOK_URL = os.getenv("PLAID_WEBHOOK_URL", "")
+PLAID_REDIRECT_URI = os.getenv("PLAID_REDIRECT_URI", "")
+PLAID_CLIENT_NAME = os.getenv("PLAID_CLIENT_NAME", "Zapp")
+
+# Supabase (JWT auth)
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_JWT_AUD = os.getenv("SUPABASE_JWT_AUD", "authenticated")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_JWT_ISS = os.getenv("SUPABASE_JWT_ISS")
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")  # For HS256 fallback (older Supabase projects)
+SUPABASE_JWKS_CACHE_TTL_SECONDS = int(os.getenv("SUPABASE_JWKS_CACHE_TTL_SECONDS", "300"))
