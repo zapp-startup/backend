@@ -40,6 +40,12 @@ if not SECRET_KEY:
 ALLOWED_HOSTS = []
 AUTH_USER_MODEL = "users.User"
 
+OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip() or None
+OPENAI_MODEL = (os.getenv("OPENAI_MODEL") or "gpt-4.1-mini").strip()
+API_THROTTLE_ANON_RATE = (os.getenv("API_THROTTLE_ANON_RATE") or "30/minute").strip()
+API_THROTTLE_USER_RATE = (os.getenv("API_THROTTLE_USER_RATE") or "120/minute").strip()
+API_THROTTLE_AI_RATE = (os.getenv("API_THROTTLE_AI_RATE") or "20/minute").strip()
+
 
 # Application definition
 
