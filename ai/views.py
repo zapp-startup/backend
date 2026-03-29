@@ -186,6 +186,7 @@ LAST_SPEND_LOOKUP_KEY = "last_spend_lookup"
 CHAT_ACTION_SELECT_SATISFACTION_TRANSACTION = "select_satisfaction_transaction"
 CHAT_ACTION_CONFIRM_PENDING = "confirm_pending_action"
 CHAT_ACTION_CANCEL_PENDING = "cancel_pending_action"
+UI_ACTION_MESSAGE_KEY = "ui_action"
 MONTH_NAME_TO_NUMBER = {
     "jan": 1,
     "january": 1,
@@ -395,6 +396,11 @@ def _build_local_direct_response(message: str) -> dict:
     }
 
 
+def _is_ui_action_message(message: Message) -> bool:
+    metadata = getattr(message, "metadata_json", {}) or {}
+    return bool(metadata.get(UI_ACTION_MESSAGE_KEY))
+
+
 def _truncate_text(text: str, max_length: int = 180) -> str:
     compact = " ".join((text or "").split())
     if len(compact) <= max_length:
@@ -544,6 +550,9 @@ def _persist_turn_memory(
     user_message: Message,
     intent_detection: dict,
 ) -> None:
+    if _is_ui_action_message(user_message):
+        return
+
     intent = intent_detection["intent"]
     if intent in {"smalltalk", "meta_help", "record_transaction", INTENT_UPDATE_SATISFACTION}:
         return
@@ -1706,12 +1715,19 @@ SUMMARY_MAX_TURNS = 12
 
 def _summarize_messages(messages):
     summary_lines = []
-    for message in messages[:SUMMARY_MAX_TURNS]:
+    for message in messages:
+        if _is_ui_action_message(message):
+            continue
+
         role = message.role.capitalize()
         content = " ".join(message.content.split())
+        if not content:
+            continue
         if len(content) > 140:
             content = f"{content[:137]}..."
         summary_lines.append(f"{role}: {content}")
+        if len(summary_lines) >= SUMMARY_MAX_TURNS:
+            break
     return "\n".join(summary_lines)
 
 
@@ -1721,6 +1737,9 @@ def _extract_session_state(conversation, recent_messages):
     mentioned_entities = []
 
     for message in recent_messages:
+        if _is_ui_action_message(message):
+            continue
+
         if message.role == MessageRole.USER:
             last_user_message = message.content
             content_lower = message.content.lower()
@@ -1764,10 +1783,12 @@ def _extract_session_state(conversation, recent_messages):
 
 def build_conversation_memory(conversation, *, message_limit=SHORT_TERM_MEMORY_MESSAGE_LIMIT, recent_messages=None):
     if recent_messages is None:
-        recent_messages = list(
-            conversation.messages.order_by("-created_at", "-id")[:message_limit]
-        )
-        recent_messages.reverse()
+        recent_messages = list(conversation.messages.order_by("created_at", "id"))
+
+    recent_messages = [
+        message for message in recent_messages
+        if not _is_ui_action_message(message)
+    ][-message_limit:]
     return {
         "summary_text": conversation.summary_text,
         "session_state": conversation.session_state_json or {},
@@ -1786,7 +1807,10 @@ def build_conversation_memory(conversation, *, message_limit=SHORT_TERM_MEMORY_M
 def refresh_conversation_memory(conversation):
     all_messages = list(conversation.messages.order_by("created_at", "id"))
     update_fields = ["session_state_json", "updated_at"]
-    recent_messages = all_messages[-SHORT_TERM_MEMORY_MESSAGE_LIMIT:]
+    recent_messages = [
+        message for message in all_messages
+        if not _is_ui_action_message(message)
+    ][-SHORT_TERM_MEMORY_MESSAGE_LIMIT:]
 
     if len(all_messages) >= SUMMARY_TRIGGER_MESSAGE_COUNT:
         already_summarized_until = conversation.last_summarized_message_id or 0
@@ -2052,6 +2076,7 @@ def _build_openai_payload(
             _format_user_fact(fact)
             for fact in conversation.user.facts.order_by("fact_key")
         ],
+        "purchase_advisor_report": purchase_advisor_report,
         "policy": {
             "must_not_fabricate_data": True,
             "ask_clarifying_question_when_missing_data": True,
@@ -2288,14 +2313,15 @@ class ConversationViewSet(AIViewSetMixin, ModelViewSet):
         content = request.data.get("content", "")
         content = (content or "").strip()
         if not content and isinstance(action_payload, dict):
-            content = str(action_payload.get("label") or action_payload.get("kind") or "").strip()
-        if not content:
+            content = str(action_payload.get("label") or "").strip()
+        if not content and action_payload is None:
             return Response({"detail": "content is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         intent_detection = classify_intent(content)
         user_metadata = {"intent_detection": intent_detection}
         if action_payload is not None:
             user_metadata["action_payload"] = action_payload
+            user_metadata[UI_ACTION_MESSAGE_KEY] = True
 
         user_msg = Message.objects.create(
             conversation=convo,

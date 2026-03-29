@@ -335,6 +335,18 @@
         "additionalProperties": false
       }
     },
+    "user_facts": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "purchase_advisor_report": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
     "policy": {
       "type": "object",
       "required": [

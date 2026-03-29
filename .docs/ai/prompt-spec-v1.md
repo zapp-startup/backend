@@ -25,6 +25,7 @@ See: `ai/prompts/system_prompt_v1.txt`
 - profile.budget_style <- UserRawExplicit.budget_style
 - spending.category_spend_30d <- aggregate Transactions (last 30 days) by category
 - subscriptions <- active/relevant Subscription rows
+- purchase_advisor_report <- derived overspending analysis when purchase_advisor_logic is enabled
 
 ## Acceptance Criteria
 

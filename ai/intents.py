@@ -55,7 +55,10 @@ _INTENT_PATTERNS = {
         r"\bsatisfaction(?:\s+(?:score|rating))?\b.{0,80}\b(set|update|change)\b",
     ],
     INTENT_RECORD_TRANSACTION: [
-        r"\b(i\s+)?(bought|purchased|spent|paid|ordered|got)\b",
+        r"\b(i\s+)?(bought|purchased|ordered)\b",
+        r"\bi\s+got\b(?:(?:.{0,40}\bfor\b)|(?:.{0,40}\bat\b)|(?:.{0,40}\bfrom\b))",
+        r"\bi\s+spent\b(?:(?:\s+\$[\d,]+(?:\.\d{1,2})?)|(?:.{0,40}\bon\b)|(?:.{0,40}\bat\b))",
+        r"\bi\s+paid\b(?:(?:\s+\$[\d,]+(?:\.\d{1,2})?)|(?:.{0,40}\bfor\b)|(?:.{0,40}\bat\b))",
         r"\b(add|log|record|track)\b.{0,20}\b(transaction|purchase|expense|spend)\b",
     ],
     INTENT_SMALLTALK: [
@@ -80,7 +83,8 @@ _INTENT_PATTERNS = {
         r"\bkey points?\b",
     ],
     INTENT_EDIT: [
-        r"\b(edit|rewrite|rephrase|fix|improve|update|change|shorten|expand|polish)\b",
+        r"\b(edit|rewrite|rephrase|shorten|expand|polish)\b",
+        r"\b(?:fix|improve|update|change)\b.{0,20}\b(?:this|it|the (?:text|message|response|draft|paragraph|sentence|reply))\b",
         r"\bmake this\b",
     ],
     INTENT_RECOMMEND: [

@@ -151,6 +151,7 @@ class ConversationMessagesTests(TestCase):
         self.client = APIClient()
         self.user = User.objects.create_user(username="seed_user_0", password="testpass")
         self.client.force_authenticate(user=self.user)
+        self.fixed_now = timezone.make_aware(datetime(2026, 3, 28, 12, 0, 0))
 
         merchant = Merchant.objects.create(name="YouTube Premium")
         Transaction.objects.create(
@@ -159,7 +160,7 @@ class ConversationMessagesTests(TestCase):
             amount=Decimal("13.99"),
             currency="USD",
             direction=TransactionDirection.SPEND,
-            occurred_at=timezone.now(),
+            occurred_at=self.fixed_now,
             category=TransactionCategory.SUBSCRIPTIONS,
             description_raw="YOUTUBE",
         )
@@ -337,8 +338,50 @@ class ConversationMessagesTests(TestCase):
             "Can you help me optimize spending?",
         )
         self.assertEqual(payload["user_facts"][0]["key"], "budget_focus")
+        self.assertIsNone(payload["purchase_advisor_report"])
         self.assertEqual(payload["spending"]["summary"]["spend_last_30_days"], 13.99)
         self.assertEqual(payload["spending"]["summary"]["active_subscription_monthly_commitment"], 13.99)
+
+    @patch("ai.views.requests.post")
+    @override_settings(OPENAI_API_KEY="test-key", OPENAI_MODEL="gpt-test-model")
+    def test_openai_payload_includes_purchase_advisor_report_when_enabled(self, mock_post):
+        self.user.preferences.create(
+            key="purchase_advisor_logic",
+            value_type="json",
+            value_json={"enabled": True, "lookback_days": 30, "overspending_ratio_threshold": 1.1},
+        )
+
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"response_style":"direct_answer",'
+                            '"message":"Here is a direct answer.",'
+                            '"follow_up_question":null,'
+                            '"disclaimer":null,'
+                            '"safe_bounds_acknowledged":true}'
+                        )
+                    }
+                }
+            ]
+        }
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/",
+            {"content": "Am I overspending on subscriptions right now?"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        request_json = mock_post.call_args.kwargs["json"]
+        payload = json.loads(request_json["messages"][1]["content"])
+
+        self.assertIsNotNone(payload["purchase_advisor_report"])
+        self.assertEqual(payload["purchase_advisor_report"]["status"], "ready")
 
     def test_messages_post_extracts_stated_monthly_income_into_memory(self):
         response = self.client.post(
@@ -357,6 +400,50 @@ class ConversationMessagesTests(TestCase):
         )
         self.assertEqual(memory_item.memory_kind, "fact")
         self.assertIn("monthly income", memory_item.summary_text.lower())
+
+    def test_spending_advice_question_does_not_route_to_transaction_entry(self):
+        response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/",
+            {"content": "I spent too much this month, what should I do?"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        assistant_message = response.data["assistant_message"]
+        self.assertEqual(
+            assistant_message["metadata_json"]["intent_detection"]["intent"],
+            "recommend",
+        )
+        self.assertEqual(
+            assistant_message["metadata_json"]["response_style"],
+            "ranked_recommendations",
+        )
+        self.assertNotEqual(
+            assistant_message["metadata_json"]["response_style"],
+            "navigation_options",
+        )
+        self.assertNotIn(
+            "Choose where you want to update your data",
+            assistant_message["content"],
+        )
+
+    def test_change_question_stays_on_ask_path(self):
+        response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/",
+            {"content": "How will my subscription bill change next month?"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        assistant_message = response.data["assistant_message"]
+        self.assertEqual(
+            assistant_message["metadata_json"]["intent_detection"]["intent"],
+            "ask",
+        )
+        self.assertEqual(
+            assistant_message["metadata_json"]["response_style"],
+            "direct_answer",
+        )
 
     @patch("ai.views.requests.post")
     @override_settings(OPENAI_API_KEY="test-key")
@@ -615,6 +702,26 @@ class IntentClassificationTests(TestCase):
             "ask",
         )
 
+    def test_classify_intent_does_not_treat_change_questions_as_edit_requests(self):
+        self.assertEqual(
+            classify_intent("How will my subscription bill change next month?")["intent"],
+            "ask",
+        )
+        self.assertEqual(
+            classify_intent("Can you update me on my spending?")["intent"],
+            "ask",
+        )
+
+    def test_classify_intent_does_not_treat_advice_questions_as_transaction_logging(self):
+        self.assertEqual(
+            classify_intent("I spent too much this month, what should I do?")["intent"],
+            "recommend",
+        )
+        self.assertEqual(
+            classify_intent("I paid off my debt yesterday, what next?")["intent"],
+            "ask",
+        )
+
     def test_classify_intent_marks_smalltalk_variant(self):
         intent = classify_intent("thanks")
 
@@ -778,6 +885,34 @@ class SatisfactionUpdateFlowTests(TestCase):
         self.assertEqual(
             self.conversation.session_state_json["pinned_transaction_id"],
             self.starbucks_purchase.id,
+        )
+
+    def test_action_only_confirm_does_not_pollute_memory_or_last_user_message(self):
+        self._post_message("Set satisfaction for Starbucks to 8")
+
+        confirm_response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/",
+            {"action_payload": {"kind": "confirm_pending_action"}},
+            format="json",
+        )
+
+        self.assertEqual(confirm_response.status_code, 201)
+        self.assertEqual(confirm_response.data["user_message"]["content"], "")
+        self.starbucks_purchase.refresh_from_db()
+        self.assertEqual(self.starbucks_purchase.satisfaction_rating, 8)
+
+        self.conversation.refresh_from_db()
+        self.assertEqual(
+            self.conversation.session_state_json["last_user_message"],
+            "Set satisfaction for Starbucks to 8",
+        )
+        self.assertEqual(
+            self.conversation.session_state_json["active_goal"],
+            "transaction_feedback",
+        )
+        self.assertEqual(
+            ConversationMemoryItem.objects.filter(user=self.user).count(),
+            0,
         )
 
     def test_cancel_clears_pending_state_without_mutating(self):
