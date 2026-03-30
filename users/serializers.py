@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from ai.purchase_advisor import ADVISOR_CATEGORIES
+
 from .models import (
     UserRawExplicit,
     UserRawInferred,
@@ -125,6 +127,7 @@ class UserPreferenceSerializer(serializers.ModelSerializer):
         return data
 
     def validate(self, attrs):
+        key = attrs.get("key", getattr(self.instance, "key", None))
         value_type = attrs.get("value_type", getattr(self.instance, "value_type", None))
         raw_value = attrs.get("value", None)
 
@@ -153,6 +156,35 @@ class UserPreferenceSerializer(serializers.ModelSerializer):
 
         else:
             raise serializers.ValidationError({"value_type": "Invalid value_type."})
+
+        if key == "purchase_advisor_logic":
+            if value_type != PreferenceValueType.JSON or not isinstance(raw_value, dict):
+                raise serializers.ValidationError({
+                    "value": "purchase_advisor_logic must be a JSON object with advisor settings.",
+                })
+            if "enabled" not in raw_value or not isinstance(raw_value["enabled"], bool):
+                raise serializers.ValidationError({"value": "purchase_advisor_logic.enabled must be a boolean."})
+            if "lookback_days" in raw_value and (not isinstance(raw_value["lookback_days"], int) or raw_value["lookback_days"] < 1):
+                raise serializers.ValidationError({"value": "purchase_advisor_logic.lookback_days must be a positive integer."})
+            if "overspending_ratio_threshold" in raw_value and (
+                isinstance(raw_value["overspending_ratio_threshold"], bool)
+                or not isinstance(raw_value["overspending_ratio_threshold"], (int, float))
+                or raw_value["overspending_ratio_threshold"] <= 0
+            ):
+                raise serializers.ValidationError({
+                    "value": "purchase_advisor_logic.overspending_ratio_threshold must be a positive number.",
+                })
+            if "focus_categories" in raw_value:
+                if not isinstance(raw_value["focus_categories"], list):
+                    raise serializers.ValidationError({"value": "purchase_advisor_logic.focus_categories must be an array."})
+                invalid_categories = [
+                    category for category in raw_value["focus_categories"]
+                    if not isinstance(category, str) or category not in ADVISOR_CATEGORIES
+                ]
+                if invalid_categories:
+                    raise serializers.ValidationError({
+                        "value": f"purchase_advisor_logic.focus_categories contains unsupported categories: {invalid_categories}.",
+                    })
 
         # store into model field
         attrs["value_json"] = raw_value
