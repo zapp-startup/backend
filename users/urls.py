@@ -1,6 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
+from .security_views import AuthAssuranceView
 from .views import (
     SupabaseUserSyncView,
     UserRawExplicitViewSet,
@@ -18,5 +19,6 @@ router.register(r"preferences", UserPreferenceViewSet, basename="preferences")
 
 urlpatterns = [
     path("auth/sync/", SupabaseUserSyncView.as_view(), name="supabase-user-sync"),
+    path("security/auth-assurance/", AuthAssuranceView.as_view(), name="auth-assurance"),
     path("", include(router.urls)),
 ]

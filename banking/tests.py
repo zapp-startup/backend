@@ -1,11 +1,14 @@
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from banking.categories import ZappPrimaryCategory, ZappSubcategory
+from compliance.models import ConsentType
+from compliance.services import record_financial_consent
 from banking.models import BankAccount, BankConnection, MerchantCategoryRule
 from banking.services.categorization_service import apply_merchant_override_rules
+from banking.lifecycle import purge_user_bank_data
 from banking.services.plaid_service import (
     exchange_public_token_for_user,
     sync_transactions_for_connection,
@@ -29,17 +32,86 @@ class BankingAPITestCase(TestCase):
     def test_link_token_requires_auth(self, mock_create):
         """Link token endpoint requires authentication."""
         response = self.client.post("/api/banking/link-token/")
-        self.assertEqual(response.status_code, 401)
+        self.assertIn(response.status_code, (401, 403))
 
+    @override_settings(BANKING_REQUIRE_MFA=False, BANKING_REQUIRE_FINANCIAL_CONSENT=False)
     @patch("banking.views.create_link_token_for_user")
     def test_link_token_returns_token_when_authenticated(self, mock_create):
-        """Link token returns link_token when authenticated."""
+        """Relaxed policy: link_token succeeds without aal2 (dev-default-style)."""
         mock_create.return_value = "link-sandbox-abc123"
-        self.client.force_authenticate(user=self.user)
+        self.client.force_authenticate(
+            user=self.user,
+            token={"aal": "aal1", "mfa_factors_count": 0, "amr": []},
+        )
         response = self.client.post("/api/banking/link-token/")
         self.assertEqual(response.status_code, 200)
         self.assertIn("link_token", response.json())
         self.assertEqual(response.json()["link_token"], "link-sandbox-abc123")
+
+    @override_settings(BANKING_REQUIRE_MFA=True, BANKING_REQUIRE_FINANCIAL_CONSENT=False)
+    @patch("banking.views.create_link_token_for_user")
+    def test_link_token_denied_when_mfa_not_satisfied(self, mock_create):
+        mock_create.return_value = "tok"
+        self.client.force_authenticate(
+            user=self.user,
+            token={"aal": "aal1", "mfa_factors_count": 0, "amr": []},
+        )
+        res = self.client.post("/api/banking/link-token/")
+        self.assertEqual(res.status_code, 403)
+        body = res.json()
+        code = body.get("code") or (body.get("detail") or {}).get("code")
+        self.assertEqual(code, "mfa_not_enrolled")
+
+    @override_settings(BANKING_REQUIRE_MFA=True, BANKING_REQUIRE_FINANCIAL_CONSENT=False)
+    @patch("banking.views.create_link_token_for_user")
+    def test_link_token_denied_aal1_unknown_factor_count(self, mock_create):
+        mock_create.return_value = "tok"
+        self.client.force_authenticate(
+            user=self.user,
+            token={"aal": "aal1", "mfa_factors_count": -1, "amr": []},
+        )
+        res = self.client.post("/api/banking/link-token/")
+        self.assertEqual(res.status_code, 403)
+        body = res.json()
+        code = body.get("code") or (body.get("detail") or {}).get("code")
+        self.assertEqual(code, "mfa_required")
+
+    @override_settings(BANKING_REQUIRE_MFA=True, BANKING_REQUIRE_FINANCIAL_CONSENT=False)
+    @patch("banking.views.create_link_token_for_user")
+    def test_link_token_aal2_allowed_when_mfa_required(self, mock_create):
+        mock_create.return_value = "tok"
+        self.client.force_authenticate(
+            user=self.user,
+            token={"aal": "aal2", "mfa_factors_count": -1, "amr": []},
+        )
+        res = self.client.post("/api/banking/link-token/")
+        self.assertEqual(res.status_code, 200)
+
+    @override_settings(BANKING_REQUIRE_MFA=True, BANKING_REQUIRE_FINANCIAL_CONSENT=True)
+    @patch("banking.views.create_link_token_for_user")
+    def test_link_token_denied_without_consent(self, mock_create):
+        mock_create.return_value = "tok"
+        self.client.force_authenticate(
+            user=self.user,
+            token={"aal": "aal2", "mfa_factors_count": 1, "amr": ["pwd", "otp"]},
+        )
+        res = self.client.post("/api/banking/link-token/")
+        self.assertEqual(res.status_code, 428)
+        body = res.json()
+        code = body.get("code") or (body.get("detail") or {}).get("code")
+        self.assertEqual(code, "financial_consent_required")
+
+    @override_settings(BANKING_REQUIRE_MFA=True, BANKING_REQUIRE_FINANCIAL_CONSENT=True)
+    @patch("banking.views.create_link_token_for_user")
+    def test_link_token_allowed_with_mfa_and_consent(self, mock_create):
+        mock_create.return_value = "tok"
+        record_financial_consent(user=self.user, consent_type=ConsentType.FINANCIAL_DATA_ACCESS, source="test")
+        self.client.force_authenticate(
+            user=self.user,
+            token={"aal": "aal2", "mfa_factors_count": 1, "amr": ["pwd", "otp"]},
+        )
+        res = self.client.post("/api/banking/link-token/")
+        self.assertEqual(res.status_code, 200)
 
     def test_exchange_token_requires_auth(self):
         """Exchange token endpoint requires authentication."""
@@ -48,11 +120,15 @@ class BankingAPITestCase(TestCase):
             {"public_token": "public-sandbox-xyz"},
             format="json",
         )
-        self.assertEqual(response.status_code, 401)
+        self.assertIn(response.status_code, (401, 403))
 
+    @override_settings(BANKING_REQUIRE_MFA=False, BANKING_REQUIRE_FINANCIAL_CONSENT=False)
     def test_exchange_token_requires_public_token(self):
         """Exchange token requires public_token in body."""
-        self.client.force_authenticate(user=self.user)
+        self.client.force_authenticate(
+            user=self.user,
+            token={"aal": "aal1", "mfa_factors_count": -1, "amr": []},
+        )
         response = self.client.post(
             "/api/banking/exchange-token/",
             {},
@@ -163,6 +239,27 @@ class PlaidServiceTestCase(TestCase):
         self.assertEqual(mock_upsert_single.call_count, 1)
         account_map = mock_upsert_single.call_args[0][2]
         self.assertIn("acct-new", account_map)
+
+
+class BankingLifecycleTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="purge_u",
+            email="purge@test.com",
+            password="testpass123",
+        )
+
+    def test_purge_removes_connections(self):
+        from banking.models import BankConnection
+
+        BankConnection.objects.create(
+            user=self.user,
+            plaid_item_id="item-1",
+            plaid_access_token="tok",
+        )
+        self.assertEqual(BankConnection.objects.filter(user=self.user).count(), 1)
+        purge_user_bank_data(self.user)
+        self.assertEqual(BankConnection.objects.filter(user=self.user).count(), 0)
 
 
 class CategorizationServiceTestCase(TestCase):

@@ -28,7 +28,8 @@ class BankConnection(models.Model):
         related_name="bank_connections",
     )
     plaid_item_id = models.CharField(max_length=64, unique=True, db_index=True)
-    plaid_access_token = models.CharField(max_length=512)
+    # Encrypted-at-app-layer tokens may exceed 512 chars; never expose via API.
+    plaid_access_token = models.TextField()
     institution_id = models.CharField(max_length=64, blank=True, db_index=True)
     institution_name = models.CharField(max_length=256, blank=True)
     status = models.CharField(

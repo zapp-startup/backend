@@ -22,6 +22,7 @@ from plaid.model.transactions_sync_request import TransactionsSyncRequest
 
 from banking.models import BankAccount, BankConnection, BankTransaction
 from banking.services.categorization_service import run_categorization_on_transaction
+from banking.token_storage import encrypt_plaid_access_token, get_plaid_access_token_for_api
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,7 @@ def exchange_public_token_for_user(user, public_token: str) -> BankConnection:
         connection = BankConnection.objects.create(
             user=user,
             plaid_item_id=item_id,
-            plaid_access_token=access_token,
+            plaid_access_token=encrypt_plaid_access_token(access_token),
             institution_id=institution_id,
             institution_name=institution_name,
             status=BankConnection.Status.ACTIVE,
@@ -161,7 +162,7 @@ def exchange_public_token_for_user(user, public_token: str) -> BankConnection:
 def fetch_accounts_for_connection(connection: BankConnection) -> list[BankAccount]:
     """Fetch accounts from Plaid and upsert into DB."""
     client = _get_plaid_client()
-    request = AccountsGetRequest(access_token=connection.plaid_access_token)
+    request = AccountsGetRequest(access_token=get_plaid_access_token_for_api(connection))
     response = _to_dict(client.accounts_get(request))
     accounts_data = response.get("accounts", [])
 
@@ -228,7 +229,7 @@ def sync_transactions_for_connection(
 
     while True:
         request = TransactionsSyncRequest(
-            access_token=connection.plaid_access_token,
+            access_token=get_plaid_access_token_for_api(connection),
             cursor=current_cursor or "",  # Plaid requires str, not None
         )
         response = _to_dict(client.transactions_sync(request))

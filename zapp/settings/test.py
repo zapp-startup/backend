@@ -1,5 +1,7 @@
-from .base import *
-
+"""
+Test settings: in-memory SQLite (no Postgres/SSL) for CI and local `manage.py test`.
+"""
+from .development import *
 
 DEBUG = False
 ALLOWED_HOSTS = ["testserver", "localhost", "127.0.0.1"]
@@ -7,7 +9,7 @@ ALLOWED_HOSTS = ["testserver", "localhost", "127.0.0.1"]
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "test.sqlite3",
+        "NAME": ":memory:",
     }
 }
 

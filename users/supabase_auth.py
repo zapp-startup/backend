@@ -101,6 +101,38 @@ def _is_email_verified(data: dict | None) -> bool:
     return bool(data.get("email_confirmed_at"))
 
 
+def _extract_aal(payload: dict | None, user_data: dict | None) -> str | None:
+    """Supabase JWT may include Authenticator Assurance Level (aal1 / aal2)."""
+    if payload and payload.get("aal"):
+        return str(payload["aal"]).lower()
+    if user_data and user_data.get("aal"):
+        return str(user_data["aal"]).lower()
+    return None
+
+
+def _extract_amr(payload: dict | None, user_data: dict | None) -> list:
+    """Authentication methods references; list of strings when present."""
+    for src in (payload, user_data):
+        if not src:
+            continue
+        amr = src.get("amr")
+        if isinstance(amr, list):
+            return [str(x) for x in amr]
+    return []
+
+
+def _count_mfa_factors(user_data: dict | None) -> int:
+    """Number of enrolled MFA factors from /auth/v1/user when available."""
+    if not user_data:
+        return -1
+    factors = user_data.get("factors")
+    if factors is None:
+        return -1
+    if isinstance(factors, list):
+        return len(factors)
+    return -1
+
+
 def _extract_subject(payload: dict | None, user_data: dict | None) -> str | None:
     if payload and payload.get("sub"):
         return str(payload["sub"])
@@ -401,5 +433,8 @@ class SupabaseJWTAuthentication(BaseAuthentication):
         auth_context = {
             "supabase_uid": str(sub),
             "email": email,
+            "aal": _extract_aal(payload, user_data),
+            "amr": _extract_amr(payload, user_data),
+            "mfa_factors_count": _count_mfa_factors(user_data),
         }
         return (user, auth_context)
