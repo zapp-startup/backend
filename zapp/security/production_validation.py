@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import sys
+from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 
@@ -46,6 +47,16 @@ def validate_production_security():
         errors.append("ALLOWED_HOSTS must be set in production.")
     if any(host in {"localhost", "127.0.0.1", "your-production-domain.com"} for host in allowed_hosts):
         errors.append("ALLOWED_HOSTS must not contain localhost or placeholder hostnames in production.")
+
+    for setting_name in ("PLAID_WEBHOOK_URL", "PLAID_REDIRECT_URI"):
+        value = (getattr(settings, setting_name, "") or "").strip()
+        if not value:
+            continue
+        parsed = urlparse(value)
+        if parsed.scheme.lower() != "https":
+            errors.append(f"{setting_name} must use https:// in production when set.")
+        if parsed.hostname in {"localhost", "127.0.0.1"}:
+            errors.append(f"{setting_name} must not point to localhost in production.")
 
     plaid_token_key = (getattr(settings, "PLAID_TOKEN_ENCRYPTION_KEY", "") or "").strip()
     if not plaid_token_key:

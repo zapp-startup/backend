@@ -46,8 +46,18 @@ Consent validity ties to `PRIVACY_POLICY_VERSION` — users must re-consent when
 | SSL redirect, secure cookies, HSTS | `zapp/settings/production.py` | Infra screenshot: TLS 1.2+ at load balancer |
 | Startup validation | `zapp/security/production_validation.py` | Failed deploy logs if misconfigured |
 | Proxy header | `SECURE_PROXY_SSL_HEADER` | Nginx/ALB config sets `X-Forwarded-Proto: https` |
+| Frontend production URL validation | `frontend/src/config/apiEnv.ts`, `frontend/src/api/client.ts`, `frontend/src/api/ai.api.ts`, `frontend/src/api/supabaseClient.ts` | Production build/runtime error if API or Supabase URLs are not HTTPS |
+
+Questionnaire item 12 ("encrypt data-in-transit between clients and servers using TLS 1.2 or better") maps to this control. Answer **Yes** only when:
+
+- frontend hosting serves the app over HTTPS;
+- the public API domain terminates TLS 1.2+ at the managed edge/load balancer;
+- browser-to-Supabase traffic uses the hosted `https://<project-ref>.supabase.co` origin; and
+- production `VITE_API_URL` / `VITE_SUPABASE_URL` point only to HTTPS origins.
 
 **Manual:** TLS certificates, cipher suites, and penetration test of TLS — outside app code.
+
+**Evidence set:** managed-hosting or load-balancer TLS policy screenshot, browser network screenshot showing only `https://` requests to app/API/Supabase, and one external TLS scan or platform TLS settings export.
 
 ---
 
@@ -56,8 +66,11 @@ Consent validity ties to `PRIVACY_POLICY_VERSION` — users must re-consent when
 | Item | Location | Evidence |
 |------|----------|----------|
 | Tokens never in serializers | `banking/serializers.py` | Code review |
-| Optional Fernet encryption | `banking/token_storage.py`, `PLAID_TOKEN_ENCRYPTION_KEY` | Env in prod; decrypt path in tests |
+| Fernet encryption at rest | `banking/token_storage.py`, `PLAID_TOKEN_ENCRYPTION_KEY` | Env in prod; decrypt path in tests |
+| Legacy token backfill | `python manage.py encrypt_plaid_access_tokens` | Command output showing plaintext rows upgraded |
 | Admin hides token | `banking/admin.py` | Django admin screenshot |
+
+Production expectation: Plaid access tokens are stored encrypted at the app layer, never returned by serializers, and existing plaintext legacy rows are backfilled with `encrypt_plaid_access_tokens`.
 
 **Manual:** Supabase/Postgres encryption at rest, disk encryption, backups — provider-managed.
 
