@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import ConsentType
+from .serializers import AuditEventIngestSerializer
 from .throttles import ComplianceConsentThrottle
 from .services import current_policy_version, record_financial_consent, user_has_valid_financial_consent
 
@@ -80,3 +81,19 @@ class RecordFinancialConsentView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class AuditEventIngestView(APIView):
+    """
+    Persist frontend-emitted audit events.
+    Trust-sensitive identity fields are derived from the authenticated request,
+    not the client payload.
+    """
+
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = AuditEventIngestSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(status=status.HTTP_201_CREATED)
