@@ -16,6 +16,7 @@ class FeedbackCandidatesTestCase(TestCase):
 
     def setUp(self):
         self.user = User.objects.create_user(
+            username="test-user",
             email="test@example.com",
             password="testpass123",
         )
@@ -64,7 +65,7 @@ class FeedbackCandidatesTestCase(TestCase):
 
     def test_feedback_candidates_returns_only_user_transactions(self):
         """Only the requesting user's transactions are considered."""
-        other = User.objects.create_user(email="other@example.com", password="x")
+        other = User.objects.create_user(username="other-user", email="other@example.com", password="x")
         Transaction.objects.create(
             user=other,
             direction="spend",
