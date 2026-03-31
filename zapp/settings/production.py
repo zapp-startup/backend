@@ -1,7 +1,7 @@
 from .base import *
 
 DEBUG = False
-ALLOWED_HOSTS = ["your-production-domain.com"]  # update later
+# ALLOWED_HOSTS is inherited from base and must be provided via env (comma-separated).
 
 # Disable server-side cursors for Supabase/PgBouncer transaction pooler
 DATABASES["default"]["DISABLE_SERVER_SIDE_CURSORS"] = True

@@ -2,7 +2,7 @@ from .base import *
 from .banking_env import env_bool
 
 DEBUG = True
-ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+ALLOWED_HOSTS = ALLOWED_HOSTS or ["127.0.0.1", "localhost"]
 
 # Banking: relaxed defaults for local dev. Set in .env to mirror production when testing Plaid:
 #   BANKING_REQUIRE_MFA=true

@@ -7,6 +7,8 @@ from __future__ import annotations
 import os
 import sys
 
+from cryptography.fernet import Fernet
+
 
 def validate_production_security():
     """
@@ -38,6 +40,21 @@ def validate_production_security():
             "SECURE_PROXY_SSL_HEADER should be set when TLS terminates at a load balancer "
             "(e.g. ('HTTP_X_FORWARDED_PROTO', 'https'))."
         )
+
+    allowed_hosts = [str(host).strip() for host in getattr(settings, "ALLOWED_HOSTS", []) if str(host).strip()]
+    if not allowed_hosts:
+        errors.append("ALLOWED_HOSTS must be set in production.")
+    if any(host in {"localhost", "127.0.0.1", "your-production-domain.com"} for host in allowed_hosts):
+        errors.append("ALLOWED_HOSTS must not contain localhost or placeholder hostnames in production.")
+
+    plaid_token_key = (getattr(settings, "PLAID_TOKEN_ENCRYPTION_KEY", "") or "").strip()
+    if not plaid_token_key:
+        errors.append("PLAID_TOKEN_ENCRYPTION_KEY must be set in production.")
+    else:
+        try:
+            Fernet(plaid_token_key.encode("ascii"))
+        except Exception:
+            errors.append("PLAID_TOKEN_ENCRYPTION_KEY must be a valid Fernet key in production.")
 
     if errors:
         msg = "Production security validation failed:\n" + "\n".join(f" - {e}" for e in errors)

@@ -105,8 +105,8 @@ Secrets, raw Plaid payloads, and full account numbers are **not** logged.
 
 | Item | Location | Evidence |
 |------|----------|----------|
-| Dependabot | `.github/dependabot.yml` | GitHub Security tab |
-| CI | `.github/workflows/ci.yml` | Green workflow run |
+| Targeted automated tests | `users/tests_auth_assurance.py`, `compliance/tests.py`, `banking/tests.py`, frontend Vitest suites | Local test run output or external CI |
+| CI / dependency scanning | Not repo-confirmed in the current repos | External CI/security evidence if present |
 
 **Manual:** SAST/DAST, pen test, Plaid security questionnaire final submission.
 

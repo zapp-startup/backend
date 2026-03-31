@@ -27,6 +27,12 @@ def _clean_env_url(value: str | None) -> str | None:
     return value.strip().strip("'\"")
 
 
+def _split_env_csv(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
@@ -37,7 +43,7 @@ if not SECRET_KEY:
 
 # SECURITY WARNING: don't run with debug turned on in production!
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = _split_env_csv(os.getenv("ALLOWED_HOSTS"))
 AUTH_USER_MODEL = "users.User"
 
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip() or None
