@@ -49,6 +49,49 @@ def _json_safe(obj: Any) -> Any:
     return obj
 
 
+def _minimize_account_payload(account_payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    Keep only low-sensitivity troubleshooting fields in raw_payload.
+    Balances, names, masks, and account IDs are already stored in first-class columns.
+    """
+    allowed_keys = {
+        "account_id",
+        "persistent_account_id",
+        "verification_status",
+        "balances",
+        "type",
+        "subtype",
+    }
+    return {
+        key: _json_safe(value)
+        for key, value in account_payload.items()
+        if key in allowed_keys
+    }
+
+
+def _minimize_transaction_payload(transaction_payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    Drop high-volume or overly sensitive Plaid response fields not needed by the app.
+    Core user-visible values are stored in first-class columns.
+    """
+    allowed_keys = {
+        "transaction_id",
+        "account_id",
+        "authorized_date",
+        "date",
+        "pending",
+        "payment_channel",
+        "personal_finance_category",
+        "transaction_code",
+        "transaction_type",
+    }
+    return {
+        key: _json_safe(value)
+        for key, value in transaction_payload.items()
+        if key in allowed_keys
+    }
+
+
 # Environment mapping for Plaid host (SDK has Sandbox and Production only)
 PLAID_ENV_MAP = {
     "sandbox": plaid.Environment.Sandbox,
@@ -205,7 +248,7 @@ def upsert_accounts_from_plaid(
                 "iso_currency_code": (
                     (acc.get("balances") or {}).get("iso_currency_code") or "USD"
                 ),
-                "raw_payload": _json_safe(acc),
+                "raw_payload": _minimize_account_payload(acc),
             },
         )
         result.append(account)
@@ -347,7 +390,7 @@ def _upsert_single_transaction(
             "removed": False,
             "category_primary": category_primary,
             "category_detailed": category_detailed,
-            "raw_payload": _json_safe(txn),
+            "raw_payload": _minimize_transaction_payload(txn),
         },
     )
     # Run Zapp categorization (merchant overrides, Plaid->Zapp mapping)

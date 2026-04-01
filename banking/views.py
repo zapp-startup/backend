@@ -102,6 +102,7 @@ class BankConnectionsView(APIView):
     throttle_classes = [BankingSensitiveThrottle]
 
     def get(self, request):
+        enforce_banking_policies(request)
         connections = BankConnection.objects.filter(user=request.user).order_by(
             "-created_at"
         )
@@ -118,6 +119,7 @@ class BankAccountsView(APIView):
     throttle_classes = [BankingSensitiveThrottle]
 
     def get(self, request):
+        enforce_banking_policies(request)
         accounts = BankAccount.objects.filter(
             connection__user=request.user
         ).select_related("connection")
@@ -135,6 +137,7 @@ class BankTransactionsView(APIView):
     throttle_classes = [BankingSensitiveThrottle]
 
     def get(self, request):
+        enforce_banking_policies(request)
         qs = (
             BankTransaction.objects.filter(user=request.user)
             .select_related("account", "connection")
@@ -183,6 +186,7 @@ class ManualSyncView(APIView):
     throttle_classes = [BankingSensitiveThrottle]
 
     def post(self, request, connection_id):
+        enforce_banking_policies(request)
         try:
             connection = BankConnection.objects.get(
                 id=connection_id,

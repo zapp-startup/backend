@@ -141,6 +141,34 @@ class BankingAPITestCase(TestCase):
         )
         self.assertEqual(response.status_code, 400)
 
+    @override_settings(BANKING_REQUIRE_MFA=True, BANKING_REQUIRE_FINANCIAL_CONSENT=False)
+    def test_transactions_denied_when_mfa_not_satisfied(self):
+        self.client.force_authenticate(
+            user=self.user,
+            token={"aal": "aal1", "mfa_factors_count": 0, "amr": []},
+        )
+        response = self.client.get("/api/banking/transactions/")
+        self.assertEqual(response.status_code, 403)
+        body = response.json()
+        code = body.get("code") or (body.get("detail") or {}).get("code")
+        self.assertEqual(code, "mfa_not_enrolled")
+
+    @override_settings(BANKING_REQUIRE_MFA=True, BANKING_REQUIRE_FINANCIAL_CONSENT=False)
+    @patch("banking.views.sync_transactions_for_connection")
+    def test_manual_sync_denied_when_mfa_not_satisfied(self, mock_sync):
+        connection = BankConnection.objects.create(
+            user=self.user,
+            plaid_item_id="item-manual-sync",
+            plaid_access_token="access-token",
+        )
+        self.client.force_authenticate(
+            user=self.user,
+            token={"aal": "aal1", "mfa_factors_count": 0, "amr": []},
+        )
+        response = self.client.post(f"/api/banking/connections/{connection.id}/sync/")
+        self.assertEqual(response.status_code, 403)
+        mock_sync.assert_not_called()
+
 
 class PlaidServiceTestCase(TestCase):
     def setUp(self):
@@ -149,6 +177,80 @@ class PlaidServiceTestCase(TestCase):
             email="plaid@test.com",
             password="testpass123",
         )
+
+    def test_upsert_accounts_minimizes_stored_raw_payload(self):
+        connection = BankConnection.objects.create(
+            user=self.user,
+            plaid_item_id="item-accounts-raw",
+            plaid_access_token="access-token",
+        )
+
+        from banking.services.plaid_service import upsert_accounts_from_plaid
+
+        accounts = upsert_accounts_from_plaid(
+            connection,
+            [
+                {
+                    "account_id": "acct-1",
+                    "name": "Primary Checking",
+                    "official_name": "Primary Checking",
+                    "mask": "1234",
+                    "type": "depository",
+                    "subtype": "checking",
+                    "balances": {"current": 12.34, "available": 11.11, "iso_currency_code": "USD"},
+                    "owners": [{"names": ["Sensitive Owner"]}],
+                    "verification_status": "automatically_verified",
+                }
+            ],
+        )
+
+        self.assertEqual(len(accounts), 1)
+        stored_payload = accounts[0].raw_payload
+        self.assertIn("account_id", stored_payload)
+        self.assertIn("verification_status", stored_payload)
+        self.assertNotIn("owners", stored_payload)
+        self.assertNotIn("name", stored_payload)
+
+    def test_upsert_transactions_minimizes_stored_raw_payload(self):
+        connection = BankConnection.objects.create(
+            user=self.user,
+            plaid_item_id="item-transactions-raw",
+            plaid_access_token="access-token",
+        )
+        account = BankAccount.objects.create(
+            connection=connection,
+            plaid_account_id="acct-1",
+            name="Checking",
+        )
+
+        upsert_transactions_from_plaid(
+            connection,
+            {
+                "added": [
+                    {
+                        "transaction_id": "txn-1",
+                        "account_id": account.plaid_account_id,
+                        "name": "Coffee Shop",
+                        "merchant_name": "Coffee Shop",
+                        "amount": 4.25,
+                        "date": "2026-03-20",
+                        "pending": False,
+                        "payment_channel": "in store",
+                        "location": {"address": "123 Main St"},
+                        "personal_finance_category": {"primary": "FOOD_AND_DRINK"},
+                    }
+                ],
+                "modified": [],
+                "removed": [],
+            },
+        )
+
+        txn = connection.transactions.get(plaid_transaction_id="txn-1")
+        self.assertIn("transaction_id", txn.raw_payload)
+        self.assertIn("payment_channel", txn.raw_payload)
+        self.assertIn("personal_finance_category", txn.raw_payload)
+        self.assertNotIn("location", txn.raw_payload)
+        self.assertNotIn("merchant_name", txn.raw_payload)
 
     @patch("banking.services.plaid_service.fetch_accounts_for_connection")
     @patch("banking.services.plaid_service._get_plaid_client")

@@ -209,6 +209,8 @@ BANKING_REQUIRE_FINANCIAL_CONSENT = os.getenv(
 # Optional Fernet key (urlsafe base64) for app-layer encryption of Plaid access tokens at rest.
 # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 PLAID_TOKEN_ENCRYPTION_KEY = os.getenv("PLAID_TOKEN_ENCRYPTION_KEY", "")
+# Optional rotation list. First key is used for new writes; remaining keys are accepted for decrypt.
+PLAID_TOKEN_ENCRYPTION_KEYS = os.getenv("PLAID_TOKEN_ENCRYPTION_KEYS", "")
 
 # Retention hints (operational; actual deletion uses management commands / legal process)
 BANKING_DATA_RETENTION_DAYS_AFTER_DISCONNECT = int(

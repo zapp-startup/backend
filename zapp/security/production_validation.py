@@ -58,14 +58,22 @@ def validate_production_security():
         if parsed.hostname in {"localhost", "127.0.0.1"}:
             errors.append(f"{setting_name} must not point to localhost in production.")
 
-    plaid_token_key = (getattr(settings, "PLAID_TOKEN_ENCRYPTION_KEY", "") or "").strip()
-    if not plaid_token_key:
-        errors.append("PLAID_TOKEN_ENCRYPTION_KEY must be set in production.")
+    plaid_token_keys_raw = (getattr(settings, "PLAID_TOKEN_ENCRYPTION_KEYS", "") or "").strip()
+    plaid_token_keys = [part.strip() for part in plaid_token_keys_raw.split(",") if part.strip()]
+    if not plaid_token_keys:
+        single_key = (getattr(settings, "PLAID_TOKEN_ENCRYPTION_KEY", "") or "").strip()
+        if single_key:
+            plaid_token_keys = [single_key]
+
+    if not plaid_token_keys:
+        errors.append("PLAID_TOKEN_ENCRYPTION_KEY or PLAID_TOKEN_ENCRYPTION_KEYS must be set in production.")
     else:
-        try:
-            Fernet(plaid_token_key.encode("ascii"))
-        except Exception:
-            errors.append("PLAID_TOKEN_ENCRYPTION_KEY must be a valid Fernet key in production.")
+        for key in plaid_token_keys:
+            try:
+                Fernet(key.encode("ascii"))
+            except Exception:
+                errors.append("All Plaid token encryption keys must be valid Fernet keys in production.")
+                break
 
     if errors:
         msg = "Production security validation failed:\n" + "\n".join(f" - {e}" for e in errors)

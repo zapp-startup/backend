@@ -37,6 +37,29 @@ class TokenStorageTests(TestCase):
             self.assertNotEqual(enc, raw)
             self.assertEqual(decrypt_plaid_access_token(enc), raw)
 
+    def test_rotation_keys_can_decrypt_legacy_ciphertext_and_rewrap_with_current_key(self):
+        from cryptography.fernet import Fernet
+
+        old_key = Fernet.generate_key().decode("ascii")
+        new_key = Fernet.generate_key().decode("ascii")
+        old_ciphertext = Fernet(old_key.encode("ascii")).encrypt(b"access-sandbox-rotated").decode("ascii")
+        connection = BankConnection.objects.create(
+            user=self.user,
+            plaid_item_id="item-rotated",
+            plaid_access_token=old_ciphertext,
+        )
+
+        with self.settings(PLAID_TOKEN_ENCRYPTION_KEYS=f"{new_key},{old_key}", PLAID_TOKEN_ENCRYPTION_KEY=""):
+            plaintext = get_plaid_access_token_for_api(connection)
+            self.assertEqual(plaintext, "access-sandbox-rotated")
+
+            connection.refresh_from_db()
+            self.assertNotEqual(connection.plaid_access_token, old_ciphertext)
+            self.assertEqual(
+                Fernet(new_key.encode("ascii")).decrypt(connection.plaid_access_token.encode("ascii")).decode("utf-8"),
+                "access-sandbox-rotated",
+            )
+
     def test_get_token_for_api_upgrades_legacy_plaintext_row_when_key_is_set(self):
         from cryptography.fernet import Fernet
 
