@@ -1,4 +1,0 @@
-{"msg": "AUTH_ENTRY", "data": {"token_len": 1430, "url_set": true, "iss_set": true, "anon_set": false}, "ts": 1773118912.962097}
-{"msg": "AUTH_V1_USER_FAILED", "data": {"error": "401 Client Error: Unauthorized for url: https://pteiutzqpskjiptkwacy.supabase.co/auth/v1/user", "anon_key_set": false}, "ts": 1773118913.169915}
-{"msg": "AUTH_ENTRY", "data": {"token_len": 1430, "url_set": true, "iss_set": true, "anon_set": false}, "ts": 1773118916.134351}
-{"msg": "AUTH_V1_USER_FAILED", "data": {"error": "401 Client Error: Unauthorized for url: https://pteiutzqpskjiptkwacy.supabase.co/auth/v1/user", "anon_key_set": false}, "ts": 1773118916.203455}

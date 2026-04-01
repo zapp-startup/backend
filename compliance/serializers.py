@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from .models import AuditEvent
+from zapp.security.data_encryption import redact_error_message, redact_sensitive_value
 
 
 class AuditEventIngestSerializer(serializers.Serializer):
@@ -26,7 +27,7 @@ class AuditEventIngestSerializer(serializers.Serializer):
 
     def _request_metadata(self) -> dict:
         request = self.context["request"]
-        meta = dict(self.validated_data.get("metadata") or {})
+        meta = dict(redact_sensitive_value(self.validated_data.get("metadata") or {}))
         xff = request.META.get("HTTP_X_FORWARDED_FOR")
         source_ip = (xff.split(",")[0].strip() if xff else request.META.get("REMOTE_ADDR")) or None
         user_agent = (request.META.get("HTTP_USER_AGENT") or "").strip()[:512] or None
@@ -56,6 +57,6 @@ class AuditEventIngestSerializer(serializers.Serializer):
             method=(validated_data.get("method", "") or "").upper(),
             status_code=validated_data.get("status_code"),
             error_code=validated_data.get("error_code", ""),
-            error_message=validated_data.get("error_message", ""),
+            error_message=redact_error_message(validated_data.get("error_message", "")),
             metadata=self._request_metadata(),
         )

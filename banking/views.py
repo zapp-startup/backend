@@ -1,6 +1,7 @@
 import logging
 
 from rest_framework import status
+from rest_framework.authentication import SessionAuthentication
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -29,6 +30,7 @@ class LinkTokenView(APIView):
     Frontend uses this to initialize Plaid Link.
     """
 
+    authentication_classes = [SessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingLinkTokenThrottle]
 
@@ -41,9 +43,13 @@ class LinkTokenView(APIView):
                 request.user.pk,
             )
             return Response({"link_token": link_token})
-        except ValueError as e:
+        except ValueError:
+            logger.exception(
+                "banking_link_token_failed user_id=%s",
+                request.user.pk,
+            )
             return Response(
-                {"error": str(e)},
+                {"error": "Failed to create link token"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
         except Exception:
@@ -60,6 +66,7 @@ class ExchangePublicTokenView(APIView):
     Requires authentication.
     """
 
+    authentication_classes = [SessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
@@ -85,10 +92,10 @@ class ExchangePublicTokenView(APIView):
                 },
                 status=status.HTTP_201_CREATED,
             )
-        except Exception as e:
+        except Exception:
             logger.exception("Plaid token exchange failed")
             return Response(
-                {"error": "Failed to exchange token", "detail": str(e)},
+                {"error": "Failed to exchange token"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -98,6 +105,7 @@ class BankConnectionsView(APIView):
     List user's bank connections.
     """
 
+    authentication_classes = [SessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
@@ -115,6 +123,7 @@ class BankAccountsView(APIView):
     List user's linked bank accounts from our DB.
     """
 
+    authentication_classes = [SessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
@@ -133,6 +142,7 @@ class BankTransactionsView(APIView):
     Supports filtering by account_id, date_from, date_to, pending, removed.
     """
 
+    authentication_classes = [SessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
@@ -182,6 +192,7 @@ class ManualSyncView(APIView):
     Manually trigger transactions/sync for a bank connection.
     """
 
+    authentication_classes = [SessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
@@ -212,8 +223,13 @@ class ManualSyncView(APIView):
                     "sync_result": result,
                 }
             )
-        except Exception as e:
+        except Exception:
+            logger.exception(
+                "banking_manual_sync_failed user_id=%s connection_id=%s",
+                request.user.pk,
+                connection_id,
+            )
             return Response(
-                {"error": "Sync failed", "detail": str(e)},
+                {"error": "Sync failed"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )

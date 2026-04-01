@@ -22,6 +22,7 @@ from django.contrib.auth import get_user_model, login
 from compliance.monitoring import capture_backend_audit_event
 
 from .supabase_auth import build_unique_username
+from zapp.security.data_encryption import decrypt_app_data, encrypt_app_data
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ SUPABASE_TOKEN_PATH = "/auth/v1/token"
 SUPABASE_SIGNUP_PATH = "/auth/v1/signup"
 SUPABASE_LOGOUT_PATH = "/auth/v1/logout"
 SUPABASE_AUTHORIZE_PATH = "/auth/v1/authorize"
+SUPABASE_USER_PATH = "/auth/v1/user"
 
 
 class SupabaseAuthError(Exception):
@@ -195,6 +197,45 @@ def supabase_mfa_verify(
     return resp.json()
 
 
+def supabase_get_user(access_token: str) -> dict[str, Any]:
+    url = f"{_supabase_base_url()}{SUPABASE_USER_PATH}"
+    resp = requests.get(url, headers=_bearer_headers(access_token), timeout=10)
+    if resp.status_code != 200:
+        msg, code = _parse_error_payload(resp)
+        raise SupabaseAuthError(msg, status_code=resp.status_code, error_code=code or "mfa_user_failed")
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise SupabaseAuthError("Invalid user response.", error_code="mfa_user_failed")
+    return data
+
+
+def supabase_mfa_enroll_totp(access_token: str, friendly_name: str) -> dict[str, Any]:
+    url = f"{_supabase_base_url()}/auth/v1/factors"
+    issuer = (getattr(settings, "PLAID_CLIENT_NAME", None) or "Zapp").strip() or "Zapp"
+    resp = requests.post(
+        url,
+        headers=_bearer_headers(access_token),
+        json={
+            "factor_type": "totp",
+            "friendly_name": friendly_name.strip() or "Authenticator app",
+            "issuer": issuer,
+        },
+        timeout=10,
+    )
+    if resp.status_code not in (200, 201):
+        msg, code = _parse_error_payload(resp)
+        raise SupabaseAuthError(msg, status_code=400, error_code=code or "mfa_enroll_failed")
+    return resp.json()
+
+
+def supabase_mfa_unenroll(access_token: str, factor_id: str) -> None:
+    url = f"{_supabase_base_url()}/auth/v1/factors/{factor_id}"
+    resp = requests.delete(url, headers=_bearer_headers(access_token), timeout=10)
+    if resp.status_code not in (200, 204):
+        msg, code = _parse_error_payload(resp)
+        raise SupabaseAuthError(msg, status_code=400, error_code=code or "mfa_unenroll_failed")
+
+
 def _is_email_verified(user_obj: dict[str, Any] | None) -> bool:
     if not user_obj:
         return False
@@ -294,8 +335,8 @@ def issue_django_session(
         "mfa_factor_count": session_data.get("mfa_factor_count", -1),
         "last_step_up_at": last_step_up_at,
         "logged_in_at": now_ts,
-        "_supabase_access_token": access_token,
-        "_supabase_refresh_token": refresh_token or "",
+        "_supabase_access_token": encrypt_app_data(access_token),
+        "_supabase_refresh_token": encrypt_app_data(refresh_token or ""),
         "_supabase_token_expires_at": _token_expires_at(access_token, expires_in),
     }
     request.session.modified = True
@@ -305,7 +346,10 @@ def issue_django_session(
 def clear_session(request) -> str | None:
     """Return access token for best-effort Supabase revoke; flush Django session."""
     auth_block = request.session.get(AUTH_SESSION_KEY) or {}
-    access = auth_block.get("_supabase_access_token")
+    access = None
+    raw_access = auth_block.get("_supabase_access_token")
+    if isinstance(raw_access, str) and raw_access:
+        access, _ = decrypt_app_data(raw_access)
     try:
         request.session.flush()
     except Exception:
@@ -323,7 +367,10 @@ def get_supabase_access_token(request) -> str | None:
     if not state:
         return None
     tok = state.get("_supabase_access_token")
-    return tok if isinstance(tok, str) and tok else None
+    if not isinstance(tok, str) or not tok:
+        return None
+    plaintext, _ = decrypt_app_data(tok)
+    return plaintext if plaintext else None
 
 
 def record_step_up(request) -> None:
@@ -337,6 +384,55 @@ def record_step_up(request) -> None:
     request.session.modified = True
 
 
+def sync_session_assurance_from_user(request, user_obj: dict[str, Any] | None) -> None:
+    state = get_session_auth_state(request)
+    if not state or not isinstance(user_obj, dict):
+        return
+
+    aal = _extract_aal(user_obj)
+    if aal:
+        state["aal"] = aal
+    count = _count_mfa_factors(user_obj)
+    if count >= 0:
+        state["mfa_factor_count"] = count
+    if aal != "aal2":
+        state["last_step_up_at"] = None
+    request.session[AUTH_SESSION_KEY] = state
+    request.session.modified = True
+
+
+def build_mfa_snapshot_payload(user_obj: dict[str, Any] | None) -> dict[str, Any]:
+    data = user_obj if isinstance(user_obj, dict) else {}
+    factors_raw = data.get("factors")
+    factors: list[dict[str, str]] = []
+    if isinstance(factors_raw, list):
+        for factor in factors_raw:
+            if not isinstance(factor, dict):
+                continue
+            factor_id = str(factor.get("id") or "").strip()
+            if not factor_id:
+                continue
+            factors.append(
+                {
+                    "id": factor_id,
+                    "friendly_name": str(
+                        factor.get("friendly_name") or factor.get("name") or "Authenticator"
+                    ).strip()
+                    or "Authenticator",
+                    "factor_type": str(factor.get("factor_type") or "").strip() or "totp",
+                    "status": str(factor.get("status") or "unverified").strip() or "unverified",
+                }
+            )
+
+    current_level = _extract_aal(data)
+    next_level = "aal2" if factors and current_level != "aal2" else None
+    return {
+        "current_level": current_level,
+        "next_level": next_level,
+        "factors": factors,
+    }
+
+
 def refresh_session_tokens_if_needed(request) -> bool:
     """
     If stored access token is near expiry, refresh using refresh_token.
@@ -346,8 +442,11 @@ def refresh_session_tokens_if_needed(request) -> bool:
     if not state:
         return False
     exp = state.get("_supabase_token_expires_at") or 0
-    refresh_tok = state.get("_supabase_refresh_token") or ""
-    if not refresh_tok or not isinstance(refresh_tok, str):
+    refresh_tok_encrypted = state.get("_supabase_refresh_token") or ""
+    if not refresh_tok_encrypted or not isinstance(refresh_tok_encrypted, str):
+        return False
+    refresh_tok, _ = decrypt_app_data(refresh_tok_encrypted)
+    if not refresh_tok:
         return False
     # Refresh if expiring within 120s
     if int(time.time()) < int(exp) - 120:
@@ -361,8 +460,8 @@ def refresh_session_tokens_if_needed(request) -> bool:
         return False
     new_refresh = data.get("refresh_token") or refresh_tok
     expires_in = data.get("expires_in")
-    state["_supabase_access_token"] = access
-    state["_supabase_refresh_token"] = new_refresh
+    state["_supabase_access_token"] = encrypt_app_data(access)
+    state["_supabase_refresh_token"] = encrypt_app_data(new_refresh)
     state["_supabase_token_expires_at"] = _token_expires_at(access, expires_in)
     user_obj = data.get("user")
     if isinstance(user_obj, dict):
@@ -413,7 +512,7 @@ def audit_mfa_verify(request, user, outcome: str, error_code: str | None = None)
         resource_type="session",
         request=request,
         status_code=200 if outcome == "success" else 400,
-        error_code=error_code,
+        error_code=error_code or "",
         metadata={},
     )
 

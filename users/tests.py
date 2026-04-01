@@ -1,8 +1,10 @@
 import time
 import uuid
+from decimal import Decimal
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -225,6 +227,64 @@ class UserPreferenceSerializerValidationTests(APITestCase):
 
         self.assertFalse(serializer.is_valid())
         self.assertIn("value", serializer.errors)
+
+
+class EncryptedFieldStorageTests(APITestCase):
+    def test_user_raw_explicit_sensitive_fields_are_stored_encrypted(self):
+        from cryptography.fernet import Fernet
+        from users.models import UserRawExplicit
+
+        user = User.objects.create_user(username="enc-user", email="enc@example.com", password="x")
+        key = Fernet.generate_key().decode("ascii")
+
+        with self.settings(APP_DATA_ENCRYPTION_KEY=key):
+            UserRawExplicit.objects.create(
+                user=user,
+                display_name="Alice",
+                monthly_income=Decimal("5000.25"),
+                location_zip="60601",
+            )
+
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT display_name, monthly_income, location_zip FROM users_userrawexplicit WHERE user_id = %s",
+                    [user.pk],
+                )
+                display_name, monthly_income, location_zip = cursor.fetchone()
+
+            self.assertNotEqual(display_name, "Alice")
+            self.assertTrue(str(display_name).startswith("gAAAA"))
+            self.assertTrue(str(monthly_income).startswith("gAAAA"))
+            self.assertTrue(str(location_zip).startswith("gAAAA"))
+
+    def test_transaction_sensitive_fields_are_stored_encrypted(self):
+        from cryptography.fernet import Fernet
+        from transactions.models import Transaction
+
+        user = User.objects.create_user(username="txn-user", email="txn@example.com", password="x")
+        key = Fernet.generate_key().decode("ascii")
+
+        with self.settings(APP_DATA_ENCRYPTION_KEY=key):
+            txn = Transaction.objects.create(
+                user=user,
+                direction="spend",
+                amount=Decimal("19.99"),
+                occurred_at="2026-03-31T10:00:00Z",
+                category="shopping",
+                description_raw="Order 123",
+                reflection_text="Probably impulsive",
+            )
+
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT amount, description_raw, reflection_text FROM transactions_transaction WHERE id = %s",
+                    [txn.pk],
+                )
+                amount, description_raw, reflection_text = cursor.fetchone()
+
+            self.assertTrue(str(amount).startswith("gAAAA"))
+            self.assertTrue(str(description_raw).startswith("gAAAA"))
+            self.assertTrue(str(reflection_text).startswith("gAAAA"))
 
 
     def test_purchase_advisor_logic_rejects_unknown_focus_categories(self):

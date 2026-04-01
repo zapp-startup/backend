@@ -9,6 +9,7 @@ This document maps **implemented** backend controls to evidence and questionnair
 | JWT `aal` / factor hints in auth context | `users/supabase_auth.py` | Log sample JWT claims (redacted) showing `aal` after MFA challenge |
 | Policy: require `aal2` in production | `users/security_assurance.py`, `zapp/settings/production.py` `BANKING_REQUIRE_MFA` | Screenshot of 403 with `mfa_not_enrolled` / `mfa_verification_needed` when `aal1` |
 | Frontend assurance API | `GET /api/security/auth-assurance/` | API response JSON |
+| Backend-managed MFA lifecycle API | `users/auth_views.py`, `users/session_auth.py` | API responses for snapshot, enroll, verify-enrollment, challenge, verify, and factor delete |
 
 **Assumption:** Supabase issues `aal` in access tokens per [Supabase Auth MFA](https://supabase.com/docs/guides/auth/auth-mfa). Verify in your project’s JWT payload; if `aal` is absent, enable MFA and test, or add a Supabase hook to enrich sessions.
 
@@ -73,6 +74,12 @@ Questionnaire item 12 ("encrypt data-in-transit between clients and servers usin
 Production expectation: Plaid access tokens are stored encrypted at the app layer, never returned by serializers, and existing plaintext legacy rows are backfilled with `encrypt_plaid_access_tokens`.
 
 **Manual:** Supabase/Postgres encryption at rest, disk encryption, backups — provider-managed.
+
+See also:
+
+- `AUTH_ARCHITECTURE.md`
+- `DATA_ENCRYPTION_DECISION.md`
+- `DEPLOYMENT_VERIFICATION_CHECKLIST.md`
 
 ---
 

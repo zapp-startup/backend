@@ -14,6 +14,7 @@ from subscriptions.models import BillingCycle, Subscription
 from transactions.models import Transaction, TransactionCategory, TransactionDirection
 from transactions.serializers import TransactionSerializer
 from valuations.models import ItemValuation
+from rest_framework.authentication import SessionAuthentication
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -36,7 +37,6 @@ from .intents import INTENT_UPDATE_SATISFACTION, classify_intent
 from .purchase_advisor import LOCAL_TO_ADVISOR_CATEGORY, extract_requested_category
 from .authentication import DebugHeaderAuthentication
 from users.models import BudgetStyle, FinancialGoal
-from users.supabase_auth import SupabaseJWTAuthentication
 
 SAFETY_GUARDRAILS = {
     "disclaimer": (
@@ -2236,7 +2236,7 @@ def build_assistant_placeholder_response(
 
 
 class AIViewSetMixin:
-    authentication_classes = [SupabaseJWTAuthentication, DebugHeaderAuthentication]
+    authentication_classes = [SessionAuthentication, DebugHeaderAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "ai"

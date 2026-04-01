@@ -20,6 +20,7 @@ from .session_auth import (
     audit_login,
     audit_logout,
     audit_mfa_verify,
+    build_mfa_snapshot_payload,
     build_oauth_authorize_url,
     clear_session,
     extract_session_data,
@@ -34,11 +35,15 @@ from .session_auth import (
     refresh_session_tokens_if_needed,
     store_oauth_pkce_state,
     supabase_exchange_pkce,
+    supabase_get_user,
     supabase_login,
     supabase_logout,
+    supabase_mfa_enroll_totp,
     supabase_mfa_challenge,
+    supabase_mfa_unenroll,
     supabase_mfa_verify,
     supabase_signup,
+    sync_session_assurance_from_user,
     user_from_token_response,
 )
 
@@ -398,6 +403,88 @@ class MfaChallengeView(APIView):
         )
 
 
+class MfaSnapshotView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        refresh_session_tokens_if_needed(request)
+        access = get_supabase_access_token(request)
+        if not access:
+            return Response(
+                {"detail": "No Supabase session in server session.", "error_code": "no_upstream_session"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        try:
+            user_obj = supabase_get_user(access)
+        except SupabaseAuthError as exc:
+            return Response(
+                {"detail": exc.message, "error_code": exc.error_code},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        sync_session_assurance_from_user(request, user_obj)
+        return Response(build_mfa_snapshot_payload(user_obj))
+
+
+class MfaEnrollView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        friendly_name = (request.data.get("friendly_name") or "Authenticator app").strip()
+        refresh_session_tokens_if_needed(request)
+        access = get_supabase_access_token(request)
+        if not access:
+            return Response(
+                {"detail": "No Supabase session in server session.", "error_code": "no_upstream_session"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        try:
+            out = supabase_mfa_enroll_totp(access, friendly_name)
+        except SupabaseAuthError as exc:
+            return Response(
+                {"detail": exc.message, "error_code": exc.error_code},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(out, status=status.HTTP_201_CREATED)
+
+
+class MfaVerifyEnrollmentView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        factor_id = (request.data.get("factor_id") or "").strip()
+        code = (request.data.get("code") or "").strip()
+        if not factor_id or not code:
+            return Response(
+                {"detail": "factor_id and code are required", "error_code": "validation_error"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        refresh_session_tokens_if_needed(request)
+        access = get_supabase_access_token(request)
+        if not access:
+            return Response(
+                {"detail": "No Supabase session in server session.", "error_code": "no_upstream_session"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        try:
+            challenge = supabase_mfa_challenge(access, factor_id)
+            challenge_id = str(challenge.get("id") or challenge.get("challenge_id") or "").strip()
+            if not challenge_id:
+                raise SupabaseAuthError("Challenge did not return an id.", error_code="mfa_challenge_failed")
+            supabase_mfa_verify(access, factor_id, challenge_id, code)
+            user_obj = supabase_get_user(access)
+        except SupabaseAuthError as exc:
+            audit_mfa_verify(request, request.user, "failure", exc.error_code)
+            return Response(
+                {"detail": exc.message, "error_code": exc.error_code},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        record_step_up(request)
+        sync_session_assurance_from_user(request, user_obj)
+        state = get_session_auth_state(request) or {}
+        audit_mfa_verify(request, request.user, "success")
+        return Response({"aal": "aal2", "last_step_up_at": state.get("last_step_up_at")})
+
+
 class MfaVerifyView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -422,6 +509,7 @@ class MfaVerifyView(APIView):
             )
         try:
             supabase_mfa_verify(access, factor_id, challenge_id, code)
+            user_obj = supabase_get_user(access)
         except SupabaseAuthError as exc:
             audit_mfa_verify(request, request.user, "failure", exc.error_code)
             return Response(
@@ -429,10 +517,40 @@ class MfaVerifyView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         record_step_up(request)
+        sync_session_assurance_from_user(request, user_obj)
         state = get_session_auth_state(request) or {}
         last = state.get("last_step_up_at")
         audit_mfa_verify(request, request.user, "success")
         return Response({"aal": "aal2", "last_step_up_at": last})
+
+
+class MfaFactorView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, factor_id: str):
+        factor_id = (factor_id or "").strip()
+        if not factor_id:
+            return Response(
+                {"detail": "factor_id is required", "error_code": "validation_error"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        refresh_session_tokens_if_needed(request)
+        access = get_supabase_access_token(request)
+        if not access:
+            return Response(
+                {"detail": "No Supabase session in server session.", "error_code": "no_upstream_session"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        try:
+            supabase_mfa_unenroll(access, factor_id)
+            user_obj = supabase_get_user(access)
+        except SupabaseAuthError as exc:
+            return Response(
+                {"detail": exc.message, "error_code": exc.error_code},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        sync_session_assurance_from_user(request, user_obj)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class AssuranceView(APIView):

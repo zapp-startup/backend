@@ -19,6 +19,8 @@ from users.session_auth import (
     get_or_create_local_user,
     issue_django_session,
 )
+from zapp.security.data_encryption import decrypt_app_data
+
 User = get_user_model()
 
 
@@ -108,6 +110,26 @@ class IssueDjangoSessionTests(TestCase):
         )
         block = request.session[AUTH_SESSION_KEY]
         self.assertIsNotNone(block["last_step_up_at"])
+
+    @override_settings(APP_DATA_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=")
+    def test_issue_django_session_encrypts_upstream_tokens_when_key_configured(self):
+        factory = RequestFactory()
+        request = factory.post("/")
+        _add_session_to_request(request)
+        issue_django_session(
+            request,
+            self.user,
+            {"aal": "aal1", "auth_method": "password", "mfa_factor_count": 1},
+            "access-token",
+            "refresh-token",
+            3600,
+        )
+
+        block = request.session[AUTH_SESSION_KEY]
+        self.assertNotEqual(block["_supabase_access_token"], "access-token")
+        self.assertNotEqual(block["_supabase_refresh_token"], "refresh-token")
+        self.assertEqual(decrypt_app_data(block["_supabase_access_token"])[0], "access-token")
+        self.assertEqual(decrypt_app_data(block["_supabase_refresh_token"])[0], "refresh-token")
 
 
 class BankingStepUpFreshTests(TestCase):
@@ -304,6 +326,144 @@ class LogoutViewTests(TestCase):
         self.assertEqual(r.status_code, status.HTTP_200_OK)
         mock_sb_logout.assert_called_once_with("tok")
         self.assertNotIn(AUTH_SESSION_KEY, self.client.session)
+
+
+class MfaViewTests(TestCase):
+    def setUp(self):
+        self.client = APIClient(enforce_csrf_checks=True)
+        self.user = User.objects.create_user(
+            username="mfa_u",
+            email="mfa@example.com",
+            password="x",
+        )
+
+    def _set_session_auth(self, **overrides):
+        self.client.get(reverse("auth-csrf"))
+        self.client.force_login(self.user)
+        sess = self.client.session
+        sess[AUTH_SESSION_KEY] = {
+            "user_id": self.user.pk,
+            "aal": "aal1",
+            "mfa_factor_count": 1,
+            "_supabase_access_token": "tok",
+            "_supabase_refresh_token": "rt",
+            "_supabase_token_expires_at": 9999999999,
+            **overrides,
+        }
+        sess.save()
+
+    @patch("users.auth_views.supabase_get_user")
+    def test_mfa_snapshot_returns_factor_list(self, mock_get_user):
+        self._set_session_auth()
+        mock_get_user.return_value = {
+            "aal": "aal1",
+            "factors": [
+                {
+                    "id": "factor-1",
+                    "friendly_name": "Authenticator app",
+                    "factor_type": "totp",
+                    "status": "verified",
+                }
+            ],
+        }
+        response = self.client.get(reverse("auth-mfa-snapshot"))
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["current_level"], "aal1")
+        self.assertEqual(data["next_level"], "aal2")
+        self.assertEqual(data["factors"][0]["id"], "factor-1")
+
+    @patch("users.auth_views.supabase_get_user")
+    @patch("users.auth_views.supabase_mfa_enroll_totp")
+    def test_mfa_enroll_returns_supabase_payload(self, mock_enroll, mock_get_user):
+        self._set_session_auth()
+        mock_enroll.return_value = {
+            "id": "factor-1",
+            "totp": {"qr_code": "data:image/png;base64,abc", "secret": "SECRET"},
+        }
+        response = self.client.post(
+            reverse("auth-mfa-enroll"),
+            {"friendly_name": "Authenticator app"},
+            format="json",
+            **_csrf_header(self.client),
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["id"], "factor-1")
+        self.assertEqual(response.json()["totp"]["secret"], "SECRET")
+        mock_get_user.assert_not_called()
+
+    @patch("users.auth_views.supabase_get_user")
+    @patch("users.auth_views.supabase_mfa_verify")
+    @patch("users.auth_views.supabase_mfa_challenge")
+    @override_settings(
+        BANKING_REQUIRE_MFA=True,
+        BANKING_REQUIRE_FINANCIAL_CONSENT=False,
+        BANKING_STEP_UP_REQUIRED=True,
+        BANKING_STEP_UP_FRESHNESS_SECONDS=900,
+    )
+    def test_mfa_step_up_flow_allows_banking_action(self, mock_challenge, mock_verify, mock_get_user):
+        self._set_session_auth(last_step_up_at=None)
+        mock_challenge.return_value = {"id": "challenge-1"}
+        mock_verify.return_value = {}
+        mock_get_user.return_value = {
+            "aal": "aal2",
+            "factors": [
+                {"id": "factor-1", "friendly_name": "Authenticator", "factor_type": "totp", "status": "verified"}
+            ],
+        }
+
+        challenge_response = self.client.post(
+            reverse("auth-mfa-challenge"),
+            {"factor_id": "factor-1"},
+            format="json",
+            **_csrf_header(self.client),
+        )
+        self.assertEqual(challenge_response.status_code, 200)
+        self.assertEqual(challenge_response.json()["challenge_id"], "challenge-1")
+
+        verify_response = self.client.post(
+            reverse("auth-mfa-verify"),
+            {"factor_id": "factor-1", "challenge_id": "challenge-1", "code": "123456"},
+            format="json",
+            **_csrf_header(self.client),
+        )
+        self.assertEqual(verify_response.status_code, 200)
+        self.assertEqual(verify_response.json()["aal"], "aal2")
+
+        with patch("banking.views.create_link_token_for_user", return_value="link-tok"):
+            link_response = self.client.post(
+                "/api/banking/link-token/",
+                {},
+                format="json",
+                **_csrf_header(self.client),
+            )
+        self.assertEqual(link_response.status_code, 200)
+        self.assertEqual(link_response.json()["link_token"], "link-tok")
+
+    def test_banking_endpoints_reject_bearer_only_auth(self):
+        bearer_client = APIClient()
+        bearer_client.credentials(HTTP_AUTHORIZATION="Bearer test-token")
+        response = bearer_client.post(reverse("banking-link-token"), {}, format="json")
+        self.assertIn(
+            response.status_code,
+            (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
+        )
+
+    @patch("users.auth_views.supabase_get_user")
+    @patch("users.auth_views.supabase_mfa_unenroll")
+    def test_mfa_factor_delete_updates_session_state(self, mock_unenroll, mock_get_user):
+        self._set_session_auth(aal="aal2", last_step_up_at=123)
+        mock_unenroll.return_value = None
+        mock_get_user.return_value = {"aal": "aal1", "factors": []}
+        response = self.client.delete(
+            reverse("auth-mfa-factor", kwargs={"factor_id": "factor-1"}),
+            **_csrf_header(self.client),
+        )
+        self.assertEqual(response.status_code, 204)
+        block = self.client.session[AUTH_SESSION_KEY]
+        self.assertEqual(block["mfa_factor_count"], 0)
+        self.assertEqual(block["aal"], "aal1")
+        self.assertIsNone(block["last_step_up_at"])
 
 
 class ExtractAssuranceFromRequestTests(TestCase):

@@ -1,6 +1,8 @@
 from django.conf import settings
 from django.db import models
 
+from zapp.security.encrypted_fields import EncryptedCharField, EncryptedJSONField, EncryptedTextField
+
 
 class ConversationContext(models.TextChoices):
     GENERAL = "general", "General"
@@ -22,7 +24,7 @@ class Conversation(models.Model):
         related_name="conversations",
     )
 
-    title = models.CharField(
+    title = EncryptedCharField(
         max_length=255,
         blank=True,
         null=True,
@@ -55,12 +57,12 @@ class Conversation(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    summary_text = models.TextField(
+    summary_text = EncryptedTextField(
         blank=True,
         default="",
         help_text="Rolling summary of older turns kept in the short-term memory store.",
     )
-    session_state_json = models.JSONField(
+    session_state_json = EncryptedJSONField(
         default=dict,
         blank=True,
         help_text="Structured short-term memory for active goals, entities, and open loops.",
@@ -104,9 +106,9 @@ class Message(models.Model):
         choices=MessageRole.choices,
     )
 
-    content = models.TextField()
+    content = EncryptedTextField()
 
-    metadata_json = models.JSONField(
+    metadata_json = EncryptedJSONField(
         default=dict,
         blank=True,
         help_text="Optional metadata (tool calls, citations, extracted facts).",
@@ -142,7 +144,7 @@ class UserFact(models.Model):
         help_text="Canonical key, e.g. 'values_convenience'.",
     )
 
-    fact_value_json = models.JSONField(
+    fact_value_json = EncryptedJSONField(
         default=dict,
         help_text="Structured representation of the fact.",
     )
@@ -217,15 +219,15 @@ class ConversationMemoryItem(models.Model):
         null=True,
         help_text="Optional stable key used to upsert durable memories.",
     )
-    summary_text = models.TextField(
+    summary_text = EncryptedTextField(
         help_text="Short retrieval-friendly summary of the memory.",
     )
-    detail_json = models.JSONField(
+    detail_json = EncryptedJSONField(
         default=dict,
         blank=True,
         help_text="Optional structured details extracted from the turn.",
     )
-    tags_json = models.JSONField(
+    tags_json = EncryptedJSONField(
         default=list,
         blank=True,
         help_text="Normalized tags used for lightweight retrieval.",

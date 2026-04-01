@@ -51,6 +51,7 @@ OPENAI_MODEL = (os.getenv("OPENAI_MODEL") or "gpt-4.1-mini").strip()
 API_THROTTLE_ANON_RATE = (os.getenv("API_THROTTLE_ANON_RATE") or "30/minute").strip()
 API_THROTTLE_USER_RATE = (os.getenv("API_THROTTLE_USER_RATE") or "120/minute").strip()
 API_THROTTLE_AI_RATE = (os.getenv("API_THROTTLE_AI_RATE") or "20/minute").strip()
+API_THROTTLE_AUDIT_INGEST_RATE = (os.getenv("API_THROTTLE_AUDIT_INGEST_RATE") or "120/minute").strip()
 
 
 # Application definition
@@ -149,6 +150,7 @@ REST_FRAMEWORK = {
         "anon": API_THROTTLE_ANON_RATE,
         "user": API_THROTTLE_USER_RATE,
         "ai": API_THROTTLE_AI_RATE,
+        "audit_ingest": API_THROTTLE_AUDIT_INGEST_RATE,
         # Banking / compliance: per-user; tune per environment
         "banking_sensitive": os.getenv("THROTTLE_BANKING_SENSITIVE", "120/hour"),
         "banking_link_token": os.getenv("THROTTLE_BANKING_LINK_TOKEN", "30/hour"),
@@ -235,6 +237,10 @@ BANKING_REQUIRE_FINANCIAL_CONSENT = os.getenv(
 PLAID_TOKEN_ENCRYPTION_KEY = os.getenv("PLAID_TOKEN_ENCRYPTION_KEY", "")
 # Optional rotation list. First key is used for new writes; remaining keys are accepted for decrypt.
 PLAID_TOKEN_ENCRYPTION_KEYS = os.getenv("PLAID_TOKEN_ENCRYPTION_KEYS", "")
+
+# General application-layer encryption for sensitive business/profile fields.
+APP_DATA_ENCRYPTION_KEY = os.getenv("APP_DATA_ENCRYPTION_KEY", "")
+APP_DATA_ENCRYPTION_KEYS = os.getenv("APP_DATA_ENCRYPTION_KEYS", "")
 
 # Retention hints (operational; actual deletion uses management commands / legal process)
 BANKING_DATA_RETENTION_DAYS_AFTER_DISCONNECT = int(

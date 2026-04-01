@@ -11,8 +11,10 @@ and keep the same public API used by plaid_service.
 from __future__ import annotations
 
 import logging
+import sys
 
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,22 @@ def has_plaid_token_encryption_enabled() -> bool:
     return _primary_fernet() is not None
 
 
+def _plaid_token_encryption_required() -> bool:
+    settings_module = str(getattr(settings, "SETTINGS_MODULE", "") or getattr(settings, "DJANGO_SETTINGS_MODULE", ""))
+    if settings_module.endswith(".test"):
+        return False
+    if any(arg == "test" for arg in sys.argv):
+        return False
+    return True
+
+
+def _require_plaid_token_encryption() -> None:
+    if _plaid_token_encryption_required() and not has_plaid_token_encryption_enabled():
+        raise ImproperlyConfigured(
+            "PLAID_TOKEN_ENCRYPTION_KEY or PLAID_TOKEN_ENCRYPTION_KEYS must be configured outside tests."
+        )
+
+
 def _decrypt_with_fernets(stored: str, fernets: list[Fernet]) -> tuple[str, bool, int | None]:
     for index, f in enumerate(fernets):
         try:
@@ -69,6 +87,7 @@ def _decrypt_with_fernets(stored: str, fernets: list[Fernet]) -> tuple[str, bool
 def encrypt_plaid_access_token(plaintext: str) -> str:
     f = _primary_fernet()
     if f is None:
+        _require_plaid_token_encryption()
         return plaintext
     return f.encrypt(plaintext.encode("utf-8")).decode("ascii")
 
@@ -79,6 +98,7 @@ def decrypt_plaid_access_token(stored: str) -> str:
     """
     fernets = _fernets()
     if not fernets:
+        _require_plaid_token_encryption()
         return stored
     plaintext, _, _ = _decrypt_with_fernets(stored, fernets)
     return plaintext
@@ -122,6 +142,7 @@ def get_plaid_access_token_for_api(connection) -> str:
     fernets = _fernets()
     f = fernets[0] if fernets else None
     if f is None:
+        _require_plaid_token_encryption()
         return raw
 
     plaintext, was_encrypted, key_index = _decrypt_with_fernets(raw, fernets)

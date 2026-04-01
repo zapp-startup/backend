@@ -8,7 +8,7 @@ from rest_framework.views import APIView
 
 from .models import ConsentType
 from .serializers import AuditEventIngestSerializer
-from .throttles import ComplianceConsentThrottle
+from .throttles import AuditEventIngestThrottle, ComplianceConsentThrottle
 from .services import current_policy_version, record_financial_consent, user_has_valid_financial_consent
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,8 @@ class AuditEventIngestView(APIView):
     not the client payload.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [AuditEventIngestThrottle]
 
     def post(self, request):
         serializer = AuditEventIngestSerializer(data=request.data, context={"request": request})

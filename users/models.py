@@ -5,6 +5,15 @@ from django.contrib.auth.models import AbstractUser
 from django.conf import settings
 from django.db import models
 
+from zapp.security.encrypted_fields import (
+    EncryptedCharField,
+    EncryptedDateField,
+    EncryptedDecimalField,
+    EncryptedFloatField,
+    EncryptedIntegerField,
+    EncryptedJSONField,
+)
+
 class User(AbstractUser):
     supabase_uid = models.UUIDField(unique=True, null=True, blank=True, db_index=True)
 
@@ -66,43 +75,43 @@ class UserRawExplicit(models.Model):
     )
 
     # QoL / identity
-    display_name = models.CharField(max_length=64, blank=True)
+    display_name = EncryptedCharField(blank=True)
 
     # Demographics / structural
-    dob = models.DateField(blank=True, null=True)
-    age_range = models.CharField(max_length=32, blank=True)  # optional alt to dob
-    household_size = models.PositiveSmallIntegerField(blank=True, null=True)
-    location_zip = models.CharField(max_length=16, blank=True)
+    dob = EncryptedDateField(blank=True, null=True)
+    age_range = EncryptedCharField(blank=True)  # optional alt to dob
+    household_size = EncryptedIntegerField(blank=True, null=True)
+    location_zip = EncryptedCharField(blank=True)
 
-    life_stage = models.CharField(max_length=32, blank=True)        # e.g., student/early_career
-    employment_type = models.CharField(max_length=32, blank=True)
-    dependents_count = models.PositiveSmallIntegerField(blank=True, null=True)
+    life_stage = EncryptedCharField(blank=True)        # e.g., student/early_career
+    employment_type = EncryptedCharField(blank=True)
+    dependents_count = EncryptedIntegerField(blank=True, null=True)
 
     # Income inputs (explicit raw)
-    income_range = models.CharField(max_length=32, blank=True)
-    monthly_income = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
-    monthly_fixed_expenses = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    income_range = EncryptedCharField(blank=True)
+    monthly_income = EncryptedDecimalField(blank=True, null=True)
+    monthly_fixed_expenses = EncryptedDecimalField(blank=True, null=True)
 
     # Goals / preferences (explicit)
-    financial_goal = models.CharField(
-        max_length=32, choices=FinancialGoal.choices, blank=True
+    financial_goal = EncryptedCharField(
+        choices=FinancialGoal.choices, blank=True
     )
-    risk_tolerance = models.CharField(
-        max_length=16, choices=RiskTolerance.choices, blank=True
+    risk_tolerance = EncryptedCharField(
+        choices=RiskTolerance.choices, blank=True
     )
-    budget_style = models.CharField(
-        max_length=32, choices=BudgetStyle.choices, blank=True
+    budget_style = EncryptedCharField(
+        choices=BudgetStyle.choices, blank=True
     )
 
     # Value-priority sliders (explicit raw)
     # Recommended: 0–100 scale
-    value_priority_cost = models.PositiveSmallIntegerField(blank=True, null=True)
-    value_priority_quality = models.PositiveSmallIntegerField(blank=True, null=True)
-    value_priority_sustainability = models.PositiveSmallIntegerField(blank=True, null=True)
+    value_priority_cost = EncryptedIntegerField(blank=True, null=True)
+    value_priority_quality = EncryptedIntegerField(blank=True, null=True)
+    value_priority_sustainability = EncryptedIntegerField(blank=True, null=True)
 
     # Optional onboarding baseline (keep if you want)
     # Regret frequency should NOT be here since you measure from transaction popups.
-    self_report_research_habit = models.PositiveSmallIntegerField(blank=True, null=True)
+    self_report_research_habit = EncryptedIntegerField(blank=True, null=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -137,28 +146,28 @@ class UserRawInferred(models.Model):
     window_days = models.PositiveSmallIntegerField(default=90)
 
     # Examples (keep as nullable since you’ll fill progressively)
-    avg_purchase_price = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
-    purchase_price_variance = models.DecimalField(max_digits=18, decimal_places=6, blank=True, null=True)
+    avg_purchase_price = EncryptedDecimalField(blank=True, null=True)
+    purchase_price_variance = EncryptedDecimalField(blank=True, null=True)
 
-    category_distribution_json = models.JSONField(default=dict, blank=True)
+    category_distribution_json = EncryptedJSONField(default=dict, blank=True)
 
-    percent_impulsive_purchases = models.FloatField(blank=True, null=True)  # 0..1
-    regret_frequency = models.FloatField(blank=True, null=True)             # 0..1 fraction of regretful txns
-    brand_repetition_rate = models.FloatField(blank=True, null=True)        # 0..1
-    late_night_purchase_frequency = models.FloatField(blank=True, null=True)  # 0..1
+    percent_impulsive_purchases = EncryptedFloatField(blank=True, null=True)  # 0..1
+    regret_frequency = EncryptedFloatField(blank=True, null=True)             # 0..1 fraction of regretful txns
+    brand_repetition_rate = EncryptedFloatField(blank=True, null=True)        # 0..1
+    late_night_purchase_frequency = EncryptedFloatField(blank=True, null=True)  # 0..1
 
-    avg_decision_time_minutes = models.FloatField(blank=True, null=True)
+    avg_decision_time_minutes = EncryptedFloatField(blank=True, null=True)
 
     # Subscription aggregates (optional)
-    active_subscriptions_count = models.IntegerField(blank=True, null=True)
-    total_subscription_cost = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
-    percent_income_spent_on_subscriptions = models.FloatField(blank=True, null=True)  # 0..1
+    active_subscriptions_count = EncryptedIntegerField(blank=True, null=True)
+    total_subscription_cost = EncryptedDecimalField(blank=True, null=True)
+    percent_income_spent_on_subscriptions = EncryptedFloatField(blank=True, null=True)  # 0..1
 
-    subscription_usage_frequency_json = models.JSONField(default=dict, blank=True)
-    cancel_reactivation_frequency = models.FloatField(blank=True, null=True)
+    subscription_usage_frequency_json = EncryptedJSONField(default=dict, blank=True)
+    cancel_reactivation_frequency = EncryptedFloatField(blank=True, null=True)
 
     # Budget aggregates (optional)
-    actual_monthly_spending = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    actual_monthly_spending = EncryptedDecimalField(blank=True, null=True)
 
     computed_at = models.DateTimeField(auto_now=True)
 
@@ -236,7 +245,7 @@ class UserPreference(models.Model):
         default=PreferenceValueType.STRING,
     )
 
-    value_json = models.JSONField(default=dict, blank=True)
+    value_json = EncryptedJSONField(default=dict, blank=True)
 
     source = models.CharField(
         max_length=16,

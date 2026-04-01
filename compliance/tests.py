@@ -82,7 +82,8 @@ class AuditEventIngestTests(TestCase):
         self.assertEqual(event.metadata["field"], "amount")
         self.assertIn("source_ip", event.metadata)
 
-    def test_audit_ingest_accepts_anonymous_event(self):
+    def test_audit_ingest_redacts_sensitive_payloads(self):
+        self.client.force_authenticate(user=self.user)
         response = self.client.post(
             "/api/audit/events/",
             {
@@ -90,6 +91,8 @@ class AuditEventIngestTests(TestCase):
                 "outcome": "failure",
                 "source_system": "frontend-web",
                 "error_code": "invalid_credentials",
+                "error_message": '{"access_token":"secret-token","detail":"bad"}',
+                "metadata": {"cookie_header": "csrftoken=abc", "nested": {"refresh_token": "secret"}},
             },
             format="json",
             HTTP_X_FORWARDED_FOR="203.0.113.10",
@@ -98,11 +101,26 @@ class AuditEventIngestTests(TestCase):
 
         self.assertEqual(response.status_code, 201)
         event = AuditEvent.objects.get(event_name="auth.login")
-        self.assertIsNone(event.user)
-        self.assertEqual(event.actor_type, AuditEvent.ActorType.ANONYMOUS)
+        self.assertEqual(event.user, self.user)
+        self.assertEqual(event.actor_type, AuditEvent.ActorType.USER)
         self.assertEqual(event.error_code, "invalid_credentials")
         self.assertEqual(event.metadata["source_ip"], "203.0.113.10")
         self.assertEqual(event.metadata["user_agent"], "security-test-agent")
+        self.assertEqual(event.metadata["cookie_header"], "[REDACTED]")
+        self.assertEqual(event.metadata["nested"]["refresh_token"], "[REDACTED]")
+        self.assertIn("[REDACTED]", event.error_message)
+
+    def test_audit_ingest_requires_authentication(self):
+        response = self.client.post(
+            "/api/audit/events/",
+            {
+                "event_name": "auth.login",
+                "outcome": "failure",
+                "source_system": "frontend-web",
+            },
+            format="json",
+        )
+        self.assertIn(response.status_code, (401, 403))
 
 
 class SecurityAlertEvaluationTests(TestCase):

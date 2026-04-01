@@ -1,6 +1,7 @@
 from io import StringIO
 
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase, override_settings
 
 from banking.models import BankConnection
@@ -119,3 +120,31 @@ class TokenStorageTests(TestCase):
         connection.refresh_from_db()
         self.assertEqual(connection.plaid_access_token, "access-sandbox-plain")
         self.assertIn("Dry run: 1 of 1 Plaid connections still store plaintext access tokens.", out.getvalue())
+
+    def test_verify_plaid_access_tokens_encrypted_fails_when_plaintext_exists(self):
+        from cryptography.fernet import Fernet
+
+        key = Fernet.generate_key().decode("ascii")
+        BankConnection.objects.create(
+            user=self.user,
+            plaid_item_id="item-verify-fail",
+            plaid_access_token="access-sandbox-plain",
+        )
+
+        with self.settings(PLAID_TOKEN_ENCRYPTION_KEY=key):
+            with self.assertRaises(CommandError):
+                call_command("verify_plaid_access_tokens_encrypted")
+
+    def test_verify_plaid_access_tokens_encrypted_passes_when_all_ciphertext(self):
+        from cryptography.fernet import Fernet
+
+        key = Fernet.generate_key().decode("ascii")
+        with self.settings(PLAID_TOKEN_ENCRYPTION_KEY=key):
+            BankConnection.objects.create(
+                user=self.user,
+                plaid_item_id="item-verify-pass",
+                plaid_access_token=encrypt_plaid_access_token("access-sandbox-encrypted"),
+            )
+            out = StringIO()
+            call_command("verify_plaid_access_tokens_encrypted", stdout=out)
+            self.assertIn("All stored Plaid access tokens are encrypted.", out.getvalue())

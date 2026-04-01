@@ -48,6 +48,8 @@ jobs:
       PLAID_CLIENT_NAME: ${{ secrets.PLAID_CLIENT_NAME }}
       PLAID_TOKEN_ENCRYPTION_KEY: ${{ secrets.PLAID_TOKEN_ENCRYPTION_KEY }}
       PLAID_TOKEN_ENCRYPTION_KEYS: ${{ secrets.PLAID_TOKEN_ENCRYPTION_KEYS }}
+      APP_DATA_ENCRYPTION_KEY: ${{ secrets.APP_DATA_ENCRYPTION_KEY }}
+      APP_DATA_ENCRYPTION_KEYS: ${{ secrets.APP_DATA_ENCRYPTION_KEYS }}
       PRIVACY_POLICY_URL: ${{ secrets.PRIVACY_POLICY_URL }}
       PRIVACY_POLICY_VERSION: ${{ secrets.PRIVACY_POLICY_VERSION }}
       PRIVACY_POLICY_EFFECTIVE_DATE: ${{ secrets.PRIVACY_POLICY_EFFECTIVE_DATE }}
@@ -70,6 +72,9 @@ jobs:
 
       - name: Validate production Django configuration
         run: python manage.py check --deploy --settings=zapp.settings.production
+
+      - name: Verify Plaid access tokens are encrypted
+        run: python manage.py verify_plaid_access_tokens_encrypted --settings=zapp.settings.production
 
       - name: Run production safety smoke tests
         run: python manage.py test zapp.security --settings=zapp.settings.test --verbosity 2

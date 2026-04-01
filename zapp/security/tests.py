@@ -14,9 +14,12 @@ class ProductionValidationTests(SimpleTestCase):
         CSRF_COOKIE_SAMESITE="Lax",
         SECURE_HSTS_SECONDS=31536000,
         SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
+        SUPABASE_URL="https://project.supabase.co",
+        SUPABASE_JWT_ISS="https://project.supabase.co/auth/v1",
         PLAID_WEBHOOK_URL="https://api.example.com/plaid/webhook",
         PLAID_REDIRECT_URI="https://app.example.com/auth/plaid/callback",
         PLAID_TOKEN_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
+        APP_DATA_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
     )
     def test_validate_passes_when_configured(self):
         validate_production_security()
@@ -31,8 +34,11 @@ class ProductionValidationTests(SimpleTestCase):
         CSRF_COOKIE_SAMESITE="Lax",
         SECURE_HSTS_SECONDS=31536000,
         SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
+        SUPABASE_URL="https://project.supabase.co",
+        SUPABASE_JWT_ISS="https://project.supabase.co/auth/v1",
         PLAID_WEBHOOK_URL="http://api.example.com/plaid/webhook",
         PLAID_TOKEN_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
+        APP_DATA_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
     )
     def test_validate_fails_when_plaid_webhook_is_not_https(self):
         with self.assertRaises(RuntimeError):
@@ -48,9 +54,69 @@ class ProductionValidationTests(SimpleTestCase):
         CSRF_COOKIE_SAMESITE="Lax",
         SECURE_HSTS_SECONDS=31536000,
         SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
+        SUPABASE_URL="https://project.supabase.co",
+        SUPABASE_JWT_ISS="https://project.supabase.co/auth/v1",
         PLAID_REDIRECT_URI="https://localhost:3000/plaid/callback",
         PLAID_TOKEN_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
+        APP_DATA_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
     )
     def test_validate_fails_when_plaid_redirect_uri_points_to_localhost(self):
+        with self.assertRaises(RuntimeError):
+            validate_production_security()
+
+    @override_settings(
+        ALLOWED_HOSTS=["api.example.com"],
+        SECURE_SSL_REDIRECT=True,
+        SESSION_COOKIE_SECURE=True,
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        CSRF_COOKIE_SECURE=True,
+        CSRF_COOKIE_SAMESITE="Lax",
+        SECURE_HSTS_SECONDS=31536000,
+        SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
+        SUPABASE_URL="http://project.supabase.co",
+        SUPABASE_JWT_ISS="https://project.supabase.co/auth/v1",
+        PLAID_TOKEN_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
+        APP_DATA_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
+    )
+    def test_validate_fails_when_supabase_url_is_not_https(self):
+        with self.assertRaises(RuntimeError):
+            validate_production_security()
+
+    @override_settings(
+        ALLOWED_HOSTS=["api.example.com"],
+        SECURE_SSL_REDIRECT=True,
+        SESSION_COOKIE_SECURE=True,
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        CSRF_COOKIE_SECURE=True,
+        CSRF_COOKIE_SAMESITE="Lax",
+        SECURE_HSTS_SECONDS=31536000,
+        SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
+        SUPABASE_URL="https://project.supabase.co",
+        SUPABASE_JWT_ISS="https://localhost/auth/v1",
+        PLAID_TOKEN_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
+        APP_DATA_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
+    )
+    def test_validate_fails_when_supabase_jwt_issuer_points_to_localhost(self):
+        with self.assertRaises(RuntimeError):
+            validate_production_security()
+
+    @override_settings(
+        ALLOWED_HOSTS=["api.example.com"],
+        SECURE_SSL_REDIRECT=True,
+        SESSION_COOKIE_SECURE=True,
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        CSRF_COOKIE_SECURE=True,
+        CSRF_COOKIE_SAMESITE="Lax",
+        SECURE_HSTS_SECONDS=31536000,
+        SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
+        SUPABASE_URL="https://project.supabase.co",
+        SUPABASE_JWT_ISS="https://project.supabase.co/auth/v1",
+        PLAID_TOKEN_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
+        APP_DATA_ENCRYPTION_KEY="",
+    )
+    def test_validate_fails_when_app_data_key_missing(self):
         with self.assertRaises(RuntimeError):
             validate_production_security()

@@ -11,6 +11,22 @@ from urllib.parse import urlparse
 from cryptography.fernet import Fernet
 
 
+def _validate_https_setting(errors: list[str], setting_name: str, *, allow_blank: bool = False) -> None:
+    from django.conf import settings
+
+    value = (getattr(settings, setting_name, "") or "").strip()
+    if not value:
+        if not allow_blank:
+            errors.append(f"{setting_name} must be set to an https:// URL in production.")
+        return
+
+    parsed = urlparse(value)
+    if parsed.scheme.lower() != "https":
+        errors.append(f"{setting_name} must use https:// in production.")
+    if parsed.hostname in {"localhost", "127.0.0.1"}:
+        errors.append(f"{setting_name} must not point to localhost in production.")
+
+
 def validate_production_security():
     """
     Fail fast if critical security settings are misconfigured.
@@ -59,15 +75,10 @@ def validate_production_security():
     if any(host in {"localhost", "127.0.0.1", "your-production-domain.com"} for host in allowed_hosts):
         errors.append("ALLOWED_HOSTS must not contain localhost or placeholder hostnames in production.")
 
-    for setting_name in ("PLAID_WEBHOOK_URL", "PLAID_REDIRECT_URI"):
-        value = (getattr(settings, setting_name, "") or "").strip()
-        if not value:
-            continue
-        parsed = urlparse(value)
-        if parsed.scheme.lower() != "https":
-            errors.append(f"{setting_name} must use https:// in production when set.")
-        if parsed.hostname in {"localhost", "127.0.0.1"}:
-            errors.append(f"{setting_name} must not point to localhost in production.")
+    _validate_https_setting(errors, "SUPABASE_URL")
+    _validate_https_setting(errors, "SUPABASE_JWT_ISS")
+    _validate_https_setting(errors, "PLAID_WEBHOOK_URL", allow_blank=True)
+    _validate_https_setting(errors, "PLAID_REDIRECT_URI", allow_blank=True)
 
     plaid_token_keys_raw = (getattr(settings, "PLAID_TOKEN_ENCRYPTION_KEYS", "") or "").strip()
     plaid_token_keys = [part.strip() for part in plaid_token_keys_raw.split(",") if part.strip()]
@@ -84,6 +95,23 @@ def validate_production_security():
                 Fernet(key.encode("ascii"))
             except Exception:
                 errors.append("All Plaid token encryption keys must be valid Fernet keys in production.")
+                break
+
+    app_data_keys_raw = (getattr(settings, "APP_DATA_ENCRYPTION_KEYS", "") or "").strip()
+    app_data_keys = [part.strip() for part in app_data_keys_raw.split(",") if part.strip()]
+    if not app_data_keys:
+        single_key = (getattr(settings, "APP_DATA_ENCRYPTION_KEY", "") or "").strip()
+        if single_key:
+            app_data_keys = [single_key]
+
+    if not app_data_keys:
+        errors.append("APP_DATA_ENCRYPTION_KEY or APP_DATA_ENCRYPTION_KEYS must be set in production.")
+    else:
+        for key in app_data_keys:
+            try:
+                Fernet(key.encode("ascii"))
+            except Exception:
+                errors.append("All app data encryption keys must be valid Fernet keys in production.")
                 break
 
     if errors:
