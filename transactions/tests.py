@@ -7,7 +7,7 @@ from transactions.feedback_candidates import (
     _recency_score,
     get_feedback_candidates,
 )
-from transactions.models import Transaction, TransactionCategory
+from transactions.models import Transaction, TransactionCategory, TransactionReflection
 from users.models import User
 
 
@@ -76,3 +76,51 @@ class FeedbackCandidatesTestCase(TestCase):
         candidates = get_feedback_candidates(self.user, days_window=365, top_n=5)
         # Our user has no transactions, so candidates should be empty
         self.assertEqual(candidates, [])
+
+    def test_transaction_reflection_accepts_string_regret_score(self):
+        transaction = Transaction.objects.create(
+            user=self.user,
+            direction="spend",
+            amount=50,
+            occurred_at=timezone.now(),
+            category=TransactionCategory.EATING_OUT,
+        )
+
+        response = self.client.post(
+            "/api/transaction-reflections/",
+            {
+                "transaction": transaction.id,
+                "regret_score": "10",
+                "was_worth_it": True,
+                "notes": "solid",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        reflection = TransactionReflection.objects.get(pk=response.data["id"])
+        self.assertEqual(reflection.regret_score, 10)
+
+    def test_transaction_reflection_preserves_false_boolean(self):
+        transaction = Transaction.objects.create(
+            user=self.user,
+            direction="spend",
+            amount=25,
+            occurred_at=timezone.now(),
+            category=TransactionCategory.SHOPPING,
+        )
+
+        response = self.client.post(
+            "/api/transaction-reflections/",
+            {
+                "transaction": transaction.id,
+                "regret_score": 30,
+                "was_worth_it": False,
+                "notes": "duplicate",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        reflection = TransactionReflection.objects.get(pk=response.data["id"])
+        self.assertIs(reflection.was_worth_it, False)

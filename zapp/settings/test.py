@@ -14,6 +14,8 @@ DATABASES = {
 }
 
 OPENAI_API_KEY = None
+APP_DATA_ENCRYPTION_KEY = ""
+APP_DATA_ENCRYPTION_KEYS = ""
 
 PASSWORD_HASHERS = [
     "django.contrib.auth.hashers.MD5PasswordHasher",

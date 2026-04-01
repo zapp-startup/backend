@@ -10,6 +10,14 @@ class TransactionSerializer(serializers.ModelSerializer):
 
 
 class TransactionReflectionSerializer(serializers.ModelSerializer):
+    regret_score = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=0,
+        max_value=100,
+    )
+    was_worth_it = serializers.BooleanField(required=False, allow_null=True)
+
     class Meta:
         model = TransactionReflection
         fields = "__all__"
@@ -33,10 +41,3 @@ class TransactionReflectionSerializer(serializers.ModelSerializer):
         ):
             raise serializers.ValidationError({"transaction": "A reflection already exists for this transaction."})
         return attrs
-
-    def validate_regret_score(self, value):
-        if value is None:
-            return value
-        if value < 0 or value > 100:
-            raise serializers.ValidationError("regret_score must be between 0 and 100.")
-        return value
