@@ -4,6 +4,27 @@ import zapp.security.encrypted_fields
 from django.db import migrations
 
 
+CONSTRAINT_NAMES = (
+    "valid_subscription_feedback_value_score",
+    "valid_subscription_feedback_confidence",
+    "valid_subscription_utilization",
+    "valid_subscription_cost_benefit",
+)
+
+
+def _drop_legacy_numeric_constraints():
+    return [
+        migrations.RunSQL(
+            sql=(
+                'ALTER TABLE "subscriptions_subscription" '
+                f'DROP CONSTRAINT IF EXISTS "{constraint_name}";'
+            ),
+            reverse_sql=migrations.RunSQL.noop,
+        )
+        for constraint_name in CONSTRAINT_NAMES
+    ]
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -11,6 +32,10 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.SeparateDatabaseAndState(
+            database_operations=_drop_legacy_numeric_constraints(),
+            state_operations=[],
+        ),
         migrations.AlterField(
             model_name="subscription",
             name="cancelled_on",

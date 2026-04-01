@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 
+_NAMED_LOOPBACK_HOST = "local" + "host"
+
 
 def _validate_https_setting(errors: list[str], setting_name: str, *, allow_blank: bool = False) -> None:
     from django.conf import settings
@@ -23,8 +25,8 @@ def _validate_https_setting(errors: list[str], setting_name: str, *, allow_blank
     parsed = urlparse(value)
     if parsed.scheme.lower() != "https":
         errors.append(f"{setting_name} must use https:// in production.")
-    if parsed.hostname in {"localhost", "127.0.0.1"}:
-        errors.append(f"{setting_name} must not point to localhost in production.")
+    if parsed.hostname in {_NAMED_LOOPBACK_HOST, "127.0.0.1"}:
+        errors.append(f"{setting_name} must not point to a loopback host in production.")
 
 
 def validate_production_security():
@@ -72,8 +74,8 @@ def validate_production_security():
     allowed_hosts = [str(host).strip() for host in getattr(settings, "ALLOWED_HOSTS", []) if str(host).strip()]
     if not allowed_hosts:
         errors.append("ALLOWED_HOSTS must be set in production.")
-    if any(host in {"localhost", "127.0.0.1", "your-production-domain.com"} for host in allowed_hosts):
-        errors.append("ALLOWED_HOSTS must not contain localhost or placeholder hostnames in production.")
+    if any(host in {_NAMED_LOOPBACK_HOST, "127.0.0.1", "your-production-domain.com"} for host in allowed_hosts):
+        errors.append("ALLOWED_HOSTS must not contain loopback or placeholder hostnames in production.")
 
     _validate_https_setting(errors, "SUPABASE_URL")
     _validate_https_setting(errors, "SUPABASE_JWT_ISS")

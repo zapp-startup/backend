@@ -475,7 +475,9 @@ def refresh_session_tokens_if_needed(request) -> bool:
     return True
 
 
-def audit_login(request, user, outcome: str, error_code: str | None = None) -> None:
+def audit_login(request, user, outcome: str, error_code: str | None = None, auth_method: str = "supabase_password") -> None:
+    normalized_error_code = error_code or ("success" if outcome == "success" else "login_failed")
+
     capture_backend_audit_event(
         event_name="auth.login",
         outcome=outcome,
@@ -484,9 +486,9 @@ def audit_login(request, user, outcome: str, error_code: str | None = None) -> N
         resource_type="session",
         request=request,
         status_code=200 if outcome == "success" else 400,
-        error_code=error_code,
+        error_code=normalized_error_code,
         error_message=None if outcome == "success" else (error_code or "failure"),
-        metadata={"auth_method": "supabase_password"},
+        metadata={"auth_method": auth_method},
     )
 
 
@@ -531,7 +533,6 @@ def build_oauth_authorize_url(
     provider: str,
     redirect_to: str,
     code_challenge: str,
-    state: str,
 ) -> str:
     q = urlencode(
         {
@@ -539,7 +540,6 @@ def build_oauth_authorize_url(
             "redirect_to": redirect_to,
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
-            "state": state,
         }
     )
     return f"{_supabase_base_url()}{SUPABASE_AUTHORIZE_PATH}?{q}"
@@ -551,15 +551,18 @@ def store_oauth_pkce_state(
     code_verifier: str,
     provider: str,
     frontend_redirect: str | None,
-    state: str,
 ) -> None:
     request.session[OAUTH_PKCE_SESSION_KEY] = {
         "code_verifier": code_verifier,
         "provider": provider,
         "frontend_redirect": frontend_redirect or "",
-        "state": state,
     }
     request.session.modified = True
+    request.session.save()
+
+    print("PKCE SESSION SAVED")
+    print("SESSION KEY:", request.session.session_key)
+    print("SESSION DATA:", dict(request.session))
 
 
 def pop_oauth_pkce_state(request) -> dict[str, Any] | None:

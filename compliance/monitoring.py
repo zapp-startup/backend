@@ -44,6 +44,10 @@ def capture_backend_audit_event(
     if request is not None:
         merged_metadata.update({k: v for k, v in _request_metadata(request).items() if k not in merged_metadata})
     actor_id = str(getattr(actor, "supabase_uid", "") or getattr(actor, "pk", "") or "").strip()
+
+    normalized_error_code = error_code if error_code is not None else ""
+    normalized_error_message = error_message if error_message is not None else ""
+    
     return AuditEvent.objects.create(
         user=actor,
         event_name=event_name,
@@ -58,8 +62,8 @@ def capture_backend_audit_event(
         route=(getattr(request, "path", "") if request is not None else "")[:255],
         method=(getattr(request, "method", "") if request is not None else "")[:16],
         status_code=status_code,
-        error_code=error_code,
-        error_message=error_message,
+        error_code=normalized_error_code,
+        error_message=normalized_error_message,
         metadata=merged_metadata,
     )
 

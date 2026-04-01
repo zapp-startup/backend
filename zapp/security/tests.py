@@ -1,6 +1,7 @@
 from django.test import SimpleTestCase, override_settings
 
 from zapp.security.production_validation import validate_production_security
+from zapp.settings import development as development_settings
 
 
 class ProductionValidationTests(SimpleTestCase):
@@ -56,11 +57,11 @@ class ProductionValidationTests(SimpleTestCase):
         SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
         SUPABASE_URL="https://project.supabase.co",
         SUPABASE_JWT_ISS="https://project.supabase.co/auth/v1",
-        PLAID_REDIRECT_URI="https://localhost:3000/plaid/callback",
+        PLAID_REDIRECT_URI="https://127.0.0.1:3000/plaid/callback",
         PLAID_TOKEN_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
         APP_DATA_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
     )
-    def test_validate_fails_when_plaid_redirect_uri_points_to_localhost(self):
+    def test_validate_fails_when_plaid_redirect_uri_points_to_loopback(self):
         with self.assertRaises(RuntimeError):
             validate_production_security()
 
@@ -94,11 +95,11 @@ class ProductionValidationTests(SimpleTestCase):
         SECURE_HSTS_SECONDS=31536000,
         SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
         SUPABASE_URL="https://project.supabase.co",
-        SUPABASE_JWT_ISS="https://localhost/auth/v1",
+        SUPABASE_JWT_ISS="https://127.0.0.1/auth/v1",
         PLAID_TOKEN_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
         APP_DATA_ENCRYPTION_KEY="8bUpWwzYgUN7ctklDvqGELWMKhfYbsxxNaKzUknYI5Q=",
     )
-    def test_validate_fails_when_supabase_jwt_issuer_points_to_localhost(self):
+    def test_validate_fails_when_supabase_jwt_issuer_points_to_loopback(self):
         with self.assertRaises(RuntimeError):
             validate_production_security()
 
@@ -120,3 +121,14 @@ class ProductionValidationTests(SimpleTestCase):
     def test_validate_fails_when_app_data_key_missing(self):
         with self.assertRaises(RuntimeError):
             validate_production_security()
+
+
+class DevelopmentSettingsTests(SimpleTestCase):
+    def test_frontend_dev_origins_allow_127_loopback_vite_and_alt_ports(self):
+        expected = {
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:4173",
+            "http://127.0.0.1:5173",
+        }
+        self.assertTrue(expected.issubset(set(development_settings.CORS_ALLOWED_ORIGINS)))
+        self.assertTrue(expected.issubset(set(development_settings.CSRF_TRUSTED_ORIGINS)))

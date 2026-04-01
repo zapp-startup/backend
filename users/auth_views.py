@@ -113,7 +113,7 @@ class LoginView(APIView):
             data.get("refresh_token"),
             data.get("expires_in"),
         )
-        audit_login(request, user, "success")
+        audit_login(request, user, "success", auth_method="supabase_password")
         return Response(
             {
                 "user": {
@@ -173,7 +173,7 @@ class SignupView(APIView):
             data.get("refresh_token"),
             data.get("expires_in"),
         )
-        audit_login(request, user, "success")
+        audit_login(request, user, "success", auth_method="supabase_signup")
         return Response(
             {
                 "user": {
@@ -270,21 +270,19 @@ class OAuthStartView(APIView):
         frontend_redirect = (request.data.get("redirect_uri_after") or "").strip() or None
         verifier = pkce_verifier()
         challenge = pkce_challenge(verifier)
-        oauth_state = secrets.token_urlsafe(32)
         store_oauth_pkce_state(
             request,
             code_verifier=verifier,
             provider=provider,
             frontend_redirect=frontend_redirect,
-            state=oauth_state,
         )
         authorize_url = build_oauth_authorize_url(
             provider=provider,
             redirect_to=redirect_uri,
             code_challenge=challenge,
-            state=oauth_state,
         )
-        return Response({"authorize_url": authorize_url, "state": oauth_state})
+        print("OAUTH START URL:", authorize_url)
+        return Response({"authorize_url": authorize_url})
 
 
 class OAuthCallbackView(APIView):
@@ -293,25 +291,29 @@ class OAuthCallbackView(APIView):
 
     def get(self, request):
         code = request.query_params.get("code")
-        state_q = request.query_params.get("state")
         err = request.query_params.get("error_description") or request.query_params.get("error")
         if err:
             return Response(
                 {"detail": err, "error_code": "oauth_provider_error"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if not code or not state_q:
+        if not code:
             return Response(
-                {"detail": "Missing code or state.", "error_code": "oauth_invalid_callback"},
+                {"detail": "Missing code.", "error_code": "oauth_invalid_callback"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         pkce_state = pop_oauth_pkce_state(request)
-        if not pkce_state or pkce_state.get("state") != state_q:
+        if not pkce_state:
             return Response(
-                {"detail": "Invalid OAuth state.", "error_code": "oauth_state_mismatch"},
+                {"detail": "Missing PKCE session.", "error_code": "oauth_missing_session"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        verifier = pkce_state.get("code_verifier") or ""
+        verifier = (pkce_state.get("code_verifier") or "").strip()
+        if not verifier:
+            return Response(
+                {"detail": "Missing code verifier.", "error_code": "oauth_missing_verifier"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         frontend = (pkce_state.get("frontend_redirect") or "").strip()
         try:
             data = supabase_exchange_pkce(code, verifier)
@@ -350,7 +352,8 @@ class OAuthCallbackView(APIView):
             data.get("refresh_token"),
             data.get("expires_in"),
         )
-        audit_login(request, user, "success")
+        provider = (pkce_state.get("provider") or "oauth").strip().lower()
+        audit_login(request, user, "success", auth_method=f"oauth_{provider}")
         if frontend:
             sep = "&" if "?" in frontend else "?"
             target = f"{frontend}{sep}login=success"

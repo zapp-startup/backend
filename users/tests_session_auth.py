@@ -4,6 +4,7 @@ from __future__ import annotations
 import uuid
 from unittest.mock import patch
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase, override_settings
 from django.urls import reverse
@@ -298,6 +299,60 @@ class MeViewTests(TestCase):
         self.assertEqual(r.status_code, status.HTTP_200_OK)
         self.assertEqual(r.json()["email"], "me@example.com")
         self.assertEqual(r.json()["aal"], "aal2")
+
+
+class OAuthCallbackViewTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    @override_settings(SUPABASE_OAUTH_REDIRECT_URI="http://127.0.0.1:8000/api/auth/oauth/callback/")
+    @patch("users.auth_views.audit_login")
+    @patch("users.auth_views.supabase_exchange_pkce")
+    def test_oauth_callback_sets_session_cookie_and_me_accepts_session(
+        self,
+        mock_exchange,
+        mock_audit,
+    ):
+        uid = str(uuid.uuid4())
+        mock_exchange.return_value = {
+            "access_token": "oauth-at",
+            "refresh_token": "oauth-rt",
+            "expires_in": 3600,
+            "user": {
+                "id": uid,
+                "email": "oauth@example.com",
+                "email_confirmed_at": "2020-01-01T00:00:00Z",
+                "aal": "aal1",
+                "factors": [],
+            },
+        }
+
+        session = self.client.session
+        session["oauth_pkce"] = {
+            "code_verifier": "verifier-123",
+            "provider": "google",
+            "frontend_redirect": "http://127.0.0.1:5173/auth/callback",
+            "state": "state-123",
+        }
+        session.save()
+
+        response = self.client.get(
+            reverse("auth-oauth-callback"),
+            {"code": "auth-code-123", "state": "state-123"},
+            follow=False,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        self.assertEqual(
+            response["Location"],
+            "http://127.0.0.1:5173/auth/callback?login=success",
+        )
+        self.assertIn(settings.SESSION_COOKIE_NAME, self.client.cookies)
+
+        me_response = self.client.get(reverse("auth-me"))
+        self.assertEqual(me_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(me_response.json()["email"], "oauth@example.com")
+        self.assertEqual(me_response.json()["aal"], "aal1")
 
 
 class LogoutViewTests(TestCase):

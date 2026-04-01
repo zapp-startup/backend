@@ -3,6 +3,30 @@
 from django.db import migrations
 
 
+CONSTRAINT_NAMES = (
+    "valid_satisfaction_rating",
+    "valid_regret_rating",
+    "valid_repurchase_likelihood",
+    "valid_impulse_score",
+    "valid_regret_score",
+    "valid_feedback_value_score",
+    "valid_feedback_confidence",
+)
+
+
+def _drop_legacy_numeric_constraints():
+    return [
+        migrations.RunSQL(
+            sql=(
+                'ALTER TABLE "transactions_transaction" '
+                f'DROP CONSTRAINT IF EXISTS "{constraint_name}";'
+            ),
+            reverse_sql=migrations.RunSQL.noop,
+        )
+        for constraint_name in CONSTRAINT_NAMES
+    ]
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -10,32 +34,37 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RemoveConstraint(
-            model_name="transaction",
-            name="valid_satisfaction_rating",
-        ),
-        migrations.RemoveConstraint(
-            model_name="transaction",
-            name="valid_regret_rating",
-        ),
-        migrations.RemoveConstraint(
-            model_name="transaction",
-            name="valid_repurchase_likelihood",
-        ),
-        migrations.RemoveConstraint(
-            model_name="transaction",
-            name="valid_impulse_score",
-        ),
-        migrations.RemoveConstraint(
-            model_name="transaction",
-            name="valid_regret_score",
-        ),
-        migrations.RemoveConstraint(
-            model_name="transaction",
-            name="valid_feedback_value_score",
-        ),
-        migrations.RemoveConstraint(
-            model_name="transaction",
-            name="valid_feedback_confidence",
+        migrations.SeparateDatabaseAndState(
+            database_operations=_drop_legacy_numeric_constraints(),
+            state_operations=[
+                migrations.RemoveConstraint(
+                    model_name="transaction",
+                    name="valid_satisfaction_rating",
+                ),
+                migrations.RemoveConstraint(
+                    model_name="transaction",
+                    name="valid_regret_rating",
+                ),
+                migrations.RemoveConstraint(
+                    model_name="transaction",
+                    name="valid_repurchase_likelihood",
+                ),
+                migrations.RemoveConstraint(
+                    model_name="transaction",
+                    name="valid_impulse_score",
+                ),
+                migrations.RemoveConstraint(
+                    model_name="transaction",
+                    name="valid_regret_score",
+                ),
+                migrations.RemoveConstraint(
+                    model_name="transaction",
+                    name="valid_feedback_value_score",
+                ),
+                migrations.RemoveConstraint(
+                    model_name="transaction",
+                    name="valid_feedback_confidence",
+                ),
+            ],
         ),
     ]
