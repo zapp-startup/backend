@@ -15,14 +15,11 @@ CONSTRAINT_NAMES = (
 )
 
 
-def _drop_legacy_numeric_constraints():
+def _legacy_constraint_removals():
     return [
-        migrations.RunSQL(
-            sql=(
-                'ALTER TABLE "transactions_transaction" '
-                f'DROP CONSTRAINT IF EXISTS "{constraint_name}";'
-            ),
-            reverse_sql=migrations.RunSQL.noop,
+        migrations.RemoveConstraint(
+            model_name="transaction",
+            name=constraint_name,
         )
         for constraint_name in CONSTRAINT_NAMES
     ]
@@ -36,8 +33,8 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.SeparateDatabaseAndState(
-            database_operations=_drop_legacy_numeric_constraints(),
-            state_operations=[],
+            database_operations=_legacy_constraint_removals(),
+            state_operations=_legacy_constraint_removals(),
         ),
         migrations.AlterField(
             model_name="transaction",
