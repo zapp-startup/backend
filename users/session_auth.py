@@ -1,0 +1,501 @@
+"""
+Django session BFF: server-side Supabase Auth calls and session state.
+
+Supabase access/refresh tokens are stored only in the server session; they are
+never returned to browser clients.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import logging
+import secrets
+import time
+import uuid
+from typing import Any
+from urllib.parse import urlencode
+
+import jwt
+import requests
+from django.conf import settings
+from django.contrib.auth import get_user_model, login
+from compliance.monitoring import capture_backend_audit_event
+
+from .supabase_auth import build_unique_username
+
+logger = logging.getLogger(__name__)
+
+User = get_user_model()
+
+AUTH_SESSION_KEY = "auth"
+OAUTH_PKCE_SESSION_KEY = "oauth_pkce"
+
+SUPABASE_TOKEN_PATH = "/auth/v1/token"
+SUPABASE_SIGNUP_PATH = "/auth/v1/signup"
+SUPABASE_LOGOUT_PATH = "/auth/v1/logout"
+SUPABASE_AUTHORIZE_PATH = "/auth/v1/authorize"
+
+
+class SupabaseAuthError(Exception):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 400,
+        error_code: str = "supabase_auth_error",
+    ):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.error_code = error_code
+
+
+def _supabase_base_url() -> str:
+    url = (getattr(settings, "SUPABASE_URL", None) or "").strip().rstrip("/")
+    if not url:
+        raise SupabaseAuthError(
+            "Authentication is not configured.",
+            status_code=503,
+            error_code="auth_not_configured",
+        )
+    return url
+
+
+def _anon_headers() -> dict[str, str]:
+    key = (getattr(settings, "SUPABASE_ANON_KEY", None) or "").strip()
+    if not key:
+        raise SupabaseAuthError(
+            "Authentication is not configured.",
+            status_code=503,
+            error_code="auth_not_configured",
+        )
+    return {
+        "apikey": key,
+        "Content-Type": "application/json",
+    }
+
+
+def _bearer_headers(access_token: str) -> dict[str, str]:
+    h = _anon_headers()
+    h["Authorization"] = f"Bearer {access_token}"
+    return h
+
+
+def _parse_error_payload(resp: requests.Response) -> tuple[str, str]:
+    try:
+        data = resp.json()
+    except ValueError:
+        return "Request failed", "request_failed"
+    if isinstance(data, dict):
+        msg = (
+            data.get("error_description")
+            or data.get("msg")
+            or data.get("message")
+            or data.get("error")
+            or "Request failed"
+        )
+        code = str(data.get("error") or data.get("error_code") or "request_failed")
+        return str(msg), code
+    return "Request failed", "request_failed"
+
+
+def supabase_login(email: str, password: str) -> dict[str, Any]:
+    url = _supabase_base_url() + SUPABASE_TOKEN_PATH + "?grant_type=password"
+    resp = requests.post(
+        url,
+        headers=_anon_headers(),
+        json={"email": email.strip(), "password": password},
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        msg, code = _parse_error_payload(resp)
+        raise SupabaseAuthError(msg, status_code=400, error_code=code or "invalid_credentials")
+    return resp.json()
+
+
+def supabase_signup(email: str, password: str) -> dict[str, Any]:
+    url = _supabase_base_url() + SUPABASE_SIGNUP_PATH
+    resp = requests.post(
+        url,
+        headers=_anon_headers(),
+        json={"email": email.strip(), "password": password},
+        timeout=10,
+    )
+    if resp.status_code not in (200, 201):
+        msg, code = _parse_error_payload(resp)
+        raise SupabaseAuthError(msg, status_code=400, error_code=code or "signup_failed")
+    return resp.json()
+
+
+def supabase_logout(access_token: str) -> None:
+    if not access_token:
+        return
+    url = _supabase_base_url() + SUPABASE_LOGOUT_PATH
+    try:
+        requests.post(
+            url,
+            headers=_bearer_headers(access_token),
+            json={"scope": "global"},
+            timeout=10,
+        )
+    except requests.RequestException as exc:
+        logger.warning("Supabase logout request failed: %s", exc)
+
+
+def supabase_refresh(refresh_token: str) -> dict[str, Any]:
+    url = _supabase_base_url() + SUPABASE_TOKEN_PATH + "?grant_type=refresh_token"
+    resp = requests.post(
+        url,
+        headers=_anon_headers(),
+        json={"refresh_token": refresh_token},
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        msg, code = _parse_error_payload(resp)
+        raise SupabaseAuthError(msg, status_code=401, error_code=code or "refresh_failed")
+    return resp.json()
+
+
+def supabase_exchange_pkce(auth_code: str, code_verifier: str) -> dict[str, Any]:
+    url = _supabase_base_url() + SUPABASE_TOKEN_PATH + "?grant_type=pkce"
+    resp = requests.post(
+        url,
+        headers=_anon_headers(),
+        json={"auth_code": auth_code, "code_verifier": code_verifier},
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        msg, code = _parse_error_payload(resp)
+        raise SupabaseAuthError(msg, status_code=400, error_code=code or "oauth_exchange_failed")
+    return resp.json()
+
+
+def supabase_mfa_challenge(access_token: str, factor_id: str) -> dict[str, Any]:
+    url = f"{_supabase_base_url()}/auth/v1/factors/{factor_id}/challenge"
+    resp = requests.post(url, headers=_bearer_headers(access_token), json={}, timeout=10)
+    if resp.status_code not in (200, 201):
+        msg, code = _parse_error_payload(resp)
+        raise SupabaseAuthError(msg, status_code=400, error_code=code or "mfa_challenge_failed")
+    return resp.json()
+
+
+def supabase_mfa_verify(
+    access_token: str, factor_id: str, challenge_id: str, code: str
+) -> dict[str, Any]:
+    url = f"{_supabase_base_url()}/auth/v1/factors/{factor_id}/verify"
+    resp = requests.post(
+        url,
+        headers=_bearer_headers(access_token),
+        json={"challenge_id": challenge_id, "code": code},
+        timeout=10,
+    )
+    if resp.status_code not in (200, 201):
+        msg, code = _parse_error_payload(resp)
+        raise SupabaseAuthError(msg, status_code=400, error_code=code or "mfa_verify_failed")
+    return resp.json()
+
+
+def _is_email_verified(user_obj: dict[str, Any] | None) -> bool:
+    if not user_obj:
+        return False
+    return bool(user_obj.get("email_confirmed_at"))
+
+
+def _count_mfa_factors(user_obj: dict[str, Any] | None) -> int:
+    if not user_obj:
+        return -1
+    factors = user_obj.get("factors")
+    if factors is None:
+        return -1
+    if isinstance(factors, list):
+        return len(factors)
+    return -1
+
+
+def _extract_aal(user_obj: dict[str, Any] | None) -> str | None:
+    if not user_obj:
+        return None
+    aal = user_obj.get("aal")
+    return str(aal).lower() if aal else None
+
+
+def _token_expires_at(access_token: str, expires_in: int | None) -> int:
+    if expires_in is not None:
+        return int(time.time()) + int(expires_in)
+    try:
+        decoded = jwt.decode(access_token, options={"verify_signature": False})
+        exp = decoded.get("exp")
+        if exp:
+            return int(exp)
+    except Exception:
+        pass
+    return int(time.time()) + 3600
+
+
+def extract_session_data(sb_response: dict[str, Any]) -> dict[str, Any]:
+    """Normalize user + assurance fields from a Supabase token or signup response."""
+    user_obj = sb_response.get("user")
+    if not isinstance(user_obj, dict):
+        user_obj = {}
+    aal = _extract_aal(user_obj)
+    return {
+        "aal": aal,
+        "auth_method": "password",
+        "mfa_factor_count": _count_mfa_factors(user_obj),
+        "email_verified": _is_email_verified(user_obj),
+    }
+
+
+def get_or_create_local_user(supabase_uid: uuid.UUID, email: str) -> Any:
+    user = User.objects.filter(supabase_uid=supabase_uid).first()
+    if user is not None:
+        if not user.email and email:
+            user.email = email
+            user.save(update_fields=["email"])
+        return user
+
+    if User.objects.filter(email__iexact=email).exists():
+        raise SupabaseAuthError(
+            "A local account with this email already exists and must be linked manually.",
+            status_code=409,
+            error_code="email_link_conflict",
+        )
+
+    return User.objects.create_user(
+        username=build_unique_username(email),
+        email=email.strip().lower(),
+        supabase_uid=supabase_uid,
+        password=None,
+    )
+
+
+def issue_django_session(
+    request,
+    user,
+    session_data: dict[str, Any],
+    access_token: str,
+    refresh_token: str | None,
+    expires_in: int | None,
+) -> None:
+    """Rotate session, log user in, store Supabase tokens server-side only."""
+    request.session.flush()
+    now_ts = int(time.time())
+    aal = session_data.get("aal")
+    last_step_up_at = None
+    if aal == "aal2":
+        last_step_up_at = now_ts
+
+    request.session[AUTH_SESSION_KEY] = {
+        "user_id": user.pk,
+        "supabase_uid": str(user.supabase_uid) if user.supabase_uid else None,
+        "email": user.email,
+        "aal": aal,
+        "auth_method": session_data.get("auth_method") or "password",
+        "mfa_factor_count": session_data.get("mfa_factor_count", -1),
+        "last_step_up_at": last_step_up_at,
+        "logged_in_at": now_ts,
+        "_supabase_access_token": access_token,
+        "_supabase_refresh_token": refresh_token or "",
+        "_supabase_token_expires_at": _token_expires_at(access_token, expires_in),
+    }
+    request.session.modified = True
+    login(request, user, backend="django.contrib.auth.backends.ModelBackend")
+
+
+def clear_session(request) -> str | None:
+    """Return access token for best-effort Supabase revoke; flush Django session."""
+    auth_block = request.session.get(AUTH_SESSION_KEY) or {}
+    access = auth_block.get("_supabase_access_token")
+    try:
+        request.session.flush()
+    except Exception:
+        request.session.clear()
+    return access if isinstance(access, str) else None
+
+
+def get_session_auth_state(request) -> dict[str, Any] | None:
+    block = request.session.get(AUTH_SESSION_KEY)
+    return block if isinstance(block, dict) else None
+
+
+def get_supabase_access_token(request) -> str | None:
+    state = get_session_auth_state(request)
+    if not state:
+        return None
+    tok = state.get("_supabase_access_token")
+    return tok if isinstance(tok, str) and tok else None
+
+
+def record_step_up(request) -> None:
+    state = get_session_auth_state(request)
+    if not state:
+        return
+    now_ts = int(time.time())
+    state["aal"] = "aal2"
+    state["last_step_up_at"] = now_ts
+    request.session[AUTH_SESSION_KEY] = state
+    request.session.modified = True
+
+
+def refresh_session_tokens_if_needed(request) -> bool:
+    """
+    If stored access token is near expiry, refresh using refresh_token.
+    Returns True if session was updated.
+    """
+    state = get_session_auth_state(request)
+    if not state:
+        return False
+    exp = state.get("_supabase_token_expires_at") or 0
+    refresh_tok = state.get("_supabase_refresh_token") or ""
+    if not refresh_tok or not isinstance(refresh_tok, str):
+        return False
+    # Refresh if expiring within 120s
+    if int(time.time()) < int(exp) - 120:
+        return False
+    try:
+        data = supabase_refresh(refresh_tok)
+    except SupabaseAuthError:
+        return False
+    access = data.get("access_token")
+    if not access:
+        return False
+    new_refresh = data.get("refresh_token") or refresh_tok
+    expires_in = data.get("expires_in")
+    state["_supabase_access_token"] = access
+    state["_supabase_refresh_token"] = new_refresh
+    state["_supabase_token_expires_at"] = _token_expires_at(access, expires_in)
+    user_obj = data.get("user")
+    if isinstance(user_obj, dict):
+        if user_obj.get("aal"):
+            state["aal"] = str(user_obj["aal"]).lower()
+        fc = _count_mfa_factors(user_obj)
+        if fc >= 0:
+            state["mfa_factor_count"] = fc
+    request.session[AUTH_SESSION_KEY] = state
+    request.session.modified = True
+    return True
+
+
+def audit_login(request, user, outcome: str, error_code: str | None = None) -> None:
+    capture_backend_audit_event(
+        event_name="auth.login",
+        outcome=outcome,
+        actor=user if outcome == "success" else None,
+        action="login",
+        resource_type="session",
+        request=request,
+        status_code=200 if outcome == "success" else 400,
+        error_code=error_code,
+        error_message=None if outcome == "success" else (error_code or "failure"),
+        metadata={"auth_method": "supabase_password"},
+    )
+
+
+def audit_logout(request, user) -> None:
+    capture_backend_audit_event(
+        event_name="auth.logout",
+        outcome="success",
+        actor=user if getattr(user, "is_authenticated", False) else None,
+        action="logout",
+        resource_type="session",
+        request=request,
+        status_code=200,
+        metadata={},
+    )
+
+
+def audit_mfa_verify(request, user, outcome: str, error_code: str | None = None) -> None:
+    capture_backend_audit_event(
+        event_name="auth.mfa_verify",
+        outcome=outcome,
+        actor=user,
+        action="mfa_verify",
+        resource_type="session",
+        request=request,
+        status_code=200 if outcome == "success" else 400,
+        error_code=error_code,
+        metadata={},
+    )
+
+
+def pkce_verifier() -> str:
+    return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii").rstrip("=")
+
+
+def pkce_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def build_oauth_authorize_url(
+    *,
+    provider: str,
+    redirect_to: str,
+    code_challenge: str,
+    state: str,
+) -> str:
+    q = urlencode(
+        {
+            "provider": provider,
+            "redirect_to": redirect_to,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "state": state,
+        }
+    )
+    return f"{_supabase_base_url()}{SUPABASE_AUTHORIZE_PATH}?{q}"
+
+
+def store_oauth_pkce_state(
+    request,
+    *,
+    code_verifier: str,
+    provider: str,
+    frontend_redirect: str | None,
+    state: str,
+) -> None:
+    request.session[OAUTH_PKCE_SESSION_KEY] = {
+        "code_verifier": code_verifier,
+        "provider": provider,
+        "frontend_redirect": frontend_redirect or "",
+        "state": state,
+    }
+    request.session.modified = True
+
+
+def pop_oauth_pkce_state(request) -> dict[str, Any] | None:
+    data = request.session.pop(OAUTH_PKCE_SESSION_KEY, None)
+    request.session.modified = True
+    return data if isinstance(data, dict) else None
+
+
+def user_from_token_response(sb_response: dict[str, Any]) -> tuple[uuid.UUID, str]:
+    user_obj = sb_response.get("user")
+    if not isinstance(user_obj, dict):
+        raise SupabaseAuthError("Invalid auth response.", error_code="invalid_response")
+    sub = user_obj.get("id")
+    email = (user_obj.get("email") or "").strip().lower()
+    if not sub or not email:
+        raise SupabaseAuthError("Invalid user profile in auth response.", error_code="invalid_response")
+    try:
+        uid = uuid.UUID(str(sub))
+    except Exception as exc:
+        raise SupabaseAuthError("Invalid Supabase user id.", error_code="invalid_response") from exc
+    if not _is_email_verified(user_obj):
+        raise SupabaseAuthError(
+            "Email is not verified.",
+            status_code=403,
+            error_code="email_not_confirmed",
+        )
+    return uid, email
+
+
+def ensure_session_user_matches_request(request) -> None:
+    """If session auth exists, ensure request.user aligns (after login)."""
+    state = get_session_auth_state(request)
+    if not state:
+        return
+    uid = state.get("user_id")
+    if uid and request.user.is_authenticated and request.user.pk != uid:
+        logger.warning("Session user_id mismatch with request.user; clearing session.")
+        clear_session(request)

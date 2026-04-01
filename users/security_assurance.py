@@ -1,24 +1,19 @@
 """
-Backend-authoritative MFA / assurance assessment using Supabase session claims.
+Backend-authoritative MFA / assurance assessment.
 
-Assumptions (documented; verify against your Supabase project):
-- Supabase access tokens include an `aal` claim: "aal1" (single-factor) or
-  "aal2" (multi-factor satisfied for this session) when MFA is enabled.
-- Optional `amr` (Authentication Methods References) may list methods used.
-- The `/auth/v1/user` response may include a `factors` list when MFA is enrolled.
-  We merge factor counts when that response was loaded during authentication.
-
-This module does not replace Supabase-side MFA configuration; it enforces
-that the API only allows sensitive banking actions when the presented JWT
-indicates aal2 (or policy allows dev bypass).
+Primary path: Django session state written at login / MFA verify (BFF).
+Compatibility: SupabaseJWTAuthentication still supplies a dict on request.auth.
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from django.conf import settings
 
 from compliance.services import user_has_valid_financial_consent
+
+from .session_auth import get_session_auth_state
 
 # JWT / Supabase user claim keys
 AAL_CLAIM = "aal"
@@ -52,7 +47,33 @@ def extract_assurance_from_auth(auth: Any) -> dict:
     }
 
 
-def assess_mfa_for_banking(auth: Any) -> tuple[bool, str | None, dict]:
+def extract_assurance_from_request(request) -> dict:
+    """
+    Prefer server session auth; fall back to JWT auth context (legacy clients).
+    Includes _assurance_source: 'session' | 'jwt' | 'none'.
+    """
+    block = get_session_auth_state(request)
+    if isinstance(block, dict) and block.get("user_id"):
+        count = block.get("mfa_factor_count")
+        if count is None:
+            count = -1
+        return {
+            "aal": block.get("aal"),
+            "amr": [],
+            "mfa_factors_count": int(count) if count is not None else -1,
+            "last_step_up_at": block.get("last_step_up_at"),
+            "_assurance_source": "session",
+        }
+    auth = getattr(request, "auth", None)
+    info = extract_assurance_from_auth(auth)
+    info["last_step_up_at"] = None
+    if isinstance(auth, dict) and auth.get("last_step_up_at") is not None:
+        info["last_step_up_at"] = auth.get("last_step_up_at")
+    info["_assurance_source"] = "jwt" if isinstance(auth, dict) else "none"
+    return info
+
+
+def assess_mfa_for_banking(request) -> tuple[bool, str | None, dict]:
     """
     Returns (allowed, error_code, extra).
 
@@ -60,34 +81,30 @@ def assess_mfa_for_banking(auth: Any) -> tuple[bool, str | None, dict]:
     When True: only aal2 passes; aal1 / missing aal fails; unknown factor count fails
     conservatively (mfa_required) unless aal2.
     """
+    info = extract_assurance_from_request(request)
     if not getattr(settings, "BANKING_REQUIRE_MFA", False):
-        return True, None, {}
+        return True, None, info
 
-    info = extract_assurance_from_auth(auth)
-    aal = (info["aal"] or "").lower()
+    aal = (info.get("aal") or "").lower()
     factors = info["mfa_factors_count"]
 
     if aal == "aal2":
         return True, None, info
 
-    # aal1 or missing: distinguish enrollment when factor count is known
     if factors == 0:
         return False, MfaErrorCode.NOT_ENROLLED, info
     if factors > 0:
         return False, MfaErrorCode.VERIFICATION_NEEDED, info
 
-    # Unknown factors: conservative — require step-up (frontend should re-verify MFA)
     return False, MfaErrorCode.REQUIRED, info
 
 
 def build_assurance_payload(request) -> dict:
     """
-    Payload for GET /api/security/auth-assurance/.
+    Payload for GET /api/auth/assurance/ and legacy GET /api/security/auth-assurance/.
     Uses the same MFA + consent rules as enforce_banking_policies (banking flows).
     """
-    auth = getattr(request, "auth", None)
-    info = extract_assurance_from_auth(auth)
-    allowed, code, _ = assess_mfa_for_banking(auth)
+    allowed, code, info = assess_mfa_for_banking(request)
     consent_required = getattr(settings, "BANKING_REQUIRE_FINANCIAL_CONSENT", True)
     consent_ok = (
         user_has_valid_financial_consent(request.user) if consent_required else True
@@ -102,12 +119,38 @@ def build_assurance_payload(request) -> dict:
     aal = info.get("aal")
     aal_normalized = (aal or "").lower() or None
 
+    assurance_public = {
+        k: v
+        for k, v in info.items()
+        if not str(k).startswith("_")
+    }
+
     return {
         "mfa_required_by_policy": getattr(settings, "BANKING_REQUIRE_MFA", False),
         "consent_required_by_policy": consent_required,
         "financial_consent_valid": consent_ok,
-        "assurance": info,
+        "assurance": assurance_public,
         "aal_normalized": aal_normalized,
         "banking_allowed": banking_allowed,
         "blocking_code": blocking_code,
     }
+
+
+def banking_step_up_fresh(info: dict) -> bool:
+    """True if session-bound aal2 has a recent last_step_up_at (or policy off)."""
+    if not getattr(settings, "BANKING_STEP_UP_REQUIRED", False):
+        return True
+    if info.get("_assurance_source") != "session":
+        return True
+    aal = (info.get("aal") or "").lower()
+    if aal != "aal2":
+        return True
+    last = info.get("last_step_up_at")
+    if last is None:
+        return False
+    try:
+        last_i = int(last)
+    except (TypeError, ValueError):
+        return False
+    window = int(getattr(settings, "BANKING_STEP_UP_FRESHNESS_SECONDS", 900))
+    return (int(time.time()) - last_i) <= window

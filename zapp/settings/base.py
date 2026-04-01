@@ -137,6 +137,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework.authentication.SessionAuthentication",
         "users.supabase_auth.SupabaseJWTAuthentication",
     ),
     "DEFAULT_THROTTLE_CLASSES": (
@@ -154,6 +155,29 @@ REST_FRAMEWORK = {
         "compliance_consent": os.getenv("THROTTLE_COMPLIANCE_CONSENT", "60/hour"),
     },
 }
+
+# --- Session / CSRF (browser BFF; explicit defaults) ---
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_AGE = int(os.getenv("SESSION_COOKIE_AGE", str(60 * 60 * 24 * 14)))
+CSRF_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_HTTPONLY = False
+
+# --- Banking step-up freshness (session-backed assurance) ---
+BANKING_STEP_UP_REQUIRED = os.getenv("BANKING_STEP_UP_REQUIRED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+BANKING_STEP_UP_FRESHNESS_SECONDS = int(
+    os.getenv("BANKING_STEP_UP_FRESHNESS_SECONDS", "900")
+)
+
+# Optional: Supabase service role for future admin ops (not required for password/OAuth BFF)
+SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip() or None
+
+# OAuth BFF: redirect must match Supabase Dashboard > Auth > URL Configuration
+SUPABASE_OAUTH_REDIRECT_URI = (os.getenv("SUPABASE_OAUTH_REDIRECT_URI") or "").strip() or None
 
 
 # Internationalization

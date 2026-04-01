@@ -32,6 +32,17 @@ def validate_production_security():
     if not getattr(settings, "CSRF_COOKIE_SECURE", False):
         errors.append("CSRF_COOKIE_SECURE must be True in production.")
 
+    if not getattr(settings, "SESSION_COOKIE_HTTPONLY", True):
+        errors.append("SESSION_COOKIE_HTTPONLY must be True in production.")
+
+    session_samesite = getattr(settings, "SESSION_COOKIE_SAMESITE", None)
+    if session_samesite is None or str(session_samesite).strip() == "":
+        errors.append("SESSION_COOKIE_SAMESITE must be set in production (e.g. Lax).")
+
+    csrf_samesite = getattr(settings, "CSRF_COOKIE_SAMESITE", None)
+    if csrf_samesite is None or str(csrf_samesite).strip() == "":
+        errors.append("CSRF_COOKIE_SAMESITE must be set in production (e.g. Lax).")
+
     sec = getattr(settings, "SECURE_HSTS_SECONDS", 0) or 0
     if sec < 60:
         errors.append("SECURE_HSTS_SECONDS should be set (e.g. 31536000) in production.")

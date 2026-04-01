@@ -12,12 +12,15 @@ BANKING_REQUIRE_MFA = env_bool("BANKING_REQUIRE_MFA", False)
 BANKING_REQUIRE_FINANCIAL_CONSENT = env_bool(
     "BANKING_REQUIRE_FINANCIAL_CONSENT", False
 )
+BANKING_STEP_UP_REQUIRED = env_bool("BANKING_STEP_UP_REQUIRED", False)
 ALLOW_DEV_HEADER_AUTH = True
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
+CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = list(CORS_ALLOWED_ORIGINS)
 
 from corsheaders.defaults import default_headers
 CORS_ALLOW_HEADERS = list(default_headers) + [
