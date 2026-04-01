@@ -236,6 +236,42 @@ def supabase_mfa_unenroll(access_token: str, factor_id: str) -> None:
         raise SupabaseAuthError(msg, status_code=400, error_code=code or "mfa_unenroll_failed")
 
 
+def _normalize_totp_qr_code(qr_code: Any) -> Any:
+    if not isinstance(qr_code, str):
+        return qr_code
+    trimmed = qr_code.strip()
+    if not trimmed:
+        return qr_code
+    if trimmed.lower().startswith("data:image/"):
+        return trimmed
+    if trimmed.startswith("<?xml") or trimmed.startswith("<svg"):
+        encoded = base64.b64encode(trimmed.encode("utf-8")).decode("ascii")
+        return f"data:image/svg+xml;base64,{encoded}"
+    return qr_code
+
+
+def normalize_mfa_enroll_payload(payload: Any) -> Any:
+    """
+    Supabase may return a raw SVG string for totp.qr_code. Normalize it to a
+    data URI so browser clients can render it consistently.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    totp = payload.get("totp")
+    if not isinstance(totp, dict):
+        return payload
+
+    qr_code = _normalize_totp_qr_code(totp.get("qr_code"))
+    if qr_code == totp.get("qr_code"):
+        return payload
+
+    normalized = dict(payload)
+    normalized_totp = dict(totp)
+    normalized_totp["qr_code"] = qr_code
+    normalized["totp"] = normalized_totp
+    return normalized
+
+
 def _is_email_verified(user_obj: dict[str, Any] | None) -> bool:
     if not user_obj:
         return False

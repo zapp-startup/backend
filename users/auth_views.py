@@ -28,6 +28,7 @@ from .session_auth import (
     get_session_auth_state,
     get_supabase_access_token,
     issue_django_session,
+    normalize_mfa_enroll_payload,
     pop_oauth_pkce_state,
     pkce_challenge,
     pkce_verifier,
@@ -447,7 +448,7 @@ class MfaEnrollView(APIView):
                 {"detail": exc.message, "error_code": exc.error_code},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        return Response(out, status=status.HTTP_201_CREATED)
+        return Response(normalize_mfa_enroll_payload(out), status=status.HTTP_201_CREATED)
 
 
 class MfaVerifyEnrollmentView(APIView):

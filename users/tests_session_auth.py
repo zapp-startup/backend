@@ -1,6 +1,7 @@
 """Tests for session BFF auth service and API views."""
 from __future__ import annotations
 
+import base64
 import uuid
 from unittest.mock import patch
 
@@ -446,6 +447,25 @@ class MfaViewTests(TestCase):
         self.assertEqual(response.json()["id"], "factor-1")
         self.assertEqual(response.json()["totp"]["secret"], "SECRET")
         mock_get_user.assert_not_called()
+
+    @patch("users.auth_views.supabase_mfa_enroll_totp")
+    def test_mfa_enroll_wraps_svg_qr_code_as_data_uri(self, mock_enroll):
+        self._set_session_auth()
+        raw_svg = '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>'
+        mock_enroll.return_value = {
+            "id": "factor-1",
+            "totp": {"qr_code": raw_svg, "secret": "SECRET"},
+        }
+        response = self.client.post(
+            reverse("auth-mfa-enroll"),
+            {"friendly_name": "Authenticator app"},
+            format="json",
+            **_csrf_header(self.client),
+        )
+        self.assertEqual(response.status_code, 201)
+        qr_code = response.json()["totp"]["qr_code"]
+        self.assertTrue(qr_code.startswith("data:image/svg+xml;base64,"))
+        self.assertEqual(base64.b64decode(qr_code.split(",", 1)[1]).decode("utf-8"), raw_svg)
 
     @patch("users.auth_views.supabase_get_user")
     @patch("users.auth_views.supabase_mfa_verify")
