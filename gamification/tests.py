@@ -5,7 +5,21 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from gamification.models import Badge, Group, GroupInvite, GroupInviteStatus, GroupMember, MonthlyTarget, PointAction, PointEvent, UserBadge, UserStreak
+from gamification.models import (
+    Badge,
+    Group,
+    GroupInvite,
+    GroupInviteStatus,
+    GroupMember,
+    MonthlyTarget,
+    PeriodicReview,
+    PeriodicReviewStatus,
+    PeriodicReviewType,
+    PointAction,
+    PointEvent,
+    UserBadge,
+    UserStreak,
+)
 from gamification.services import award_points, award_points_for_transaction, sync_badge_catalog
 from subscriptions.models import Merchant, Subscription
 from transactions.models import Transaction
@@ -396,6 +410,166 @@ class GamificationApiTests(TestCase):
         self.assertEqual(rows[0]["reflections_count"], 1)
         self.assertEqual(rows[0]["rank"], 1)
         self.assertEqual(response.json()["current_user_rank"], 1)
+
+    def test_weekly_review_endpoint_returns_review_overview(self):
+        transaction = Transaction.objects.create(
+            user=self.user,
+            amount="42.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=timezone.now(),
+            category="shopping",
+            payment_channel="card",
+        )
+
+        response = self.client.get("/api/gamification/reviews/weekly/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["review"]["review_type"], PeriodicReviewType.WEEKLY)
+        self.assertEqual(payload["minimum_transactions_required"], 1)
+        self.assertEqual(len(payload["transaction_candidates"]), 1)
+        self.assertEqual(payload["transaction_candidates"][0]["id"], transaction.id)
+        self.assertFalse(payload["eligible_to_complete"])
+
+    def test_weekly_review_completion_requires_feedback_and_summary(self):
+        transaction = Transaction.objects.create(
+            user=self.user,
+            amount="42.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=timezone.now(),
+            category="shopping",
+            payment_channel="card",
+        )
+
+        first_attempt = self.client.post(
+            "/api/gamification/reviews/weekly/complete/",
+            {"summary_json": {"wins": "good", "regrets": "none", "adjustment": "stay steady"}},
+            format="json",
+        )
+        self.assertEqual(first_attempt.status_code, 400)
+        self.assertIn("reviewed_transactions", first_attempt.json()["missing_requirements"])
+
+        transaction.satisfaction_rating = 8
+        transaction.regret_rating = 10
+        transaction.repurchase_likelihood = 80
+        transaction.reflection_text = "Worth it overall."
+        transaction.save(
+            update_fields=[
+                "satisfaction_rating",
+                "regret_rating",
+                "repurchase_likelihood",
+                "reflection_text",
+            ]
+        )
+
+        second_attempt = self.client.post(
+            "/api/gamification/reviews/weekly/complete/",
+            {"summary_json": {"wins": "good", "regrets": "none", "adjustment": "stay steady"}},
+            format="json",
+        )
+
+        self.assertEqual(second_attempt.status_code, 201)
+        review = PeriodicReview.objects.get(user=self.user, review_type=PeriodicReviewType.WEEKLY)
+        self.assertEqual(review.status, PeriodicReviewStatus.COMPLETED)
+        self.assertEqual(PointEvent.objects.filter(user=self.user, action=PointAction.WEEKLY_REVIEW).count(), 1)
+
+    def test_monthly_review_completion_requires_two_reviewed_transactions(self):
+        now = timezone.now()
+        current_month = now.date().replace(day=1)
+        txn_one = Transaction.objects.create(
+            user=self.user,
+            amount="42.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=now,
+            category="shopping",
+            payment_channel="card",
+            satisfaction_rating=8,
+        )
+        Transaction.objects.create(
+            user=self.user,
+            amount="18.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=now - timedelta(hours=2),
+            category="eating_out",
+            payment_channel="card",
+        )
+
+        first_attempt = self.client.post(
+            "/api/gamification/reviews/monthly/complete/",
+            {
+                "month": current_month.strftime("%Y-%m"),
+                "summary_json": {
+                    "best_purchase": "Headphones",
+                    "most_regretted_purchase": "Snacks",
+                    "next_month_focus": "Less impulse spending",
+                },
+            },
+            format="json",
+        )
+        self.assertEqual(first_attempt.status_code, 400)
+        self.assertIn("reviewed_transactions", first_attempt.json()["missing_requirements"])
+
+        txn_two = Transaction.objects.filter(user=self.user).exclude(id=txn_one.id).get()
+        txn_two.satisfaction_rating = 6
+        txn_two.regret_rating = 20
+        txn_two.repurchase_likelihood = 60
+        txn_two.save(update_fields=["satisfaction_rating", "regret_rating", "repurchase_likelihood"])
+
+        second_attempt = self.client.post(
+            "/api/gamification/reviews/monthly/complete/",
+            {
+                "month": current_month.strftime("%Y-%m"),
+                "summary_json": {
+                    "best_purchase": "Headphones",
+                    "most_regretted_purchase": "Snacks",
+                    "next_month_focus": "Less impulse spending",
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(second_attempt.status_code, 201)
+        review = PeriodicReview.objects.get(user=self.user, review_type=PeriodicReviewType.MONTHLY)
+        self.assertEqual(review.status, PeriodicReviewStatus.COMPLETED)
+        self.assertEqual(
+            PointEvent.objects.filter(user=self.user, action=PointAction.COMPLETE_MONTHLY_REVIEW).count(),
+            1,
+        )
+
+    def test_review_nudges_include_transaction_and_subscription_signals(self):
+        Transaction.objects.create(
+            user=self.user,
+            amount="42.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=timezone.now(),
+            category="shopping",
+            payment_channel="card",
+        )
+        merchant = Merchant.objects.create(name="Spotify", category="streaming")
+        Subscription.objects.create(
+            user=self.user,
+            merchant=merchant,
+            price="9.99",
+            currency="USD",
+            status="active",
+            billing_cycle="monthly",
+            renewal_date=timezone.now().date() + timedelta(days=5),
+            subscription_utilization=0.25,
+            subscription_cost_benefit=0.3,
+        )
+
+        response = self.client.get("/api/gamification/reviews/nudges/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["weekly"]["pending_transaction_feedback_count"], 1)
+        self.assertEqual(payload["monthly"]["upcoming_subscription_renewals_count"], 1)
+        self.assertEqual(payload["monthly"]["low_value_subscriptions_count"], 1)
 
     def test_leaderboard_uses_activity_window_date_not_insert_time(self):
         award_points(

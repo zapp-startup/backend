@@ -1,6 +1,9 @@
 from rest_framework import serializers
 
-from .models import Badge, Group, GroupInvite, GroupMember, MonthlyTarget, PointEvent, UserBadge, UserStreak
+from subscriptions.serializers import SubscriptionSerializer
+from transactions.serializers import TransactionSerializer
+
+from .models import Badge, Group, GroupInvite, GroupMember, MonthlyTarget, PeriodicReview, PointEvent, UserBadge, UserStreak
 from .services import build_level_progress
 
 
@@ -132,3 +135,28 @@ class MonthlyTargetSerializer(serializers.ModelSerializer):
         model = MonthlyTarget
         fields = "__all__"
         read_only_fields = ("user", "current_value", "status", "completed_at", "created_at", "updated_at")
+
+
+class PeriodicReviewSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PeriodicReview
+        fields = "__all__"
+        read_only_fields = ("user", "status", "completed_at", "created_at", "updated_at")
+
+
+class ReviewOverviewSerializer(serializers.Serializer):
+    review = PeriodicReviewSerializer()
+    period_label = serializers.CharField()
+    summary_requirements = serializers.ListField(child=serializers.CharField())
+    minimum_transactions_required = serializers.IntegerField()
+    reviewed_transaction_count = serializers.IntegerField()
+    pending_transaction_feedback_count = serializers.IntegerField()
+    eligible_to_complete = serializers.BooleanField()
+    transaction_candidates = TransactionSerializer(many=True)
+    upcoming_subscription_renewals = SubscriptionSerializer(many=True)
+    low_value_subscriptions = SubscriptionSerializer(many=True)
+
+
+class ReviewNudgesSerializer(serializers.Serializer):
+    weekly = serializers.DictField()
+    monthly = serializers.DictField()

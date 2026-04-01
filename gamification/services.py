@@ -8,10 +8,24 @@ from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
 
-from transactions.models import TransactionReflection
-
+from subscriptions.models import Subscription, SubscriptionStatus
+from transactions.feedback_candidates import get_feedback_candidates
+from transactions.models import Transaction, TransactionCategory, TransactionReflection
 from .badges import ACTION_POINTS, BADGE_CATALOG
-from .models import Badge, Group, GroupMember, MonthlyTarget, MonthlyTargetStatus, PointAction, PointEvent, UserBadge, UserStreak
+from .models import (
+    Badge,
+    Group,
+    GroupMember,
+    MonthlyTarget,
+    MonthlyTargetStatus,
+    PeriodicReview,
+    PeriodicReviewStatus,
+    PeriodicReviewType,
+    PointAction,
+    PointEvent,
+    UserBadge,
+    UserStreak,
+)
 
 User = get_user_model()
 
@@ -23,6 +37,24 @@ STREAK_QUALIFYING_ACTIONS = {
 
 LEVEL_BASE_POINTS = 50
 LEVEL_STEP_POINTS = 25
+LOW_SIGNAL_REVIEW_CATEGORIES = {
+    TransactionCategory.GROCERIES,
+    TransactionCategory.BILLS,
+}
+REVIEW_SUMMARY_REQUIREMENTS = {
+    PeriodicReviewType.WEEKLY: ("wins", "regrets", "adjustment"),
+    PeriodicReviewType.MONTHLY: ("best_purchase", "most_regretted_purchase", "next_month_focus"),
+}
+REVIEW_MINIMUM_TRANSACTION_FEEDBACK = {
+    PeriodicReviewType.WEEKLY: 1,
+    PeriodicReviewType.MONTHLY: 2,
+}
+REVIEW_TRANSACTION_CANDIDATE_LIMIT = {
+    PeriodicReviewType.WEEKLY: 3,
+    PeriodicReviewType.MONTHLY: 5,
+}
+SUBSCRIPTION_RENEWAL_NUDGE_LIMIT = 3
+LOW_VALUE_SUBSCRIPTION_NUDGE_LIMIT = 3
 
 
 @dataclass(frozen=True)
@@ -69,6 +101,15 @@ def normalize_week_start(window_date: date) -> date:
     return window_date - timedelta(days=window_date.weekday())
 
 
+def normalize_month_start(window_date: date) -> date:
+    return window_date.replace(day=1)
+
+
+def month_end(window_date: date) -> date:
+    next_month = (window_date.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return next_month - timedelta(days=1)
+
+
 def _rolling_window(days: int, now=None):
     now = now or timezone.now()
     days = max(int(days), 1)
@@ -97,6 +138,246 @@ def build_level_progress(total_points: int) -> dict[str, int]:
         "points_into_level": total_points - level_floor_points,
         "points_to_next_level": next_level_points - total_points,
     }
+
+
+def build_periodic_review_bounds(review_type: str, anchor_date: date | None = None) -> tuple[date, date]:
+    anchor_date = anchor_date or timezone.now().date()
+    if review_type == PeriodicReviewType.WEEKLY:
+        period_start = normalize_week_start(anchor_date)
+        period_end = period_start + timedelta(days=6)
+        return period_start, period_end
+    if review_type == PeriodicReviewType.MONTHLY:
+        period_start = normalize_month_start(anchor_date)
+        return period_start, month_end(period_start)
+    raise ValueError(f"Unsupported review_type {review_type}")
+
+
+def review_summary_requirements(review_type: str) -> tuple[str, ...]:
+    return REVIEW_SUMMARY_REQUIREMENTS[review_type]
+
+
+def minimum_transaction_feedback_required(review_type: str) -> int:
+    return REVIEW_MINIMUM_TRANSACTION_FEEDBACK[review_type]
+
+
+def get_or_create_periodic_review(*, user: User, review_type: str, anchor_date: date | None = None) -> PeriodicReview:
+    period_start, period_end = build_periodic_review_bounds(review_type, anchor_date)
+    review, _ = PeriodicReview.objects.get_or_create(
+        user=user,
+        review_type=review_type,
+        period_start=period_start,
+        defaults={"period_end": period_end},
+    )
+    if review.period_end != period_end:
+        review.period_end = period_end
+        review.save(update_fields=["period_end", "updated_at"])
+    return review
+
+
+def _transaction_feedback_filter() -> Q:
+    return (
+        Q(satisfaction_rating__isnull=False)
+        | Q(regret_rating__isnull=False)
+        | Q(repurchase_likelihood__isnull=False)
+        | (Q(reflection_text__isnull=False) & ~Q(reflection_text=""))
+    )
+
+
+def _review_effective_end(review: PeriodicReview, reference_date: date | None = None) -> date:
+    today = reference_date or timezone.now().date()
+    return min(review.period_end, today)
+
+
+def reviewed_transactions_count(review: PeriodicReview, reference_date: date | None = None) -> int:
+    effective_end = _review_effective_end(review, reference_date)
+    return Transaction.objects.filter(
+        user=review.user,
+        direction="spend",
+        occurred_at__date__gte=review.period_start,
+        occurred_at__date__lte=effective_end,
+    ).filter(_transaction_feedback_filter()).count()
+
+
+def pending_transaction_feedback_count(review: PeriodicReview, reference_date: date | None = None) -> int:
+    effective_end = _review_effective_end(review, reference_date)
+    return Transaction.objects.filter(
+        user=review.user,
+        direction="spend",
+        occurred_at__date__gte=review.period_start,
+        occurred_at__date__lte=effective_end,
+    ).exclude(category__in=LOW_SIGNAL_REVIEW_CATEGORIES).filter(
+        satisfaction_rating__isnull=True,
+        regret_rating__isnull=True,
+        repurchase_likelihood__isnull=True,
+    ).filter(Q(reflection_text__isnull=True) | Q(reflection_text="")).count()
+
+
+def review_transaction_candidates(review: PeriodicReview, reference_date: date | None = None) -> list[Transaction]:
+    effective_end = _review_effective_end(review, reference_date)
+    days_window = max((effective_end - review.period_start).days + 1, 1)
+    limit = REVIEW_TRANSACTION_CANDIDATE_LIMIT[review.review_type]
+    raw_candidates = get_feedback_candidates(review.user, days_window=days_window, top_n=max(limit * 3, 10))
+    ordered_ids = [candidate["transaction_id"] for candidate in raw_candidates]
+
+    transactions = list(
+        Transaction.objects.filter(
+            user=review.user,
+            id__in=ordered_ids,
+            direction="spend",
+            occurred_at__date__gte=review.period_start,
+            occurred_at__date__lte=effective_end,
+        )
+        .select_related("merchant", "subscription")
+    )
+    by_id = {transaction.id: transaction for transaction in transactions}
+    ordered_transactions = [by_id[transaction_id] for transaction_id in ordered_ids if transaction_id in by_id]
+
+    if len(ordered_transactions) < limit:
+        fallback_transactions = list(
+            Transaction.objects.filter(
+                user=review.user,
+                direction="spend",
+                occurred_at__date__gte=review.period_start,
+                occurred_at__date__lte=effective_end,
+            )
+            .exclude(category__in=LOW_SIGNAL_REVIEW_CATEGORIES)
+            .exclude(id__in=[transaction.id for transaction in ordered_transactions])
+            .filter(
+                satisfaction_rating__isnull=True,
+                regret_rating__isnull=True,
+                repurchase_likelihood__isnull=True,
+            )
+            .filter(Q(reflection_text__isnull=True) | Q(reflection_text=""))
+            .select_related("merchant", "subscription")
+            .order_by("-occurred_at")[: max(limit - len(ordered_transactions), 0)]
+        )
+        ordered_transactions.extend(fallback_transactions)
+
+    return ordered_transactions[:limit]
+
+
+def upcoming_subscription_renewal_candidates(user: User, *, limit: int = SUBSCRIPTION_RENEWAL_NUDGE_LIMIT) -> list[Subscription]:
+    today = timezone.now().date()
+    lookahead = today + timedelta(days=14)
+    return list(
+        Subscription.objects.filter(
+            user=user,
+            status=SubscriptionStatus.ACTIVE,
+            renewal_date__isnull=False,
+            renewal_date__gte=today,
+            renewal_date__lte=lookahead,
+        )
+        .select_related("merchant")
+        .order_by("renewal_date", "created_at")[:limit]
+    )
+
+
+def low_value_subscription_candidates(user: User, *, limit: int = LOW_VALUE_SUBSCRIPTION_NUDGE_LIMIT) -> list[Subscription]:
+    return list(
+        Subscription.objects.filter(user=user, status=SubscriptionStatus.ACTIVE)
+        .filter(
+            Q(subscription_utilization__lt=0.4)
+            | Q(subscription_cost_benefit__lt=0.4)
+            | Q(feedback_value_score__lt=0.4)
+        )
+        .select_related("merchant")
+        .order_by("renewal_date", "created_at")[:limit]
+    )
+
+
+def periodic_review_period_label(review: PeriodicReview) -> str:
+    if review.review_type == PeriodicReviewType.WEEKLY:
+        return f"Week of {review.period_start.isoformat()}"
+    return review.period_start.strftime("%B %Y")
+
+
+def can_complete_periodic_review(review: PeriodicReview, *, summary_json: dict | None = None) -> tuple[bool, list[str], int]:
+    summary_json = summary_json or review.summary_json or {}
+    missing_fields = [
+        field for field in review_summary_requirements(review.review_type)
+        if not str(summary_json.get(field, "")).strip()
+    ]
+    reviewed_count = reviewed_transactions_count(review)
+    if reviewed_count < minimum_transaction_feedback_required(review.review_type):
+        missing_fields.append("reviewed_transactions")
+    return len(missing_fields) == 0, missing_fields, reviewed_count
+
+
+def build_periodic_review_payload(review: PeriodicReview) -> dict:
+    reviewed_count = reviewed_transactions_count(review)
+    pending_count = pending_transaction_feedback_count(review)
+    eligible, _, _ = can_complete_periodic_review(review)
+    return {
+        "review": review,
+        "period_label": periodic_review_period_label(review),
+        "summary_requirements": list(review_summary_requirements(review.review_type)),
+        "minimum_transactions_required": minimum_transaction_feedback_required(review.review_type),
+        "reviewed_transaction_count": reviewed_count,
+        "pending_transaction_feedback_count": pending_count,
+        "eligible_to_complete": eligible,
+        "transaction_candidates": review_transaction_candidates(review),
+        "upcoming_subscription_renewals": upcoming_subscription_renewal_candidates(review.user),
+        "low_value_subscriptions": low_value_subscription_candidates(review.user),
+    }
+
+
+def build_review_nudges(user: User) -> dict:
+    weekly_review = get_or_create_periodic_review(user=user, review_type=PeriodicReviewType.WEEKLY)
+    monthly_review = get_or_create_periodic_review(user=user, review_type=PeriodicReviewType.MONTHLY)
+    weekly_payload = build_periodic_review_payload(weekly_review)
+    monthly_payload = build_periodic_review_payload(monthly_review)
+    return {
+        "weekly": {
+            "review_id": weekly_review.id,
+            "status": weekly_review.status,
+            "due": weekly_review.status != PeriodicReviewStatus.COMPLETED,
+            "period_start": weekly_review.period_start.isoformat(),
+            "period_end": weekly_review.period_end.isoformat(),
+            "pending_transaction_feedback_count": weekly_payload["pending_transaction_feedback_count"],
+            "reviewed_transaction_count": weekly_payload["reviewed_transaction_count"],
+            "eligible_to_complete": weekly_payload["eligible_to_complete"],
+        },
+        "monthly": {
+            "review_id": monthly_review.id,
+            "status": monthly_review.status,
+            "due": monthly_review.status != PeriodicReviewStatus.COMPLETED,
+            "period_start": monthly_review.period_start.isoformat(),
+            "period_end": monthly_review.period_end.isoformat(),
+            "pending_transaction_feedback_count": monthly_payload["pending_transaction_feedback_count"],
+            "reviewed_transaction_count": monthly_payload["reviewed_transaction_count"],
+            "eligible_to_complete": monthly_payload["eligible_to_complete"],
+            "upcoming_subscription_renewals_count": len(monthly_payload["upcoming_subscription_renewals"]),
+            "low_value_subscriptions_count": len(monthly_payload["low_value_subscriptions"]),
+        },
+    }
+
+
+@transaction.atomic
+def complete_periodic_review(
+    review: PeriodicReview,
+    *,
+    summary_json: dict | None,
+    notes: str = "",
+) -> tuple[PeriodicReview, AwardResult, list[str], int]:
+    is_eligible, missing_fields, reviewed_count = can_complete_periodic_review(review, summary_json=summary_json)
+    if not is_eligible:
+        raise ValueError(",".join(missing_fields))
+
+    review.summary_json = summary_json or {}
+    review.notes = notes
+    review.status = PeriodicReviewStatus.COMPLETED
+    if review.completed_at is None:
+        review.completed_at = timezone.now()
+    review.save(update_fields=["summary_json", "notes", "status", "completed_at", "updated_at"])
+
+    if review.review_type == PeriodicReviewType.WEEKLY:
+        result = award_points_for_weekly_review(review.user, window_start=review.period_start)
+    else:
+        result = award_points_for_monthly_review(
+            review.user,
+            month_key=review.period_start.strftime("%Y-%m"),
+        )
+    return review, result, missing_fields, reviewed_count
 
 
 def _get_or_create_streak(user: User) -> UserStreak:
