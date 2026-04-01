@@ -475,6 +475,53 @@ class GamificationApiTests(TestCase):
         self.assertEqual(review.status, PeriodicReviewStatus.COMPLETED)
         self.assertEqual(PointEvent.objects.filter(user=self.user, action=PointAction.WEEKLY_REVIEW).count(), 1)
 
+    def test_weekly_review_completion_rejects_null_summary_fields(self):
+        Transaction.objects.create(
+            user=self.user,
+            amount="42.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=timezone.now(),
+            category="shopping",
+            payment_channel="card",
+            satisfaction_rating=9,
+        )
+
+        response = self.client.post(
+            "/api/gamification/reviews/weekly/complete/",
+            {"summary_json": {"wins": None, "regrets": "avoid late-night buys", "adjustment": "pause 24 hours"}},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("wins", response.json()["missing_requirements"])
+
+    def test_whitespace_only_reflection_does_not_count_as_reviewed_feedback(self):
+        transaction = Transaction.objects.create(
+            user=self.user,
+            amount="42.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=timezone.now(),
+            category="shopping",
+            payment_channel="card",
+            reflection_text="   ",
+        )
+
+        overview = self.client.get("/api/gamification/reviews/weekly/")
+        self.assertEqual(overview.status_code, 200)
+        self.assertEqual(overview.json()["reviewed_transaction_count"], 0)
+        self.assertEqual(overview.json()["pending_transaction_feedback_count"], 1)
+        self.assertEqual(overview.json()["transaction_candidates"][0]["id"], transaction.id)
+
+        completion = self.client.post(
+            "/api/gamification/reviews/weekly/complete/",
+            {"summary_json": {"wins": "good", "regrets": "none", "adjustment": "stay steady"}},
+            format="json",
+        )
+        self.assertEqual(completion.status_code, 400)
+        self.assertIn("reviewed_transactions", completion.json()["missing_requirements"])
+
     def test_monthly_review_completion_requires_two_reviewed_transactions(self):
         now = timezone.now()
         current_month = now.date().replace(day=1)

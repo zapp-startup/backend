@@ -5,7 +5,8 @@ from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Q, Sum, TextField, Value
+from django.db.models.functions import Coalesce, Trim
 from django.utils import timezone
 
 from subscriptions.models import Subscription, SubscriptionStatus
@@ -179,7 +180,7 @@ def _transaction_feedback_filter() -> Q:
         Q(satisfaction_rating__isnull=False)
         | Q(regret_rating__isnull=False)
         | Q(repurchase_likelihood__isnull=False)
-        | (Q(reflection_text__isnull=False) & ~Q(reflection_text=""))
+        | ~Q(trimmed_reflection_text="")
     )
 
 
@@ -188,28 +189,56 @@ def _review_effective_end(review: PeriodicReview, reference_date: date | None = 
     return min(review.period_end, today)
 
 
+def _with_trimmed_reflection_text(queryset):
+    return queryset.annotate(
+        trimmed_reflection_text=Trim(
+            Coalesce("reflection_text", Value("", output_field=TextField())),
+        ),
+    )
+
+
+def _summary_value_present(value) -> bool:
+    if value is None:
+        return False
+    return bool(str(value).strip())
+
+
 def reviewed_transactions_count(review: PeriodicReview, reference_date: date | None = None) -> int:
     effective_end = _review_effective_end(review, reference_date)
-    return Transaction.objects.filter(
-        user=review.user,
-        direction="spend",
-        occurred_at__date__gte=review.period_start,
-        occurred_at__date__lte=effective_end,
-    ).filter(_transaction_feedback_filter()).count()
+    return (
+        _with_trimmed_reflection_text(
+            Transaction.objects.filter(
+                user=review.user,
+                direction="spend",
+                occurred_at__date__gte=review.period_start,
+                occurred_at__date__lte=effective_end,
+            )
+        )
+        .filter(_transaction_feedback_filter())
+        .count()
+    )
 
 
 def pending_transaction_feedback_count(review: PeriodicReview, reference_date: date | None = None) -> int:
     effective_end = _review_effective_end(review, reference_date)
-    return Transaction.objects.filter(
-        user=review.user,
-        direction="spend",
-        occurred_at__date__gte=review.period_start,
-        occurred_at__date__lte=effective_end,
-    ).exclude(category__in=LOW_SIGNAL_REVIEW_CATEGORIES).filter(
-        satisfaction_rating__isnull=True,
-        regret_rating__isnull=True,
-        repurchase_likelihood__isnull=True,
-    ).filter(Q(reflection_text__isnull=True) | Q(reflection_text="")).count()
+    return (
+        _with_trimmed_reflection_text(
+            Transaction.objects.filter(
+                user=review.user,
+                direction="spend",
+                occurred_at__date__gte=review.period_start,
+                occurred_at__date__lte=effective_end,
+            )
+        )
+        .exclude(category__in=LOW_SIGNAL_REVIEW_CATEGORIES)
+        .filter(
+            satisfaction_rating__isnull=True,
+            regret_rating__isnull=True,
+            repurchase_likelihood__isnull=True,
+            trimmed_reflection_text="",
+        )
+        .count()
+    )
 
 
 def review_transaction_candidates(review: PeriodicReview, reference_date: date | None = None) -> list[Transaction]:
@@ -234,11 +263,13 @@ def review_transaction_candidates(review: PeriodicReview, reference_date: date |
 
     if len(ordered_transactions) < limit:
         fallback_transactions = list(
-            Transaction.objects.filter(
-                user=review.user,
-                direction="spend",
-                occurred_at__date__gte=review.period_start,
-                occurred_at__date__lte=effective_end,
+            _with_trimmed_reflection_text(
+                Transaction.objects.filter(
+                    user=review.user,
+                    direction="spend",
+                    occurred_at__date__gte=review.period_start,
+                    occurred_at__date__lte=effective_end,
+                )
             )
             .exclude(category__in=LOW_SIGNAL_REVIEW_CATEGORIES)
             .exclude(id__in=[transaction.id for transaction in ordered_transactions])
@@ -246,8 +277,8 @@ def review_transaction_candidates(review: PeriodicReview, reference_date: date |
                 satisfaction_rating__isnull=True,
                 regret_rating__isnull=True,
                 repurchase_likelihood__isnull=True,
+                trimmed_reflection_text="",
             )
-            .filter(Q(reflection_text__isnull=True) | Q(reflection_text=""))
             .select_related("merchant", "subscription")
             .order_by("-occurred_at")[: max(limit - len(ordered_transactions), 0)]
         )
@@ -295,7 +326,7 @@ def can_complete_periodic_review(review: PeriodicReview, *, summary_json: dict |
     summary_json = summary_json or review.summary_json or {}
     missing_fields = [
         field for field in review_summary_requirements(review.review_type)
-        if not str(summary_json.get(field, "")).strip()
+        if not _summary_value_present(summary_json.get(field))
     ]
     reviewed_count = reviewed_transactions_count(review)
     if reviewed_count < minimum_transaction_feedback_required(review.review_type):
