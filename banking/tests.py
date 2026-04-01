@@ -4,7 +4,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from banking.categories import ZappPrimaryCategory, ZappSubcategory
-from compliance.models import ConsentType
+from compliance.models import AuditEvent, ConsentType
 from compliance.services import record_financial_consent
 from banking.models import BankAccount, BankConnection, MerchantCategoryRule
 from banking.services.categorization_service import apply_merchant_override_rules
@@ -61,6 +61,9 @@ class BankingAPITestCase(TestCase):
         body = res.json()
         code = body.get("code") or (body.get("detail") or {}).get("code")
         self.assertEqual(code, "mfa_not_enrolled")
+        event = AuditEvent.objects.get(event_name="banking.policy_denied")
+        self.assertEqual(event.error_code, "mfa_not_enrolled")
+        self.assertEqual(event.metadata["decision"], "blocked")
 
     @override_settings(BANKING_REQUIRE_MFA=True, BANKING_REQUIRE_FINANCIAL_CONSENT=False)
     @patch("banking.views.create_link_token_for_user")
@@ -100,6 +103,8 @@ class BankingAPITestCase(TestCase):
         body = res.json()
         code = body.get("code") or (body.get("detail") or {}).get("code")
         self.assertEqual(code, "financial_consent_required")
+        event = AuditEvent.objects.get(event_name="banking.policy_denied")
+        self.assertEqual(event.error_code, "financial_consent_required")
 
     @override_settings(BANKING_REQUIRE_MFA=True, BANKING_REQUIRE_FINANCIAL_CONSENT=True)
     @patch("banking.views.create_link_token_for_user")

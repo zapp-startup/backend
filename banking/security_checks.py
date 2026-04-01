@@ -7,6 +7,7 @@ import logging
 
 from django.conf import settings
 
+from compliance.monitoring import capture_backend_audit_event
 from compliance.services import user_has_valid_financial_consent
 from users.security_assurance import (
     MfaErrorCode,
@@ -48,6 +49,24 @@ def enforce_banking_policies(request) -> None:
             factors,
         )
     else:
+        capture_backend_audit_event(
+            event_name="banking.policy_denied",
+            outcome="failure",
+            actor=request.user,
+            action="enforce_policy",
+            resource_type="bank_link",
+            request=request,
+            status_code=403,
+            error_code=code or "unknown",
+            error_message="Banking action blocked by MFA policy.",
+            metadata={
+                "decision": "blocked",
+                "reason_code": code or "unknown",
+                "aal_normalized": aal_normalized,
+                "mfa_factors_count": factors,
+                "mfa_required_by_policy": mfa_policy,
+            },
+        )
         logger.warning(
             "banking_policy_check user_id=%s mfa_required_by_policy=%s decision=blocked reason_code=%s aal_normalized=%s mfa_factors_count=%s",
             getattr(request.user, "pk", None),
@@ -64,6 +83,22 @@ def enforce_banking_policies(request) -> None:
 
     if getattr(settings, "BANKING_REQUIRE_FINANCIAL_CONSENT", True):
         if not user_has_valid_financial_consent(request.user):
+            capture_backend_audit_event(
+                event_name="banking.policy_denied",
+                outcome="failure",
+                actor=request.user,
+                action="enforce_policy",
+                resource_type="bank_link",
+                request=request,
+                status_code=428,
+                error_code="financial_consent_required",
+                error_message="Banking action blocked because consent is missing.",
+                metadata={
+                    "decision": "blocked",
+                    "reason_code": "financial_consent_required",
+                    "mfa_required_by_policy": mfa_policy,
+                },
+            )
             logger.warning(
                 "banking_link_token_denied_consent user_id=%s",
                 getattr(request.user, "pk", None),

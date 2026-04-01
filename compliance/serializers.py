@@ -24,6 +24,18 @@ class AuditEventIngestSerializer(serializers.Serializer):
     error_message = serializers.CharField(required=False, allow_blank=True)
     metadata = serializers.JSONField(required=False)
 
+    def _request_metadata(self) -> dict:
+        request = self.context["request"]
+        meta = dict(self.validated_data.get("metadata") or {})
+        xff = request.META.get("HTTP_X_FORWARDED_FOR")
+        source_ip = (xff.split(",")[0].strip() if xff else request.META.get("REMOTE_ADDR")) or None
+        user_agent = (request.META.get("HTTP_USER_AGENT") or "").strip()[:512] or None
+        if source_ip and "source_ip" not in meta:
+            meta["source_ip"] = source_ip
+        if user_agent and "user_agent" not in meta:
+            meta["user_agent"] = user_agent
+        return meta
+
     def create(self, validated_data):
         request = self.context["request"]
         user = request.user if getattr(request.user, "is_authenticated", False) else None
@@ -45,5 +57,5 @@ class AuditEventIngestSerializer(serializers.Serializer):
             status_code=validated_data.get("status_code"),
             error_code=validated_data.get("error_code", ""),
             error_message=validated_data.get("error_message", ""),
-            metadata=validated_data.get("metadata") or {},
+            metadata=self._request_metadata(),
         )
