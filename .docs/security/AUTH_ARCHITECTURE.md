@@ -16,8 +16,9 @@ This application uses a **backend-for-frontend (BFF)** authentication model.
 1. Frontend calls `POST /api/auth/login/` with credentials and CSRF.
 2. Django calls Supabase Auth server-to-server.
 3. Django validates the returned user identity and creates/links the local user.
-4. Django stores Supabase access/refresh tokens in the server session.
-5. Django returns only the minimal user/session summary to the browser.
+4. If the session is already `aal2`, Django finalizes the Django login and stores Supabase access/refresh tokens in the server session.
+5. If the session is only `aal1`, Django stores a **pending MFA** auth block instead of finalizing the Django login.
+6. Django returns only the minimal user/session summary to the browser.
 
 ## Request flow
 
@@ -30,11 +31,13 @@ This application uses a **backend-for-frontend (BFF)** authentication model.
 
 1. Frontend calls backend MFA endpoints.
 2. Django uses the stored Supabase access token to call Supabase MFA APIs server-to-server.
-3. Django updates the local session assurance state:
+3. During signup/login, pending MFA sessions can only access MFA/me/assurance endpoints until `aal2` is reached.
+4. Django updates the local session assurance state:
    - `aal`
    - `mfa_factor_count`
    - `last_step_up_at`
-4. Banking policy enforcement uses the session assurance state plus freshness checks.
+5. Once MFA verify succeeds, Django finalizes the first-party session and normal authenticated API access resumes.
+6. Banking policy enforcement uses the session assurance state plus freshness checks.
 
 ## Security boundaries
 

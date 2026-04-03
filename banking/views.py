@@ -1,7 +1,6 @@
 import logging
 
 from rest_framework import status
-from rest_framework.authentication import SessionAuthentication
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -20,6 +19,7 @@ from .services import (
     sync_transactions_for_connection,
 )
 from .throttles import BankingLinkTokenThrottle, BankingSensitiveThrottle
+from users.session_authentication import AuthSessionAuthentication
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class LinkTokenView(APIView):
     Frontend uses this to initialize Plaid Link.
     """
 
-    authentication_classes = [SessionAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingLinkTokenThrottle]
 
@@ -66,7 +66,7 @@ class ExchangePublicTokenView(APIView):
     Requires authentication.
     """
 
-    authentication_classes = [SessionAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
@@ -105,7 +105,7 @@ class BankConnectionsView(APIView):
     List user's bank connections.
     """
 
-    authentication_classes = [SessionAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
@@ -123,7 +123,7 @@ class BankAccountsView(APIView):
     List user's linked bank accounts from our DB.
     """
 
-    authentication_classes = [SessionAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
@@ -142,7 +142,7 @@ class BankTransactionsView(APIView):
     Supports filtering by account_id, date_from, date_to, pending, removed.
     """
 
-    authentication_classes = [SessionAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
@@ -192,7 +192,7 @@ class ManualSyncView(APIView):
     Manually trigger transactions/sync for a bank connection.
     """
 
-    authentication_classes = [SessionAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 

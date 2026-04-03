@@ -4,6 +4,7 @@ from rest_framework.routers import DefaultRouter
 from .auth_views import (
     AssuranceView,
     CsrfView,
+    EmailConfirmCallbackView,
     LoginView,
     LogoutView,
     MeView,
@@ -41,6 +42,7 @@ urlpatterns = [
     path("auth/me/", MeView.as_view(), name="auth-me"),
     path("auth/oauth/start/", OAuthStartView.as_view(), name="auth-oauth-start"),
     path("auth/oauth/callback/", OAuthCallbackView.as_view(), name="auth-oauth-callback"),
+    path("auth/email/confirm/", EmailConfirmCallbackView.as_view(), name="auth-email-confirm-callback"),
     path("auth/mfa/snapshot/", MfaSnapshotView.as_view(), name="auth-mfa-snapshot"),
     path("auth/mfa/enroll/", MfaEnrollView.as_view(), name="auth-mfa-enroll"),
     path("auth/mfa/verify-enrollment/", MfaVerifyEnrollmentView.as_view(), name="auth-mfa-verify-enrollment"),

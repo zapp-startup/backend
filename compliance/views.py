@@ -6,6 +6,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from users.session_authentication import AuthSessionAuthentication
+
 from .models import ConsentType
 from .serializers import AuditEventIngestSerializer
 from .throttles import AuditEventIngestThrottle, ComplianceConsentThrottle
@@ -36,6 +38,7 @@ class PrivacyPolicyMetadataView(APIView):
 class FinancialConsentStatusView(APIView):
     """Whether the current user has accepted the active policy for financial data access."""
 
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [ComplianceConsentThrottle]
 
@@ -55,6 +58,7 @@ class RecordFinancialConsentView(APIView):
     Optional body: { "consent_text": "...", "source": "web" }
     """
 
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [ComplianceConsentThrottle]
 
@@ -90,6 +94,7 @@ class AuditEventIngestView(APIView):
     not the client payload.
     """
 
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [AuditEventIngestThrottle]
 

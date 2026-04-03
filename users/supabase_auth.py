@@ -139,14 +139,24 @@ def _extract_amr(payload: dict | None, user_data: dict | None) -> list:
 
 
 def _count_mfa_factors(user_data: dict | None) -> int:
-    """Number of enrolled MFA factors from /auth/v1/user when available."""
+    """Number of usable MFA factors from /auth/v1/user when available."""
     if not user_data:
         return -1
     factors = user_data.get("factors")
     if factors is None:
         return -1
     if isinstance(factors, list):
-        return len(factors)
+        usable = 0
+        for factor in factors:
+            if not isinstance(factor, dict):
+                continue
+            factor_id = str(factor.get("id") or "").strip()
+            if not factor_id:
+                continue
+            status = str(factor.get("status") or "").strip().lower()
+            if status in ("", "verified"):
+                usable += 1
+        return usable
     return -1
 
 

@@ -1,3 +1,5 @@
+from django.conf import settings
+from rest_framework import status
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -6,6 +8,12 @@ from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 
 from gamification.services import award_points_for_onboarding
 
+from .session_auth import (
+    get_session_auth_state,
+    issue_pending_mfa_session,
+    session_requires_pending_mfa,
+)
+from .session_authentication import AuthSessionAuthentication
 from .models import UserRawExplicit, UserRawInferred, UserComputed, UserPreference
 from .serializers import (
     UserRawExplicitSerializer,
@@ -13,10 +21,32 @@ from .serializers import (
     UserComputedSerializer,
     UserPreferenceSerializer,
 )
+from .supabase_auth import SupabaseJWTAuthentication
+
+
+def _has_completed_onboarding(user) -> bool:
+    if not getattr(user, "pk", None):
+        return False
+    return UserRawExplicit.objects.filter(user_id=user.pk).exists()
+
+
+def _resolve_next_steps(
+    *,
+    mfa_pending: bool,
+    mfa_enrollment_required: bool,
+    onboarding_completed: bool,
+) -> tuple[str, str | None]:
+    post_login_step = "dashboard" if onboarding_completed else "onboarding_survey"
+    if mfa_pending:
+        if mfa_enrollment_required:
+            return "mfa_setup", post_login_step
+        return "mfa_verify", post_login_step
+    return post_login_step, None
 
 
 class UserRawExplicitViewSet(ModelViewSet):
     serializer_class = UserRawExplicitSerializer
+    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -32,6 +62,7 @@ class UserRawExplicitViewSet(ModelViewSet):
 
 class UserRawInferredViewSet(ReadOnlyModelViewSet):
     serializer_class = UserRawInferredSerializer
+    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -40,6 +71,7 @@ class UserRawInferredViewSet(ReadOnlyModelViewSet):
 
 class UserComputedViewSet(ReadOnlyModelViewSet):
     serializer_class = UserComputedSerializer
+    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -48,6 +80,7 @@ class UserComputedViewSet(ReadOnlyModelViewSet):
 
 class UserPreferenceViewSet(ModelViewSet):
     serializer_class = UserPreferenceSerializer
+    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -68,17 +101,106 @@ class SupabaseUserSyncView(APIView):
     Sync the authenticated Supabase session into a backend user profile payload.
     """
 
+    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         user = request.user
-        auth_context = request.auth or {}
+        onboarding_completed = _has_completed_onboarding(user)
+        auth_context = request.auth if isinstance(request.auth, dict) else {}
+        if not auth_context:
+            state = get_session_auth_state(request) or {}
+            if isinstance(state, dict):
+                auth_context = {
+                    "aal": state.get("aal"),
+                    "mfa_factors_count": state.get("mfa_factor_count", -1),
+                    "mfa_pending": bool(state.get("mfa_pending")),
+                    "mfa_enrollment_required": bool(state.get("mfa_enrollment_required")),
+                    "_assurance_source": "session",
+                }
 
+        if getattr(settings, "AUTH_REQUIRE_AAL2", False) and auth_context:
+            pending_mfa = bool(auth_context.get("mfa_pending"))
+            enrollment_required = bool(auth_context.get("mfa_enrollment_required"))
+            factor_count = auth_context.get("mfa_factors_count", -1)
+            try:
+                factor_count_int = int(factor_count)
+            except (TypeError, ValueError):
+                factor_count_int = -1
+            if not pending_mfa:
+                pending_mfa, enrollment_required = session_requires_pending_mfa(
+                    auth_context.get("aal"),
+                    factor_count,
+                )
+            elif factor_count_int == 0:
+                enrollment_required = True
+            elif factor_count_int > 0:
+                enrollment_required = False
+            if pending_mfa:
+                auth_source = str(auth_context.get("_assurance_source") or "jwt")
+                header = request.headers.get("Authorization") or ""
+                if header.startswith("Bearer "):
+                    access_token = header.split(" ", 1)[1].strip()
+                    if access_token:
+                        issue_pending_mfa_session(
+                            request,
+                            user,
+                            {
+                                "aal": auth_context.get("aal"),
+                                "auth_method": "supabase_jwt",
+                                "mfa_factor_count": auth_context.get("mfa_factors_count", -1),
+                            },
+                            access_token,
+                            None,
+                            None,
+                            mfa_enrollment_required=enrollment_required,
+                        )
+                next_step, post_mfa_step = _resolve_next_steps(
+                    mfa_pending=True,
+                    mfa_enrollment_required=enrollment_required,
+                    onboarding_completed=onboarding_completed,
+                )
+                return Response(
+                    {
+                        "detail": (
+                            "Set up MFA to finish signing in."
+                            if enrollment_required
+                            else "Enter your authenticator code to finish signing in."
+                        ),
+                        "error_code": (
+                            "mfa_enrollment_required"
+                            if enrollment_required
+                            else "mfa_required"
+                        ),
+                        "next_aal": "aal2",
+                        "mfa_pending": True,
+                        "mfa_enrollment_required": enrollment_required,
+                        "auth_source": auth_source,
+                        "onboarding_completed": onboarding_completed,
+                        "onboarding_required": not onboarding_completed,
+                        "next_step": next_step,
+                        "post_mfa_step": post_mfa_step,
+                        "requires_action": True,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+        next_step, post_mfa_step = _resolve_next_steps(
+            mfa_pending=False,
+            mfa_enrollment_required=False,
+            onboarding_completed=onboarding_completed,
+        )
         return Response(
             {
                 "id": user.id,
                 "email": user.email,
                 "username": user.username,
                 "supabase_uid": str(user.supabase_uid) if user.supabase_uid else None,
+                "mfa_pending": False,
+                "mfa_enrollment_required": False,
+                "onboarding_completed": onboarding_completed,
+                "onboarding_required": not onboarding_completed,
+                "next_step": next_step,
+                "post_mfa_step": post_mfa_step,
             }
         )

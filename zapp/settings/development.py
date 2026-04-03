@@ -2,6 +2,10 @@ from .base import *
 from .banking_env import env_bool
 
 DEBUG = True
+
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
+
 ALLOWED_HOSTS = ALLOWED_HOSTS or ["127.0.0.1"]
 
 # Banking: relaxed defaults for local dev. Set in .env to mirror production when testing Plaid:
@@ -13,6 +17,9 @@ BANKING_REQUIRE_FINANCIAL_CONSENT = env_bool(
     "BANKING_REQUIRE_FINANCIAL_CONSENT", False
 )
 BANKING_STEP_UP_REQUIRED = env_bool("BANKING_STEP_UP_REQUIRED", False)
+# AAL2 sign-in is enabled by default. Set AUTH_REQUIRE_AAL2=false only when you
+# explicitly need to debug without MFA locally.
+AUTH_REQUIRE_AAL2 = env_bool("AUTH_REQUIRE_AAL2", True)
 ALLOW_DEV_HEADER_AUTH = True
 
 CORS_ALLOWED_ORIGINS = [

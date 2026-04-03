@@ -5,10 +5,12 @@ from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
 from django.db import connection
+from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from users.session_auth import AUTH_SESSION_KEY
 
 User = get_user_model()
 
@@ -22,7 +24,11 @@ class SupabaseUserSyncViewTests(APITestCase):
         )
         self.client.force_authenticate(
             user=user,
-            token={"supabase_uid": "12345678-1234-5678-1234-567812345678"},
+            token={
+                "supabase_uid": "12345678-1234-5678-1234-567812345678",
+                "aal": "aal2",
+                "mfa_factors_count": 1,
+            },
         )
 
         response = self.client.post(reverse("supabase-user-sync"))
@@ -32,10 +38,157 @@ class SupabaseUserSyncViewTests(APITestCase):
         self.assertEqual(response.data["email"], user.email)
         self.assertEqual(response.data["username"], user.username)
         self.assertEqual(response.data["supabase_uid"], user.supabase_uid)
+        self.assertEqual(response.data["next_step"], "onboarding_survey")
+        self.assertFalse(response.data["onboarding_completed"])
+
+    def test_sync_requires_aal2_when_policy_enabled(self):
+        user = User.objects.create_user(
+            username="sync-user-aal1",
+            email="sync-aal1@example.com",
+            password="unused-password",
+        )
+        self.client.force_authenticate(
+            user=user,
+            token={
+                "supabase_uid": "12345678-1234-5678-1234-567812345678",
+                "aal": "aal1",
+                "mfa_factors_count": 0,
+            },
+        )
+
+        response = self.client.post(reverse("supabase-user-sync"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["error_code"], "mfa_enrollment_required")
+        self.assertTrue(response.data["mfa_pending"])
+        self.assertEqual(response.data["next_step"], "mfa_setup")
+        self.assertEqual(response.data["post_mfa_step"], "onboarding_survey")
+
+    @override_settings(AUTH_REQUIRE_AAL2=False)
+    def test_sync_allows_aal1_when_policy_disabled(self):
+        user = User.objects.create_user(
+            username="sync-user-aal1-off",
+            email="sync-aal1-off@example.com",
+            password="unused-password",
+        )
+        self.client.force_authenticate(
+            user=user,
+            token={
+                "supabase_uid": "12345678-1234-5678-1234-567812345678",
+                "aal": "aal1",
+                "mfa_factors_count": 0,
+            },
+        )
+
+        response = self.client.post(reverse("supabase-user-sync"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["email"], user.email)
 
     def test_sync_requires_authentication(self):
         response = self.client.post(reverse("supabase-user-sync"))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_sync_blocks_when_session_state_is_pending_mfa(self):
+        user = User.objects.create_user(
+            username="sync-session-pending",
+            email="sync-session-pending@example.com",
+            password="unused-password",
+        )
+        session = self.client.session
+        session[AUTH_SESSION_KEY] = {
+            "user_id": user.pk,
+            "aal": "aal1",
+            "mfa_factor_count": 0,
+            "mfa_pending": True,
+            "next_aal": "aal2",
+            "mfa_enrollment_required": True,
+        }
+        session.save()
+
+        response = self.client.post(reverse("supabase-user-sync"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["error_code"], "mfa_enrollment_required")
+        self.assertTrue(response.data["mfa_pending"])
+        self.assertEqual(response.data["auth_source"], "session")
+        self.assertEqual(response.data["next_step"], "mfa_setup")
+        self.assertEqual(response.data["post_mfa_step"], "onboarding_survey")
+
+    def test_sync_normalizes_pending_verify_state_without_usable_factor_to_setup(self):
+        user = User.objects.create_user(
+            username="sync-session-normalized",
+            email="sync-session-normalized@example.com",
+            password="unused-password",
+        )
+        session = self.client.session
+        session[AUTH_SESSION_KEY] = {
+            "user_id": user.pk,
+            "aal": "aal1",
+            "mfa_factor_count": 0,
+            "mfa_pending": True,
+            "next_aal": "aal2",
+            "mfa_enrollment_required": False,
+        }
+        session.save()
+
+        response = self.client.post(reverse("supabase-user-sync"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["error_code"], "mfa_enrollment_required")
+        self.assertTrue(response.data["mfa_pending"])
+        self.assertTrue(response.data["mfa_enrollment_required"])
+        self.assertEqual(response.data["next_step"], "mfa_setup")
+
+    def test_sync_allows_when_session_state_is_aal2(self):
+        user = User.objects.create_user(
+            username="sync-session-aal2",
+            email="sync-session-aal2@example.com",
+            password="unused-password",
+        )
+        session = self.client.session
+        session[AUTH_SESSION_KEY] = {
+            "user_id": user.pk,
+            "aal": "aal2",
+            "mfa_factor_count": 1,
+            "mfa_pending": False,
+            "next_aal": None,
+            "mfa_enrollment_required": False,
+        }
+        session.save()
+
+        response = self.client.post(reverse("supabase-user-sync"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["email"], user.email)
+        self.assertEqual(response.data["next_step"], "onboarding_survey")
+
+
+class PendingMfaOnboardingAccessTests(APITestCase):
+    def test_raw_explicit_list_allows_pending_mfa_session(self):
+        user = User.objects.create_user(
+            username="pending-onboarding-user",
+            email="pending-onboarding@example.com",
+            password="unused-password",
+        )
+        session = self.client.session
+        session[AUTH_SESSION_KEY] = {
+            "user_id": user.pk,
+            "aal": "aal1",
+            "mfa_factor_count": 0,
+            "mfa_pending": True,
+            "next_aal": "aal2",
+            "mfa_enrollment_required": True,
+            "_supabase_access_token": "tok",
+            "_supabase_refresh_token": "rt",
+            "_supabase_token_expires_at": 9999999999,
+        }
+        session.save()
+
+        response = self.client.get(reverse("raw-explicit-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json(), [])
 
 
 class SupabaseEmailExtractionTests(APITestCase):

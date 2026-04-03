@@ -18,7 +18,14 @@ from urllib.parse import urlencode
 import jwt
 import requests
 from django.conf import settings
-from django.contrib.auth import get_user_model, login
+from django.contrib.auth import (
+    BACKEND_SESSION_KEY,
+    HASH_SESSION_KEY,
+    SESSION_KEY,
+    get_user_model,
+    login,
+)
+from django.contrib.auth.models import AnonymousUser
 from compliance.monitoring import capture_backend_audit_event
 
 from .supabase_auth import build_unique_username
@@ -28,6 +35,13 @@ logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
+
+def _session_token_fingerprint(token: str | None) -> str:
+    """Short hash for logs only; never log raw tokens."""
+    if not token:
+        return "none"
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
 AUTH_SESSION_KEY = "auth"
 OAUTH_PKCE_SESSION_KEY = "oauth_pkce"
 
@@ -36,6 +50,7 @@ SUPABASE_SIGNUP_PATH = "/auth/v1/signup"
 SUPABASE_LOGOUT_PATH = "/auth/v1/logout"
 SUPABASE_AUTHORIZE_PATH = "/auth/v1/authorize"
 SUPABASE_USER_PATH = "/auth/v1/user"
+SUPABASE_VERIFY_PATH = "/auth/v1/verify"
 
 
 class SupabaseAuthError(Exception):
@@ -50,6 +65,153 @@ class SupabaseAuthError(Exception):
         self.message = message
         self.status_code = status_code
         self.error_code = error_code
+
+
+def auth_requires_aal2() -> bool:
+    return bool(getattr(settings, "AUTH_REQUIRE_AAL2", False))
+
+
+def _normalize_factor_count(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
+def _normalize_aal(value: Any) -> str | None:
+    if not value:
+        return None
+    return str(value).strip().lower() or None
+
+
+def session_requires_pending_mfa(aal: Any, factor_count: Any) -> tuple[bool, bool]:
+    if not auth_requires_aal2():
+        return False, False
+    if _normalize_aal(aal) == "aal2":
+        return False, False
+    return True, _normalize_factor_count(factor_count) == 0
+
+
+def _clear_django_login_state(request) -> None:
+    removed = False
+    for key in (SESSION_KEY, BACKEND_SESSION_KEY, HASH_SESSION_KEY):
+        if key in request.session:
+            del request.session[key]
+            removed = True
+    if removed:
+        request.user = AnonymousUser()
+    request.session.modified = True
+
+
+def _apply_mfa_policy_flags(request, state: dict[str, Any]) -> dict[str, Any]:
+    pending, enrollment_required = session_requires_pending_mfa(
+        state.get("aal"),
+        state.get("mfa_factor_count"),
+    )
+    state["mfa_pending"] = pending
+    state["next_aal"] = "aal2" if pending else None
+    state["mfa_enrollment_required"] = enrollment_required if pending else False
+    if pending:
+        _clear_django_login_state(request)
+    return state
+
+
+def _should_preserve_verified_session(
+    state: dict[str, Any],
+    *,
+    incoming_aal: str | None,
+    incoming_factor_count: int,
+) -> bool:
+    """
+    Keep the current browser session at aal2 after a successful MFA verify.
+
+    Supabase's subsequent /user or refresh responses may report aal1 even though
+    the current first-party session has already stepped up. For this browser
+    session, treat the local step-up as authoritative unless the user now has no
+    usable MFA factors left.
+    """
+    if _normalize_aal(state.get("aal")) != "aal2":
+        return False
+    if bool(state.get("mfa_pending")):
+        return False
+    if state.get("last_step_up_at") in (None, ""):
+        return False
+    if incoming_aal == "aal2":
+        return False
+    if incoming_factor_count == 0:
+        return False
+    return True
+
+
+def _sync_session_assurance_state(
+    request,
+    state: dict[str, Any],
+    *,
+    incoming_aal: str | None,
+    incoming_factor_count: int,
+) -> None:
+    preserve_verified = _should_preserve_verified_session(
+        state,
+        incoming_aal=incoming_aal,
+        incoming_factor_count=incoming_factor_count,
+    )
+    if incoming_factor_count >= 0:
+        state["mfa_factor_count"] = incoming_factor_count
+
+    if preserve_verified:
+        state["aal"] = "aal2"
+        state["mfa_pending"] = False
+        state["next_aal"] = None
+        state["mfa_enrollment_required"] = False
+        if state.get("last_step_up_at") in (None, ""):
+            state["last_step_up_at"] = int(time.time())
+        return
+
+    if incoming_aal:
+        state["aal"] = incoming_aal
+    if _normalize_aal(state.get("aal")) != "aal2":
+        state["last_step_up_at"] = None
+    _apply_mfa_policy_flags(request, state)
+
+
+def _build_auth_session_block(
+    user,
+    session_data: dict[str, Any],
+    access_token: str,
+    refresh_token: str | None,
+    expires_in: int | None,
+    *,
+    pending_mfa: bool | None = None,
+    mfa_enrollment_required: bool | None = None,
+) -> dict[str, Any]:
+    now_ts = int(time.time())
+    aal = _normalize_aal(session_data.get("aal"))
+    factor_count = _normalize_factor_count(session_data.get("mfa_factor_count", -1))
+    last_step_up_at = now_ts if aal == "aal2" else None
+
+    if pending_mfa is None or mfa_enrollment_required is None:
+        derived_pending, derived_enrollment = session_requires_pending_mfa(aal, factor_count)
+        if pending_mfa is None:
+            pending_mfa = derived_pending
+        if mfa_enrollment_required is None:
+            mfa_enrollment_required = derived_enrollment
+
+    return {
+        "user_id": user.pk,
+        "supabase_uid": str(user.supabase_uid) if user.supabase_uid else None,
+        "email": user.email,
+        "aal": aal,
+        "auth_method": session_data.get("auth_method") or "password",
+        "mfa_factor_count": factor_count,
+        "mfa_pending": bool(pending_mfa),
+        "next_aal": "aal2" if pending_mfa else None,
+        "mfa_enrollment_required": bool(mfa_enrollment_required) if pending_mfa else False,
+        "last_step_up_at": last_step_up_at,
+        "logged_in_at": now_ts,
+        "_supabase_access_token": encrypt_app_data(access_token),
+        "_supabase_refresh_token": encrypt_app_data(refresh_token or ""),
+        "_supabase_token_expires_at": _token_expires_at(access_token, expires_in),
+    }
 
 
 def _supabase_base_url() -> str:
@@ -115,17 +277,45 @@ def supabase_login(email: str, password: str) -> dict[str, Any]:
     return resp.json()
 
 
-def supabase_signup(email: str, password: str) -> dict[str, Any]:
+def supabase_signup(
+    email: str,
+    password: str,
+    *,
+    email_redirect_to: str | None = None,
+) -> dict[str, Any]:
     url = _supabase_base_url() + SUPABASE_SIGNUP_PATH
+    body: dict[str, Any] = {"email": email.strip(), "password": password}
+    redirect_target = (email_redirect_to or "").strip()
+    if redirect_target:
+        body["options"] = {"email_redirect_to": redirect_target}
     resp = requests.post(
         url,
         headers=_anon_headers(),
-        json={"email": email.strip(), "password": password},
+        json=body,
         timeout=10,
     )
     if resp.status_code not in (200, 201):
         msg, code = _parse_error_payload(resp)
         raise SupabaseAuthError(msg, status_code=400, error_code=code or "signup_failed")
+    return resp.json()
+
+
+def supabase_verify_email_token(token_hash: str, verify_type: str = "signup") -> dict[str, Any]:
+    """
+    Exchange a Supabase email confirmation token hash for a session.
+    """
+    url = _supabase_base_url() + SUPABASE_VERIFY_PATH
+    token = (token_hash or "").strip()
+    token_type = (verify_type or "signup").strip().lower() or "signup"
+    resp = requests.post(
+        url,
+        headers=_anon_headers(),
+        json={"token_hash": token, "type": token_type},
+        timeout=10,
+    )
+    if resp.status_code not in (200, 201):
+        msg, code = _parse_error_payload(resp)
+        raise SupabaseAuthError(msg, status_code=400, error_code=code or "email_confirm_failed")
     return resp.json()
 
 
@@ -285,7 +475,17 @@ def _count_mfa_factors(user_obj: dict[str, Any] | None) -> int:
     if factors is None:
         return -1
     if isinstance(factors, list):
-        return len(factors)
+        usable = 0
+        for factor in factors:
+            if not isinstance(factor, dict):
+                continue
+            factor_id = str(factor.get("id") or "").strip()
+            if not factor_id:
+                continue
+            status = str(factor.get("status") or "").strip().lower()
+            if status in ("", "verified"):
+                usable += 1
+        return usable
     return -1
 
 
@@ -323,13 +523,13 @@ def extract_session_data(sb_response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_or_create_local_user(supabase_uid: uuid.UUID, email: str) -> Any:
+def get_or_create_local_user_with_status(supabase_uid: uuid.UUID, email: str) -> tuple[Any, bool]:
     user = User.objects.filter(supabase_uid=supabase_uid).first()
     if user is not None:
         if not user.email and email:
             user.email = email
             user.save(update_fields=["email"])
-        return user
+        return user, False
 
     if User.objects.filter(email__iexact=email).exists():
         raise SupabaseAuthError(
@@ -338,12 +538,18 @@ def get_or_create_local_user(supabase_uid: uuid.UUID, email: str) -> Any:
             error_code="email_link_conflict",
         )
 
-    return User.objects.create_user(
+    created = User.objects.create_user(
         username=build_unique_username(email),
         email=email.strip().lower(),
         supabase_uid=supabase_uid,
         password=None,
     )
+    return created, True
+
+
+def get_or_create_local_user(supabase_uid: uuid.UUID, email: str) -> Any:
+    user, _ = get_or_create_local_user_with_status(supabase_uid, email)
+    return user
 
 
 def issue_django_session(
@@ -356,27 +562,40 @@ def issue_django_session(
 ) -> None:
     """Rotate session, log user in, store Supabase tokens server-side only."""
     request.session.flush()
-    now_ts = int(time.time())
-    aal = session_data.get("aal")
-    last_step_up_at = None
-    if aal == "aal2":
-        last_step_up_at = now_ts
-
-    request.session[AUTH_SESSION_KEY] = {
-        "user_id": user.pk,
-        "supabase_uid": str(user.supabase_uid) if user.supabase_uid else None,
-        "email": user.email,
-        "aal": aal,
-        "auth_method": session_data.get("auth_method") or "password",
-        "mfa_factor_count": session_data.get("mfa_factor_count", -1),
-        "last_step_up_at": last_step_up_at,
-        "logged_in_at": now_ts,
-        "_supabase_access_token": encrypt_app_data(access_token),
-        "_supabase_refresh_token": encrypt_app_data(refresh_token or ""),
-        "_supabase_token_expires_at": _token_expires_at(access_token, expires_in),
-    }
+    request.session[AUTH_SESSION_KEY] = _build_auth_session_block(
+        user,
+        session_data,
+        access_token,
+        refresh_token,
+        expires_in,
+        pending_mfa=False,
+        mfa_enrollment_required=False,
+    )
     request.session.modified = True
     login(request, user, backend="django.contrib.auth.backends.ModelBackend")
+
+
+def issue_pending_mfa_session(
+    request,
+    user,
+    session_data: dict[str, Any],
+    access_token: str,
+    refresh_token: str | None,
+    expires_in: int | None,
+    *,
+    mfa_enrollment_required: bool,
+) -> None:
+    request.session.flush()
+    request.session[AUTH_SESSION_KEY] = _build_auth_session_block(
+        user,
+        session_data,
+        access_token,
+        refresh_token,
+        expires_in,
+        pending_mfa=True,
+        mfa_enrollment_required=mfa_enrollment_required,
+    )
+    request.session.modified = True
 
 
 def clear_session(request) -> str | None:
@@ -409,6 +628,36 @@ def get_supabase_access_token(request) -> str | None:
     return plaintext if plaintext else None
 
 
+def get_supabase_refresh_token(request) -> str | None:
+    state = get_session_auth_state(request)
+    if not state:
+        return None
+    tok = state.get("_supabase_refresh_token")
+    if not isinstance(tok, str) or not tok:
+        return None
+    plaintext, _ = decrypt_app_data(tok)
+    return plaintext if plaintext else None
+
+
+def update_supabase_tokens(
+    request,
+    *,
+    access_token: str | None,
+    refresh_token: str | None,
+    expires_in: int | None,
+) -> None:
+    state = get_session_auth_state(request)
+    if not state:
+        return
+    if access_token:
+        state["_supabase_access_token"] = encrypt_app_data(access_token)
+        state["_supabase_token_expires_at"] = _token_expires_at(access_token, expires_in)
+    if refresh_token is not None:
+        state["_supabase_refresh_token"] = encrypt_app_data(refresh_token)
+    request.session[AUTH_SESSION_KEY] = state
+    request.session.modified = True
+
+
 def record_step_up(request) -> None:
     state = get_session_auth_state(request)
     if not state:
@@ -416,8 +665,17 @@ def record_step_up(request) -> None:
     now_ts = int(time.time())
     state["aal"] = "aal2"
     state["last_step_up_at"] = now_ts
+    state["mfa_pending"] = False
+    state["next_aal"] = None
+    state["mfa_enrollment_required"] = False
     request.session[AUTH_SESSION_KEY] = state
     request.session.modified = True
+    logger.debug(
+        "[session_step_up] user_id=%s last_step_up_at=%s aal=%s",
+        state.get("user_id"),
+        now_ts,
+        state.get("aal"),
+    )
 
 
 def sync_session_assurance_from_user(request, user_obj: dict[str, Any] | None) -> None:
@@ -425,16 +683,31 @@ def sync_session_assurance_from_user(request, user_obj: dict[str, Any] | None) -
     if not state or not isinstance(user_obj, dict):
         return
 
-    aal = _extract_aal(user_obj)
-    if aal:
-        state["aal"] = aal
-    count = _count_mfa_factors(user_obj)
-    if count >= 0:
-        state["mfa_factor_count"] = count
-    if aal != "aal2":
-        state["last_step_up_at"] = None
+    incoming_aal = _extract_aal(user_obj)
+    incoming_factor_count = _count_mfa_factors(user_obj)
+    preserve_verified = _should_preserve_verified_session(
+        dict(state),
+        incoming_aal=incoming_aal,
+        incoming_factor_count=incoming_factor_count,
+    )
+    _sync_session_assurance_state(
+        request,
+        state,
+        incoming_aal=incoming_aal,
+        incoming_factor_count=incoming_factor_count,
+    )
     request.session[AUTH_SESSION_KEY] = state
     request.session.modified = True
+    logger.debug(
+        "[session_assurance] user_id=%s preserve_verified=%s incoming_aal=%s "
+        "incoming_factor_count=%s session_aal=%s mfa_pending=%s",
+        state.get("user_id"),
+        preserve_verified,
+        incoming_aal,
+        incoming_factor_count,
+        state.get("aal"),
+        state.get("mfa_pending"),
+    )
 
 
 def build_mfa_snapshot_payload(user_obj: dict[str, Any] | None) -> dict[str, Any]:
@@ -461,7 +734,7 @@ def build_mfa_snapshot_payload(user_obj: dict[str, Any] | None) -> dict[str, Any
             )
 
     current_level = _extract_aal(data)
-    next_level = "aal2" if factors and current_level != "aal2" else None
+    next_level = "aal2" if _count_mfa_factors(data) > 0 and current_level != "aal2" else None
     return {
         "current_level": current_level,
         "next_level": next_level,
@@ -487,6 +760,9 @@ def refresh_session_tokens_if_needed(request) -> bool:
     # Refresh if expiring within 120s
     if int(time.time()) < int(exp) - 120:
         return False
+    aal_before = _normalize_aal(state.get("aal"))
+    old_access = get_supabase_access_token(request)
+    old_fp = _session_token_fingerprint(old_access)
     try:
         data = supabase_refresh(refresh_tok)
     except SupabaseAuthError:
@@ -499,15 +775,36 @@ def refresh_session_tokens_if_needed(request) -> bool:
     state["_supabase_access_token"] = encrypt_app_data(access)
     state["_supabase_refresh_token"] = encrypt_app_data(new_refresh)
     state["_supabase_token_expires_at"] = _token_expires_at(access, expires_in)
+    new_fp = _session_token_fingerprint(access)
     user_obj = data.get("user")
+    preserve_verified = False
     if isinstance(user_obj, dict):
-        if user_obj.get("aal"):
-            state["aal"] = str(user_obj["aal"]).lower()
-        fc = _count_mfa_factors(user_obj)
-        if fc >= 0:
-            state["mfa_factor_count"] = fc
+        preserve_verified = _should_preserve_verified_session(
+            dict(state),
+            incoming_aal=_extract_aal(user_obj),
+            incoming_factor_count=_count_mfa_factors(user_obj),
+        )
+        _sync_session_assurance_state(
+            request,
+            state,
+            incoming_aal=_extract_aal(user_obj),
+            incoming_factor_count=_count_mfa_factors(user_obj),
+        )
+    else:
+        _apply_mfa_policy_flags(request, state)
     request.session[AUTH_SESSION_KEY] = state
     request.session.modified = True
+    aal_after = _normalize_aal(state.get("aal"))
+    logger.info(
+        "[session_refresh] user_id=%s aal_before=%s aal_after=%s preserve_verified=%s "
+        "access_fp_old=%s access_fp_new=%s",
+        state.get("user_id"),
+        aal_before,
+        aal_after,
+        preserve_verified if isinstance(user_obj, dict) else False,
+        old_fp,
+        new_fp,
+    )
     return True
 
 

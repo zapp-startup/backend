@@ -165,6 +165,13 @@ SESSION_COOKIE_AGE = int(os.getenv("SESSION_COOKIE_AGE", str(60 * 60 * 24 * 14))
 CSRF_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_HTTPONLY = False
 
+# Require MFA-backed AAL2 before a first-party session is treated as fully signed in.
+AUTH_REQUIRE_AAL2 = os.getenv("AUTH_REQUIRE_AAL2", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 # --- Banking step-up freshness (session-backed assurance) ---
 BANKING_STEP_UP_REQUIRED = os.getenv("BANKING_STEP_UP_REQUIRED", "true").lower() in (
     "1",
@@ -180,6 +187,19 @@ SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip
 
 # OAuth BFF: redirect must match Supabase Dashboard > Auth > URL Configuration
 SUPABASE_OAUTH_REDIRECT_URI = (os.getenv("SUPABASE_OAUTH_REDIRECT_URI") or "").strip() or None
+# Optional backend callback for email confirmations. When set, signup passes this
+# URL to Supabase, and the callback creates the server session before redirecting.
+SUPABASE_EMAIL_CONFIRM_CALLBACK_URI = (
+    os.getenv("SUPABASE_EMAIL_CONFIRM_CALLBACK_URI") or ""
+).strip() or None
+# Signup email confirmation link target (usually frontend onboarding route).
+SUPABASE_EMAIL_CONFIRM_REDIRECT_TO = (
+    os.getenv("SUPABASE_EMAIL_CONFIRM_REDIRECT_TO") or ""
+).strip() or None
+# Optional destination that onboarding should navigate to after completion.
+ONBOARDING_AFTER_COMPLETE_REDIRECT_TO = (
+    os.getenv("ONBOARDING_AFTER_COMPLETE_REDIRECT_TO") or ""
+).strip() or None
 
 
 # Internationalization

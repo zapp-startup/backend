@@ -3,8 +3,9 @@ Session-based auth API (BFF). Browser uses cookies + CSRF; no Supabase tokens in
 """
 from __future__ import annotations
 
+import hashlib
 import logging
-import secrets
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from django.conf import settings
 from django.http import HttpResponseRedirect
@@ -14,9 +15,12 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from users.supabase_auth import SupabaseJWTAuthentication
 
+from .models import UserRawExplicit
 from .session_auth import (
     SupabaseAuthError,
+    auth_requires_aal2,
     audit_login,
     audit_logout,
     audit_mfa_verify,
@@ -25,15 +29,19 @@ from .session_auth import (
     clear_session,
     extract_session_data,
     get_or_create_local_user,
+    get_or_create_local_user_with_status,
     get_session_auth_state,
     get_supabase_access_token,
+    get_supabase_refresh_token,
     issue_django_session,
+    issue_pending_mfa_session,
     normalize_mfa_enroll_payload,
     pop_oauth_pkce_state,
     pkce_challenge,
     pkce_verifier,
     record_step_up,
     refresh_session_tokens_if_needed,
+    session_requires_pending_mfa,
     store_oauth_pkce_state,
     supabase_exchange_pkce,
     supabase_get_user,
@@ -44,11 +52,285 @@ from .session_auth import (
     supabase_mfa_unenroll,
     supabase_mfa_verify,
     supabase_signup,
+    supabase_verify_email_token,
     sync_session_assurance_from_user,
+    update_supabase_tokens,
     user_from_token_response,
 )
+from .session_authentication import AuthSessionAuthentication
 
 logger = logging.getLogger(__name__)
+
+
+def _token_fingerprint(token: str) -> str:
+    """SHA-256 prefix (16 hex chars) for log correlation; never logs the raw secret."""
+    if not token:
+        return "none"
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
+def _with_query_param(url: str, key: str, value: str) -> str:
+    if not value:
+        return url
+    parsed = urlparse(url)
+    params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    params.setdefault(key, value)
+    return urlunparse(parsed._replace(query=urlencode(params)))
+
+
+def _email_confirmation_frontend_target() -> str | None:
+    onboarding_url = (
+        getattr(settings, "SUPABASE_EMAIL_CONFIRM_REDIRECT_TO", None) or ""
+    ).strip()
+    if not onboarding_url:
+        return None
+    dashboard_url = (
+        getattr(settings, "ONBOARDING_AFTER_COMPLETE_REDIRECT_TO", None) or ""
+    ).strip()
+    return _with_query_param(onboarding_url, "next", dashboard_url) if dashboard_url else onboarding_url
+
+
+def _email_confirmation_signup_target() -> str | None:
+    callback_url = (
+        getattr(settings, "SUPABASE_EMAIL_CONFIRM_CALLBACK_URI", None) or ""
+    ).strip()
+    if callback_url:
+        return callback_url
+    return _email_confirmation_frontend_target()
+
+
+def _user_payload(user) -> dict[str, object]:
+    return {
+        "id": user.id,
+        "email": user.email,
+        "username": user.username,
+        "supabase_uid": str(user.supabase_uid) if user.supabase_uid else None,
+    }
+
+
+def _has_completed_onboarding(user) -> bool:
+    if not getattr(user, "pk", None):
+        return False
+    return UserRawExplicit.objects.filter(user_id=user.pk).exists()
+
+
+def _resolve_next_steps(
+    state: dict[str, object],
+    *,
+    onboarding_completed: bool,
+) -> tuple[str, str | None]:
+    post_login_step = "dashboard" if onboarding_completed else "onboarding_survey"
+    if bool(state.get("mfa_pending")):
+        try:
+            factor_count = int(state.get("mfa_factor_count", -1))
+        except (TypeError, ValueError):
+            factor_count = -1
+        if factor_count == 0 or bool(state.get("mfa_enrollment_required")):
+            return "mfa_setup", post_login_step
+        if factor_count > 0:
+            return "mfa_verify", post_login_step
+        return "mfa_verify", post_login_step
+    return post_login_step, None
+
+
+def _auth_state_payload(
+    user,
+    state: dict[str, object],
+    *,
+    detail: str | None = None,
+    error_code: str | None = None,
+) -> dict[str, object]:
+    onboarding_completed = _has_completed_onboarding(user)
+    next_step, post_mfa_step = _resolve_next_steps(
+        state,
+        onboarding_completed=onboarding_completed,
+    )
+    payload: dict[str, object] = {
+        "user": _user_payload(user),
+        "aal": state.get("aal"),
+        "mfa_factor_count": state.get("mfa_factor_count", -1),
+        "mfa_pending": bool(state.get("mfa_pending")),
+        "next_aal": state.get("next_aal"),
+        "mfa_enrollment_required": bool(state.get("mfa_enrollment_required")),
+        "onboarding_completed": onboarding_completed,
+        "onboarding_required": not onboarding_completed,
+        "next_step": next_step,
+        "post_mfa_step": post_mfa_step,
+    }
+    if detail:
+        payload["detail"] = detail
+    if error_code:
+        payload["error_code"] = error_code
+    return payload
+
+
+def _resolve_session_bits(access_token: str, data: dict) -> dict[str, object]:
+    session_bits = extract_session_data(data)
+    if not auth_requires_aal2() or not access_token:
+        return session_bits
+
+    factor_count = session_bits.get("mfa_factor_count", -1)
+    try:
+        factor_count_int = int(factor_count)
+    except (TypeError, ValueError):
+        factor_count_int = -1
+    if factor_count_int >= 0:
+        return session_bits
+
+    try:
+        user_obj = supabase_get_user(access_token)
+    except SupabaseAuthError:
+        return session_bits
+    return extract_session_data({"user": user_obj})
+
+
+def _auth_redirect(
+    frontend: str,
+    login_state: str,
+    *,
+    extra_params: dict[str, object] | None = None,
+) -> HttpResponseRedirect:
+    parsed = urlparse(frontend)
+    params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    params["login"] = login_state
+    if login_state != "success":
+        params.setdefault("next_aal", "aal2")
+    if extra_params:
+        for key, value in extra_params.items():
+            if value is None:
+                continue
+            params[str(key)] = str(value)
+    target = urlunparse(parsed._replace(query=urlencode(params)))
+    return HttpResponseRedirect(target)
+
+
+def _finish_primary_auth(request, user, data: dict, *, auth_method: str):
+    access = data.get("access_token") or ""
+    refresh_token = data.get("refresh_token")
+    expires_in = data.get("expires_in")
+    session_bits = _resolve_session_bits(access, data)
+    session_bits["auth_method"] = auth_method
+
+    pending_mfa, enrollment_required = session_requires_pending_mfa(
+        session_bits.get("aal"),
+        session_bits.get("mfa_factor_count", -1),
+    )
+    if pending_mfa:
+        issue_pending_mfa_session(
+            request,
+            user,
+            session_bits,
+            access,
+            refresh_token,
+            expires_in,
+            mfa_enrollment_required=enrollment_required,
+        )
+        audit_login(request, user, "success", auth_method=f"{auth_method}_pending_mfa")
+        state = get_session_auth_state(request) or {}
+        error_code = "mfa_enrollment_required" if enrollment_required else "mfa_required"
+        detail = (
+            "Set up MFA to finish signing in."
+            if enrollment_required
+            else "Enter your authenticator code to finish signing in."
+        )
+        return _auth_state_payload(user, state, detail=detail, error_code=error_code)
+
+    issue_django_session(
+        request,
+        user,
+        session_bits,
+        access,
+        refresh_token,
+        expires_in,
+    )
+    audit_login(request, user, "success", auth_method=auth_method)
+    state = get_session_auth_state(request) or session_bits
+    return _auth_state_payload(user, state)
+
+
+def _complete_mfa_verification(request, *, user_obj: dict[str, object], verify_out: dict[str, object]):
+    state_before = get_session_auth_state(request) or {}
+    pending_mfa = bool(state_before.get("mfa_pending"))
+    aal_before = state_before.get("aal")
+    prior_access = get_supabase_access_token(request) or ""
+    access_after = str(verify_out.get("access_token") or prior_access or "").strip()
+    refresh_after = verify_out.get("refresh_token")
+    if refresh_after is None:
+        refresh_after = get_supabase_refresh_token(request)
+    expires_in = verify_out.get("expires_in")
+
+    new_access_in_verify_out = bool(verify_out.get("access_token"))
+    fp_old = _token_fingerprint(prior_access)
+    fp_new = _token_fingerprint(access_after)
+    tokens_replaced = new_access_in_verify_out and fp_new != fp_old
+    if access_after and not new_access_in_verify_out:
+        logger.warning(
+            "[mfa_verify] tokens_fallback=True user_id=%s access_fp=%s "
+            "(verify_out missing access_token; using session token)",
+            getattr(request.user, "pk", None),
+            fp_new,
+        )
+
+    if pending_mfa:
+        session_bits = extract_session_data({"user": user_obj})
+        # /auth/v1/user does not include aal; JWT is aal2 after successful verify.
+        session_bits["aal"] = "aal2"
+        session_bits["auth_method"] = state_before.get("auth_method") or "password"
+        issue_django_session(
+            request,
+            request.user,
+            session_bits,
+            access_after,
+            refresh_after,
+            expires_in,
+        )
+        state = get_session_auth_state(request) or {}
+        logger.info(
+            "[mfa_verify] path=pending_mfa user_id=%s aal_before=%s aal_after=%s "
+            "last_step_up_at=%s tokens_replaced=%s access_fp_old=%s access_fp_new=%s",
+            getattr(request.user, "pk", None),
+            aal_before,
+            state.get("aal"),
+            state.get("last_step_up_at"),
+            tokens_replaced,
+            fp_old,
+            fp_new,
+        )
+        return _auth_state_payload(request.user, state)
+
+    # is not None binds tighter than `or`; successful verify always includes access_token.
+    if (
+        verify_out.get("access_token")
+        or verify_out.get("refresh_token") is not None
+        or expires_in is not None
+    ):
+        update_supabase_tokens(
+            request,
+            access_token=access_after,
+            refresh_token=refresh_after,
+            expires_in=expires_in,
+        )
+    record_step_up(request)
+    sync_session_assurance_from_user(request, user_obj)
+    state = get_session_auth_state(request) or {}
+    logger.info(
+        "[mfa_verify] path=step_up user_id=%s aal_before=%s aal_after=%s "
+        "last_step_up_at=%s tokens_replaced=%s access_fp_old=%s access_fp_new=%s",
+        getattr(request.user, "pk", None),
+        aal_before,
+        state.get("aal"),
+        state.get("last_step_up_at"),
+        tokens_replaced,
+        fp_old,
+        fp_new,
+    )
+    return {
+        "aal": "aal2",
+        "last_step_up_at": state.get("last_step_up_at"),
+        "mfa_pending": False,
+        "next_aal": state.get("next_aal"),
+        "mfa_enrollment_required": False,
+    }
 
 
 @method_decorator(ensure_csrf_cookie, name="dispatch")
@@ -105,27 +387,8 @@ class LoginView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        session_bits = extract_session_data(data)
-        issue_django_session(
-            request,
-            user,
-            session_bits,
-            access,
-            data.get("refresh_token"),
-            data.get("expires_in"),
-        )
-        audit_login(request, user, "success", auth_method="supabase_password")
         return Response(
-            {
-                "user": {
-                    "id": user.id,
-                    "email": user.email,
-                    "username": user.username,
-                    "supabase_uid": str(user.supabase_uid) if user.supabase_uid else None,
-                },
-                "aal": session_bits.get("aal"),
-                "mfa_factor_count": session_bits.get("mfa_factor_count", -1),
-            },
+            _finish_primary_auth(request, user, data, auth_method="supabase_password"),
             status=status.HTTP_200_OK,
         )
 
@@ -136,13 +399,19 @@ class SignupView(APIView):
     def post(self, request):
         email = (request.data.get("email") or "").strip()
         password = request.data.get("password") or ""
+        confirm_redirect_to = _email_confirmation_signup_target()
+        frontend_confirm_redirect_to = _email_confirmation_frontend_target()
         if not email or not password:
             return Response(
                 {"detail": "email and password are required", "error_code": "validation_error"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         try:
-            data = supabase_signup(email, password)
+            data = supabase_signup(
+                email,
+                password,
+                email_redirect_to=confirm_redirect_to,
+            )
         except SupabaseAuthError as exc:
             return Response(
                 {"detail": exc.message, "error_code": exc.error_code},
@@ -150,7 +419,13 @@ class SignupView(APIView):
             )
         access = data.get("access_token")
         if not access:
-            return Response({"email_confirmation_required": True}, status=status.HTTP_200_OK)
+            out = {
+                "email_confirmation_required": True,
+                "requires_verification": True,
+            }
+            if frontend_confirm_redirect_to:
+                out["email_confirmation_redirect_to"] = frontend_confirm_redirect_to
+            return Response(out, status=status.HTTP_200_OK)
         try:
             supabase_uid, canonical_email = user_from_token_response(data)
         except SupabaseAuthError as exc:
@@ -165,27 +440,8 @@ class SignupView(APIView):
                 {"detail": exc.message, "error_code": exc.error_code},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        session_bits = extract_session_data(data)
-        issue_django_session(
-            request,
-            user,
-            session_bits,
-            access,
-            data.get("refresh_token"),
-            data.get("expires_in"),
-        )
-        audit_login(request, user, "success", auth_method="supabase_signup")
         return Response(
-            {
-                "user": {
-                    "id": user.id,
-                    "email": user.email,
-                    "username": user.username,
-                    "supabase_uid": str(user.supabase_uid) if user.supabase_uid else None,
-                },
-                "aal": session_bits.get("aal"),
-                "mfa_factor_count": session_bits.get("mfa_factor_count", -1),
-            },
+            _finish_primary_auth(request, user, data, auth_method="supabase_signup"),
             status=status.HTTP_200_OK,
         )
 
@@ -211,12 +467,18 @@ class LogoutView(APIView):
 
 
 class MeView(APIView):
+    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         refresh_session_tokens_if_needed(request)
         state = get_session_auth_state(request)
+        onboarding_completed = _has_completed_onboarding(request.user)
         if state:
+            next_step, post_mfa_step = _resolve_next_steps(
+                state,
+                onboarding_completed=onboarding_completed,
+            )
             return Response(
                 {
                     "id": request.user.id,
@@ -229,8 +491,16 @@ class MeView(APIView):
                     "mfa_factor_count": state.get("mfa_factor_count", -1),
                     "last_step_up_at": state.get("last_step_up_at"),
                     "logged_in_at": state.get("logged_in_at"),
+                    "mfa_pending": bool(state.get("mfa_pending")),
+                    "next_aal": state.get("next_aal"),
+                    "mfa_enrollment_required": bool(state.get("mfa_enrollment_required")),
+                    "onboarding_completed": onboarding_completed,
+                    "onboarding_required": not onboarding_completed,
+                    "next_step": next_step,
+                    "post_mfa_step": post_mfa_step,
                 }
             )
+        next_step, _ = _resolve_next_steps({}, onboarding_completed=onboarding_completed)
         return Response(
             {
                 "id": request.user.id,
@@ -243,6 +513,13 @@ class MeView(APIView):
                 "mfa_factor_count": -1,
                 "last_step_up_at": None,
                 "logged_in_at": None,
+                "mfa_pending": False,
+                "next_aal": None,
+                "mfa_enrollment_required": False,
+                "onboarding_completed": onboarding_completed,
+                "onboarding_required": not onboarding_completed,
+                "next_step": next_step,
+                "post_mfa_step": None,
             }
         )
 
@@ -286,6 +563,7 @@ class OAuthStartView(APIView):
         return Response({"authorize_url": authorize_url})
 
 
+@method_decorator(ensure_csrf_cookie, name="dispatch")
 class OAuthCallbackView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -337,43 +615,108 @@ class OAuthCallbackView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
         try:
-            user = get_or_create_local_user(supabase_uid, canonical_email)
+            user, created = get_or_create_local_user_with_status(supabase_uid, canonical_email)
         except SupabaseAuthError as exc:
             return Response(
                 {"detail": exc.message, "error_code": exc.error_code},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        session_bits = extract_session_data(data)
-        session_bits["auth_method"] = "oauth"
-        issue_django_session(
+        provider = (pkce_state.get("provider") or "oauth").strip().lower()
+        auth_payload = _finish_primary_auth(request, user, data, auth_method=f"oauth_{provider}")
+        first_google_login = provider == "google" and created
+        if first_google_login:
+            auth_payload["oauth_first_login_confirmation_required"] = True
+        if frontend:
+            if auth_payload.get("error_code"):
+                login_state = str(auth_payload.get("error_code"))
+            elif first_google_login:
+                login_state = "oauth_first_login_confirmation_required"
+            else:
+                login_state = "success"
+            extra_params: dict[str, object] = {
+                "next_step": auth_payload.get("next_step"),
+                "post_mfa_step": auth_payload.get("post_mfa_step"),
+            }
+            if first_google_login:
+                extra_params["first_login_confirmation_required"] = "1"
+            return _auth_redirect(
+                frontend,
+                login_state,
+                extra_params=extra_params,
+            )
+        return Response(auth_payload)
+
+
+@method_decorator(ensure_csrf_cookie, name="dispatch")
+class EmailConfirmCallbackView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        frontend = _email_confirmation_frontend_target()
+        err = request.query_params.get("error_description") or request.query_params.get("error")
+        if err:
+            if frontend:
+                return _auth_redirect(frontend, "email_confirm_failed")
+            return Response(
+                {"detail": str(err), "error_code": "email_confirm_failed"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        token_hash = (request.query_params.get("token_hash") or "").strip()
+        verify_type = (request.query_params.get("type") or "signup").strip().lower() or "signup"
+        if not token_hash:
+            if frontend:
+                return _auth_redirect(frontend, "email_confirm_missing_token")
+            return Response(
+                {
+                    "detail": "Missing token_hash for email confirmation.",
+                    "error_code": "email_confirm_missing_token",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            data = supabase_verify_email_token(token_hash, verify_type)
+            access = str(data.get("access_token") or "").strip()
+            if not access:
+                raise SupabaseAuthError(
+                    "Email confirmation did not return a session.",
+                    error_code="email_confirm_no_session",
+                )
+            if not isinstance(data.get("user"), dict):
+                data["user"] = supabase_get_user(access)
+            supabase_uid, canonical_email = user_from_token_response(data)
+            user = get_or_create_local_user(supabase_uid, canonical_email)
+        except SupabaseAuthError as exc:
+            if frontend:
+                return _auth_redirect(frontend, exc.error_code or "email_confirm_failed")
+            return Response(
+                {"detail": exc.message, "error_code": exc.error_code},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        auth_payload = _finish_primary_auth(
             request,
             user,
-            session_bits,
-            access,
-            data.get("refresh_token"),
-            data.get("expires_in"),
+            data,
+            auth_method="supabase_email_confirm",
         )
-        provider = (pkce_state.get("provider") or "oauth").strip().lower()
-        audit_login(request, user, "success", auth_method=f"oauth_{provider}")
         if frontend:
-            sep = "&" if "?" in frontend else "?"
-            target = f"{frontend}{sep}login=success"
-            return HttpResponseRedirect(target)
-        return Response(
-            {
-                "user": {
-                    "id": user.id,
-                    "email": user.email,
-                    "username": user.username,
-                    "supabase_uid": str(user.supabase_uid) if user.supabase_uid else None,
+            login_state = str(auth_payload.get("error_code") or "success")
+            return _auth_redirect(
+                frontend,
+                login_state,
+                extra_params={
+                    "next_step": auth_payload.get("next_step"),
+                    "post_mfa_step": auth_payload.get("post_mfa_step"),
                 },
-                "aal": session_bits.get("aal"),
-                "mfa_factor_count": session_bits.get("mfa_factor_count", -1),
-            }
-        )
+            )
+        return Response(auth_payload)
 
 
 class MfaChallengeView(APIView):
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -408,6 +751,7 @@ class MfaChallengeView(APIView):
 
 
 class MfaSnapshotView(APIView):
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -430,6 +774,7 @@ class MfaSnapshotView(APIView):
 
 
 class MfaEnrollView(APIView):
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -452,6 +797,7 @@ class MfaEnrollView(APIView):
 
 
 class MfaVerifyEnrollmentView(APIView):
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -474,22 +820,21 @@ class MfaVerifyEnrollmentView(APIView):
             challenge_id = str(challenge.get("id") or challenge.get("challenge_id") or "").strip()
             if not challenge_id:
                 raise SupabaseAuthError("Challenge did not return an id.", error_code="mfa_challenge_failed")
-            supabase_mfa_verify(access, factor_id, challenge_id, code)
-            user_obj = supabase_get_user(access)
+            verify_out = supabase_mfa_verify(access, factor_id, challenge_id, code)
+            access_after = str(verify_out.get("access_token") or access).strip()
+            user_obj = supabase_get_user(access_after)
         except SupabaseAuthError as exc:
             audit_mfa_verify(request, request.user, "failure", exc.error_code)
             return Response(
                 {"detail": exc.message, "error_code": exc.error_code},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        record_step_up(request)
-        sync_session_assurance_from_user(request, user_obj)
-        state = get_session_auth_state(request) or {}
         audit_mfa_verify(request, request.user, "success")
-        return Response({"aal": "aal2", "last_step_up_at": state.get("last_step_up_at")})
+        return Response(_complete_mfa_verification(request, user_obj=user_obj, verify_out=verify_out))
 
 
 class MfaVerifyView(APIView):
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -512,23 +857,21 @@ class MfaVerifyView(APIView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
         try:
-            supabase_mfa_verify(access, factor_id, challenge_id, code)
-            user_obj = supabase_get_user(access)
+            verify_out = supabase_mfa_verify(access, factor_id, challenge_id, code)
+            access_after = str(verify_out.get("access_token") or access).strip()
+            user_obj = supabase_get_user(access_after)
         except SupabaseAuthError as exc:
             audit_mfa_verify(request, request.user, "failure", exc.error_code)
             return Response(
                 {"detail": exc.message, "error_code": exc.error_code},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        record_step_up(request)
-        sync_session_assurance_from_user(request, user_obj)
-        state = get_session_auth_state(request) or {}
-        last = state.get("last_step_up_at")
         audit_mfa_verify(request, request.user, "success")
-        return Response({"aal": "aal2", "last_step_up_at": last})
+        return Response(_complete_mfa_verification(request, user_obj=user_obj, verify_out=verify_out))
 
 
 class MfaFactorView(APIView):
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, factor_id: str):
@@ -558,6 +901,7 @@ class MfaFactorView(APIView):
 
 
 class AssuranceView(APIView):
+    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
