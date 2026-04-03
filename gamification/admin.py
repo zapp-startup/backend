@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Badge, Group, GroupInvite, GroupMember, MonthlyTarget, PointEvent, UserBadge, UserStreak
+from .models import Badge, Group, GroupInvite, GroupMember, MonthlyTarget, PeriodicReview, PointEvent, UserBadge, UserStreak
 
 
 @admin.register(Group)
@@ -59,3 +59,11 @@ class MonthlyTargetAdmin(admin.ModelAdmin):
     list_display = ("user", "target_type", "month_start", "target_value", "current_value", "status", "completed_at")
     search_fields = ("user__username", "target_type", "title")
     list_filter = ("status", "month_start")
+
+
+@admin.register(PeriodicReview)
+class PeriodicReviewAdmin(admin.ModelAdmin):
+    list_display = ("user", "review_type", "period_start", "period_end", "status", "completed_at")
+    search_fields = ("user__username", "review_type")
+    list_filter = ("review_type", "status", "period_start")
+    autocomplete_fields = ("user",)

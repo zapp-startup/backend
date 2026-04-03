@@ -19,6 +19,8 @@ from .models import (
     GroupInvite,
     GroupInviteStatus,
     GroupMember,
+    PeriodicReview,
+    PeriodicReviewType,
     GroupRole,
     MonthlyTarget,
     MonthlyTargetStatus,
@@ -32,17 +34,24 @@ from .serializers import (
     GroupMemberSerializer,
     GroupSerializer,
     MonthlyTargetSerializer,
+    PeriodicReviewSerializer,
     PointEventSerializer,
+    ReviewNudgesSerializer,
+    ReviewOverviewSerializer,
     UserBadgeSerializer,
     UserStreakSerializer,
 )
 from .services import (
     award_points_for_group_create,
+    build_periodic_review_payload,
+    build_review_nudges,
     award_points_for_group_join,
     award_points_for_monthly_target,
     award_points_for_monthly_review,
     award_points_for_weekly_review,
+    complete_periodic_review,
     complete_monthly_target,
+    get_or_create_periodic_review,
     leaderboard_for_group,
 )
 
@@ -317,6 +326,109 @@ class MonthlyTargetViewSet(ModelViewSet):
             target.save(update_fields=["current_value", "updated_at"])
         target.refresh_from_db()
         return Response(MonthlyTargetSerializer(target).data)
+
+
+class ReviewViewSet(ReadOnlyModelViewSet):
+    serializer_class = PeriodicReviewSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return PeriodicReview.objects.filter(user=self.request.user).order_by("-period_start", "-created_at")
+
+    def _weekly_anchor_date(self, request) -> date:
+        anchor_raw = request.data.get("date") or request.query_params.get("date")
+        if not anchor_raw:
+            return timezone.now().date()
+        return date.fromisoformat(anchor_raw)
+
+    def _monthly_anchor_date(self, request) -> date:
+        month_raw = request.data.get("month") or request.query_params.get("month")
+        if month_raw:
+            return date.fromisoformat(f"{month_raw}-01")
+        anchor_raw = request.data.get("date") or request.query_params.get("date")
+        if anchor_raw:
+            return date.fromisoformat(anchor_raw)
+        return timezone.now().date()
+
+    def _review_response(self, review_type: str, anchor_date: date) -> Response:
+        review = get_or_create_periodic_review(
+            user=self.request.user,
+            review_type=review_type,
+            anchor_date=anchor_date,
+        )
+        payload = build_periodic_review_payload(review)
+        return Response(ReviewOverviewSerializer(payload).data)
+
+    def _complete_review_response(self, review_type: str, anchor_date: date) -> Response:
+        review = get_or_create_periodic_review(
+            user=self.request.user,
+            review_type=review_type,
+            anchor_date=anchor_date,
+        )
+        request_summary = self.request.data.get("summary_json")
+        if request_summary is None:
+            return Response({"detail": "summary_json is required"}, status=400)
+        if not isinstance(request_summary, dict):
+            return Response({"detail": "summary_json must be an object"}, status=400)
+
+        notes = str(self.request.data.get("notes", "")).strip()
+        try:
+            review, result, missing_fields, reviewed_count = complete_periodic_review(
+                review,
+                summary_json=request_summary,
+                notes=notes,
+            )
+        except ValueError as exc:
+            missing_fields = [field for field in str(exc).split(",") if field]
+            payload = build_periodic_review_payload(review)
+            data = ReviewOverviewSerializer(payload).data
+            data["detail"] = "Review is not ready to complete."
+            data["missing_requirements"] = missing_fields
+            return Response(data, status=400)
+
+        payload = build_periodic_review_payload(review)
+        data = ReviewOverviewSerializer(payload).data
+        data["point_event"] = PointEventSerializer(result.event).data
+        data["reviewed_transaction_count"] = reviewed_count
+        data["missing_requirements"] = missing_fields
+        return Response(data, status=201 if result.created else 200)
+
+    @action(detail=False, methods=["get"])
+    def weekly(self, request):
+        try:
+            anchor_date = self._weekly_anchor_date(request)
+        except (TypeError, ValueError):
+            return Response({"detail": "date must be YYYY-MM-DD"}, status=400)
+        return self._review_response(PeriodicReviewType.WEEKLY, anchor_date)
+
+    @action(detail=False, methods=["post"], url_path="weekly/complete")
+    def complete_weekly(self, request):
+        try:
+            anchor_date = self._weekly_anchor_date(request)
+        except (TypeError, ValueError):
+            return Response({"detail": "date must be YYYY-MM-DD"}, status=400)
+        return self._complete_review_response(PeriodicReviewType.WEEKLY, anchor_date)
+
+    @action(detail=False, methods=["get"])
+    def monthly(self, request):
+        try:
+            anchor_date = self._monthly_anchor_date(request)
+        except (TypeError, ValueError):
+            return Response({"detail": "month must be YYYY-MM or date must be YYYY-MM-DD"}, status=400)
+        return self._review_response(PeriodicReviewType.MONTHLY, anchor_date)
+
+    @action(detail=False, methods=["post"], url_path="monthly/complete")
+    def complete_monthly(self, request):
+        try:
+            anchor_date = self._monthly_anchor_date(request)
+        except (TypeError, ValueError):
+            return Response({"detail": "month must be YYYY-MM or date must be YYYY-MM-DD"}, status=400)
+        return self._complete_review_response(PeriodicReviewType.MONTHLY, anchor_date)
+
+    @action(detail=False, methods=["get"])
+    def nudges(self, request):
+        payload = build_review_nudges(request.user)
+        return Response(ReviewNudgesSerializer(payload).data)
 
 
 class PointEventViewSet(ReadOnlyModelViewSet):
