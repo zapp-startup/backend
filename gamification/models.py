@@ -173,6 +173,16 @@ class MonthlyTargetStatus(models.TextChoices):
     EXPIRED = "expired", "Expired"
 
 
+class PeriodicReviewType(models.TextChoices):
+    WEEKLY = "weekly", "Weekly"
+    MONTHLY = "monthly", "Monthly"
+
+
+class PeriodicReviewStatus(models.TextChoices):
+    OPEN = "open", "Open"
+    COMPLETED = "completed", "Completed"
+
+
 class MonthlyTarget(models.Model):
     id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
@@ -205,6 +215,45 @@ class MonthlyTarget(models.Model):
 
     def __str__(self) -> str:
         return f"{self.user} {self.target_type} {self.month_start}"
+
+
+class PeriodicReview(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="periodic_reviews",
+    )
+    review_type = models.CharField(max_length=16, choices=PeriodicReviewType.choices)
+    period_start = models.DateField()
+    period_end = models.DateField()
+    status = models.CharField(
+        max_length=16,
+        choices=PeriodicReviewStatus.choices,
+        default=PeriodicReviewStatus.OPEN,
+    )
+    summary_json = models.JSONField(default=dict, blank=True)
+    notes = models.TextField(blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "review_type", "period_start"],
+                name="uniq_user_periodic_review",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["user", "review_type", "period_start"]),
+            models.Index(fields=["user", "review_type", "status"]),
+            models.Index(fields=["period_start", "period_end"]),
+        ]
+        ordering = ["-period_start", "-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.user} {self.review_type} review {self.period_start}→{self.period_end}"
 
 
 class PointEvent(models.Model):
