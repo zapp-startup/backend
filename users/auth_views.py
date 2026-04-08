@@ -559,7 +559,6 @@ class OAuthStartView(APIView):
             redirect_to=redirect_uri,
             code_challenge=challenge,
         )
-        print("OAUTH START URL:", authorize_url)
         return Response({"authorize_url": authorize_url})
 
 

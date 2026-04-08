@@ -893,10 +893,6 @@ def store_oauth_pkce_state(
     request.session.modified = True
     request.session.save()
 
-    print("PKCE SESSION SAVED")
-    print("SESSION KEY:", request.session.session_key)
-    print("SESSION DATA:", dict(request.session))
-
 
 def pop_oauth_pkce_state(request) -> dict[str, Any] | None:
     data = request.session.pop(OAUTH_PKCE_SESSION_KEY, None)

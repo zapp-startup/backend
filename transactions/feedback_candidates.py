@@ -9,7 +9,7 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Optional
 
-from django.db.models import Avg, Count, Q
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from .models import Transaction, TransactionCategory
@@ -79,6 +79,26 @@ def _amount_score(amount: Decimal, user_avg_amount: Optional[Decimal]) -> float:
         return min(1.0, log_amount / 7.0)
     ratio = float(amount) / float(user_avg_amount)
     return min(1.0, ratio / 3.0)  # 3x average = max score
+
+
+def _average_positive_amount(transactions) -> Optional[Decimal]:
+    """
+    Compute an average in Python so encrypted decimal fields are compared as
+    decrypted values instead of ciphertext/text in the database.
+    """
+    total = Decimal("0")
+    count = 0
+
+    for transaction in transactions:
+        amount = transaction.amount
+        if amount is None or amount <= 0:
+            continue
+        total += amount
+        count += 1
+
+    if count == 0:
+        return None
+    return total / Decimal(count)
 
 
 def _recency_score(occurred_at, now=None) -> float:
@@ -252,13 +272,20 @@ def get_feedback_candidates(
     if not transactions:
         return []
 
-    # User's average transaction amount (from transactions with feedback, or all)
-    user_avg = (
-        Transaction.objects.filter(user=user)
-        .filter(direction="spend")
-        .exclude(amount__lte=0)
-        .aggregate(avg=Avg("amount"))["avg"]
+    # User's average transaction amount (from transactions with feedback, or all).
+    # Do this in Python because amount may be stored encrypted.
+    feedback_amount_txns = Transaction.objects.filter(user=user).filter(
+        direction="spend"
+    ).filter(
+        Q(satisfaction_rating__isnull=False)
+        | Q(regret_rating__isnull=False)
+        | Q(repurchase_likelihood__isnull=False)
     )
+    user_avg = _average_positive_amount(feedback_amount_txns)
+    if user_avg is None:
+        user_avg = _average_positive_amount(
+            Transaction.objects.filter(user=user).filter(direction="spend")
+        )
 
     # Prior feedback counts by merchant and category
     feedback_txns = Transaction.objects.filter(user=user).filter(
