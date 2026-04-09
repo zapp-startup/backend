@@ -1,0 +1,3 @@
+# Install: pip install -r requirements.txt
+# (Uses .docs/requirements.txt — Django + value-score ML stack.)
+-r .docs/requirements.txt
