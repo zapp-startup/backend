@@ -212,7 +212,7 @@ BANKING_DATA_RETENTION_DAYS_AFTER_DISCONNECT = int(
 # --- Value score model (platform_bundle) ---
 # Path containing the `value_score_model` package (parent of the package directory).
 VALUE_SCORE_BUNDLE_PATH = (os.getenv("VALUE_SCORE_BUNDLE_PATH") or "").strip() or None
-# Trained artifacts: meta.pkl, feature_engineer.pkl, tier1_coldstart.pkl, tier2_xgboost.pkl, tier3_neural.pt (optional)
+# Default: <platform_bundle>/checkpoints/ (meta.pkl, feature_engineer.pkl, tier*.pkl, tier3_neural.pt optional)
 VALUE_SCORE_CHECKPOINT_DIR = (os.getenv("VALUE_SCORE_CHECKPOINT_DIR") or "").strip() or None
 VALUE_SCORE_ENABLED = os.getenv("VALUE_SCORE_ENABLED", "true").lower() in ("1", "true", "yes")
 VALUE_SCORE_MODEL_VERSION = (os.getenv("VALUE_SCORE_MODEL_VERSION") or "bundle").strip()

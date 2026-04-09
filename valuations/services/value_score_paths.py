@@ -18,11 +18,12 @@ def platform_bundle_root() -> Path:
 
 
 def value_score_checkpoint_dir() -> Path:
-    """Directory with feature_engineer.pkl, tier*.pkl, meta.pkl from training."""
+    """Directory with meta.pkl, feature_engineer.pkl, tier1/2 .pkl, tier3 .pt (flat layout)."""
     override = getattr(settings, "VALUE_SCORE_CHECKPOINT_DIR", None)
     if override:
         return Path(override).resolve()
-    return platform_bundle_root() / "checkpoints" / "value_score_model"
+    # Artifacts live directly under platform_bundle/checkpoints/ (not checkpoints/value_score_model/)
+    return platform_bundle_root() / "checkpoints"
 
 
 def ensure_platform_bundle_importable() -> Path:
