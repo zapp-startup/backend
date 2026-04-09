@@ -208,3 +208,18 @@ PLAID_TOKEN_ENCRYPTION_KEY = os.getenv("PLAID_TOKEN_ENCRYPTION_KEY", "")
 BANKING_DATA_RETENTION_DAYS_AFTER_DISCONNECT = int(
     os.getenv("BANKING_DATA_RETENTION_DAYS_AFTER_DISCONNECT", "0")
 )
+
+# --- Value score model (platform_bundle) ---
+# Path containing the `value_score_model` package (parent of the package directory).
+VALUE_SCORE_BUNDLE_PATH = (os.getenv("VALUE_SCORE_BUNDLE_PATH") or "").strip() or None
+# Trained artifacts: meta.pkl, feature_engineer.pkl, tier1_coldstart.pkl, tier2_xgboost.pkl, tier3_neural.pt (optional)
+VALUE_SCORE_CHECKPOINT_DIR = (os.getenv("VALUE_SCORE_CHECKPOINT_DIR") or "").strip() or None
+VALUE_SCORE_ENABLED = os.getenv("VALUE_SCORE_ENABLED", "true").lower() in ("1", "true", "yes")
+VALUE_SCORE_MODEL_VERSION = (os.getenv("VALUE_SCORE_MODEL_VERSION") or "bundle").strip()
+# When false, omit transaction satisfaction/regret/etc. columns so the pipeline uses neutral defaults
+# until a feedback→numeric pipeline is deployed.
+VALUE_SCORE_INCLUDE_FEEDBACK_NUMERICS = os.getenv("VALUE_SCORE_INCLUDE_FEEDBACK_NUMERICS", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)

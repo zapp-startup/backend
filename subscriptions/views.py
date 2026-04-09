@@ -7,6 +7,8 @@ from gamification.services import (
     award_points_for_subscription_paused,
 )
 
+from valuations.value_score_views import annotate_subscriptions_with_latest_score
+
 from .models import Merchant, Subscription
 from .serializers import MerchantSerializer, SubscriptionSerializer
 
@@ -27,7 +29,8 @@ class SubscriptionViewSet(ModelViewSet):
 
     def get_queryset(self):
         # Users can only see their own subscriptions
-        return Subscription.objects.filter(user=self.request.user).select_related("merchant")
+        qs = Subscription.objects.filter(user=self.request.user).select_related("merchant")
+        return annotate_subscriptions_with_latest_score(qs)
 
     def perform_create(self, serializer):
         # Force ownership
