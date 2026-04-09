@@ -119,6 +119,19 @@ class FeedbackCandidatesTestCase(TestCase):
 
         self.assertIn(target.id, [candidate["transaction_id"] for candidate in candidates])
 
+    def test_feedback_candidates_include_low_signal_transactions_when_only_options(self):
+        transaction = Transaction.objects.create(
+            user=self.user,
+            direction="spend",
+            amount=42,
+            occurred_at=timezone.now(),
+            category=TransactionCategory.GROCERIES,
+        )
+
+        candidates = get_feedback_candidates(self.user, days_window=365, top_n=5)
+
+        self.assertIn(transaction.id, [candidate["transaction_id"] for candidate in candidates])
+
     def test_transaction_reflection_accepts_string_regret_score(self):
         transaction = Transaction.objects.create(
             user=self.user,

@@ -9,7 +9,6 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Optional
 
-from django.db.models import Count, Q
 from django.utils import timezone
 
 from .models import Transaction, TransactionCategory
@@ -226,6 +225,10 @@ def _diversity_filter(
     return result
 
 
+def _transactions_with_feedback(transactions) -> list[Transaction]:
+    return [transaction for transaction in transactions if _has_feedback(transaction)]
+
+
 def get_feedback_candidates(
     user,
     days_window: int = DEFAULT_DAYS_WINDOW,
@@ -248,63 +251,43 @@ def get_feedback_candidates(
 
     qs = (
         Transaction.objects.filter(user=user)
-        .filter(
-            Q(satisfaction_rating__isnull=True)
-            & Q(regret_rating__isnull=True)
-            & Q(repurchase_likelihood__isnull=True)
-            & (Q(reflection_text__isnull=True) | Q(reflection_text=""))
-        )
         .filter(direction="spend")
         .filter(occurred_at__gte=cutoff)
         .select_related("merchant", "subscription")
         .order_by("-occurred_at")
     )
 
-    # Exclude routine categories entirely (optional: could score them very low instead)
-    low_signal_categories = [
-        TransactionCategory.GROCERIES,
-        TransactionCategory.BILLS,
-    ]
-    qs = qs.exclude(category__in=low_signal_categories)
-
-    transactions = list(qs[:500])  # Cap for performance
+    transactions = [transaction for transaction in list(qs[:500]) if not _has_feedback(transaction)]
 
     if not transactions:
         return []
 
     # User's average transaction amount (from transactions with feedback, or all).
     # Do this in Python because amount may be stored encrypted.
-    feedback_amount_txns = Transaction.objects.filter(user=user).filter(
-        direction="spend"
-    ).filter(
-        Q(satisfaction_rating__isnull=False)
-        | Q(regret_rating__isnull=False)
-        | Q(repurchase_likelihood__isnull=False)
+    user_spend_transactions = list(
+        Transaction.objects.filter(user=user)
+        .filter(direction="spend")
+        .select_related("merchant", "subscription")
+        .order_by("-occurred_at")[:1000]
     )
+    feedback_amount_txns = _transactions_with_feedback(user_spend_transactions)
     user_avg = _average_positive_amount(feedback_amount_txns)
     if user_avg is None:
-        user_avg = _average_positive_amount(
-            Transaction.objects.filter(user=user).filter(direction="spend")
-        )
+        user_avg = _average_positive_amount(user_spend_transactions)
 
     # Prior feedback counts by merchant and category
-    feedback_txns = Transaction.objects.filter(user=user).filter(
-        Q(satisfaction_rating__isnull=False)
-        | Q(regret_rating__isnull=False)
-        | Q(repurchase_likelihood__isnull=False)
-    )
-    feedback_counts_by_merchant = dict(
-        feedback_txns.exclude(merchant_id__isnull=True)
-        .values("merchant_id")
-        .annotate(c=Count("id"))
-        .values_list("merchant_id", "c")
-    )
-    feedback_counts_by_category = dict(
-        feedback_txns.exclude(category="")
-        .values("category")
-        .annotate(c=Count("id"))
-        .values_list("category", "c")
-    )
+    feedback_txns = feedback_amount_txns
+    feedback_counts_by_merchant = {}
+    feedback_counts_by_category = {}
+    for transaction in feedback_txns:
+        if transaction.merchant_id:
+            feedback_counts_by_merchant[transaction.merchant_id] = (
+                feedback_counts_by_merchant.get(transaction.merchant_id, 0) + 1
+            )
+        if transaction.category:
+            feedback_counts_by_category[transaction.category] = (
+                feedback_counts_by_category.get(transaction.category, 0) + 1
+            )
 
     # Score each transaction
     scored = []

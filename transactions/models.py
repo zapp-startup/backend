@@ -69,6 +69,14 @@ class Transaction(models.Model):
         related_name="transactions",
         help_text="Link if this transaction is a known subscription charge.",
     )
+    bank_transaction = models.OneToOneField(
+        "banking.BankTransaction",
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="feedback_transaction",
+        help_text="Linked bank-synced transaction when this ledger entry mirrors a synced purchase.",
+    )
 
     direction = models.CharField(
         max_length=16,
