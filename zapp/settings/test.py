@@ -4,7 +4,7 @@ Test settings: in-memory SQLite (no Postgres/SSL) for CI and local `manage.py te
 from .development import *
 
 DEBUG = False
-ALLOWED_HOSTS = ["testserver", "localhost", "127.0.0.1"]
+ALLOWED_HOSTS = ["testserver", "127.0.0.1"]
 
 DATABASES = {
     "default": {
@@ -14,6 +14,8 @@ DATABASES = {
 }
 
 OPENAI_API_KEY = None
+APP_DATA_ENCRYPTION_KEY = ""
+APP_DATA_ENCRYPTION_KEYS = ""
 
 PASSWORD_HASHERS = [
     "django.contrib.auth.hashers.MD5PasswordHasher",

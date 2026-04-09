@@ -1,6 +1,8 @@
 from django.conf import settings
 from django.db import models
 
+from zapp.security.encrypted_fields import EncryptedCharField, EncryptedDecimalField, EncryptedJSONField
+
 
 class Recommendation(models.TextChoices):
     BUY = "buy", "Buy"
@@ -78,9 +80,9 @@ class SubscriptionValuation(models.Model):
     period_start = models.DateField()
     period_end = models.DateField()
 
-    total_cost = models.DecimalField(max_digits=12, decimal_places=2)
-    estimated_value = models.DecimalField(max_digits=12, decimal_places=2)
-    net_value = models.DecimalField(max_digits=12, decimal_places=2)
+    total_cost = EncryptedDecimalField()
+    estimated_value = EncryptedDecimalField()
+    net_value = EncryptedDecimalField()
 
     personal_value_score = models.PositiveSmallIntegerField(
         blank=True,
@@ -100,13 +102,13 @@ class SubscriptionValuation(models.Model):
         help_text="0-1 confidence score for this valuation",
     )
 
-    evidence_json = models.JSONField(
+    evidence_json = EncryptedJSONField(
         default=dict,
         blank=True,
         help_text="Snapshot of inputs used: weights, raw data, computed metrics",
     )
 
-    explanation_json = models.JSONField(
+    explanation_json = EncryptedJSONField(
         default=dict,
         blank=True,
         help_text="UI-friendly explanation: summary, drivers, pros/cons",
@@ -154,8 +156,8 @@ class ItemValuation(models.Model):
     )
 
 
-    item_name = models.CharField(max_length=256)
-    item_category = models.CharField(max_length=64, blank=True)
+    item_name = EncryptedCharField(max_length=256)
+    item_category = EncryptedCharField(max_length=64, blank=True)
 
     model_version = models.ForeignKey(
         ValuationModelVersion,
@@ -172,17 +174,13 @@ class ItemValuation(models.Model):
     )
 
 
-    observed_price = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
+    observed_price = EncryptedDecimalField(
         blank=True,
         null=True,
         help_text="Price the user is considering paying",
     )
 
-    estimated_fair_price = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
+    estimated_fair_price = EncryptedDecimalField(
         blank=True,
         null=True,
         help_text="Market-based fair price estimate",
@@ -204,13 +202,13 @@ class ItemValuation(models.Model):
         help_text="0-1 confidence score for this valuation",
     )
 
-    evidence_json = models.JSONField(
+    evidence_json = EncryptedJSONField(
         default=dict,
         blank=True,
         help_text="Snapshot of inputs: computed weights, raw explicit/inferred data",
     )
 
-    reasoning_json = models.JSONField(
+    reasoning_json = EncryptedJSONField(
         default=dict,
         blank=True,
         help_text="UI-friendly reasoning: pros, cons, alternatives",

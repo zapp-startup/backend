@@ -27,6 +27,12 @@ def _clean_env_url(value: str | None) -> str | None:
     return value.strip().strip("'\"")
 
 
+def _split_env_csv(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
@@ -37,7 +43,7 @@ if not SECRET_KEY:
 
 # SECURITY WARNING: don't run with debug turned on in production!
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = _split_env_csv(os.getenv("ALLOWED_HOSTS"))
 AUTH_USER_MODEL = "users.User"
 
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip() or None
@@ -45,6 +51,7 @@ OPENAI_MODEL = (os.getenv("OPENAI_MODEL") or "gpt-4.1-mini").strip()
 API_THROTTLE_ANON_RATE = (os.getenv("API_THROTTLE_ANON_RATE") or "30/minute").strip()
 API_THROTTLE_USER_RATE = (os.getenv("API_THROTTLE_USER_RATE") or "120/minute").strip()
 API_THROTTLE_AI_RATE = (os.getenv("API_THROTTLE_AI_RATE") or "20/minute").strip()
+API_THROTTLE_AUDIT_INGEST_RATE = (os.getenv("API_THROTTLE_AUDIT_INGEST_RATE") or "120/minute").strip()
 
 
 # Application definition
@@ -131,6 +138,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework.authentication.SessionAuthentication",
         "users.supabase_auth.SupabaseJWTAuthentication",
     ),
     "DEFAULT_THROTTLE_CLASSES": (
@@ -142,12 +150,56 @@ REST_FRAMEWORK = {
         "anon": API_THROTTLE_ANON_RATE,
         "user": API_THROTTLE_USER_RATE,
         "ai": API_THROTTLE_AI_RATE,
+        "audit_ingest": API_THROTTLE_AUDIT_INGEST_RATE,
         # Banking / compliance: per-user; tune per environment
         "banking_sensitive": os.getenv("THROTTLE_BANKING_SENSITIVE", "120/hour"),
         "banking_link_token": os.getenv("THROTTLE_BANKING_LINK_TOKEN", "30/hour"),
         "compliance_consent": os.getenv("THROTTLE_COMPLIANCE_CONSENT", "60/hour"),
     },
 }
+
+# --- Session / CSRF (browser BFF; explicit defaults) ---
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_AGE = int(os.getenv("SESSION_COOKIE_AGE", str(60 * 60 * 24 * 14)))
+CSRF_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_HTTPONLY = False
+
+# Require MFA-backed AAL2 before a first-party session is treated as fully signed in.
+AUTH_REQUIRE_AAL2 = os.getenv("AUTH_REQUIRE_AAL2", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+# --- Banking step-up freshness (session-backed assurance) ---
+BANKING_STEP_UP_REQUIRED = os.getenv("BANKING_STEP_UP_REQUIRED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+BANKING_STEP_UP_FRESHNESS_SECONDS = int(
+    os.getenv("BANKING_STEP_UP_FRESHNESS_SECONDS", "900")
+)
+
+# Optional: Supabase service role for future admin ops (not required for password/OAuth BFF)
+SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip() or None
+
+# OAuth BFF: redirect must match Supabase Dashboard > Auth > URL Configuration
+SUPABASE_OAUTH_REDIRECT_URI = (os.getenv("SUPABASE_OAUTH_REDIRECT_URI") or "").strip() or None
+# Optional backend callback for email confirmations. When set, signup passes this
+# URL to Supabase, and the callback creates the server session before redirecting.
+SUPABASE_EMAIL_CONFIRM_CALLBACK_URI = (
+    os.getenv("SUPABASE_EMAIL_CONFIRM_CALLBACK_URI") or ""
+).strip() or None
+# Signup email confirmation link target (usually frontend onboarding route).
+SUPABASE_EMAIL_CONFIRM_REDIRECT_TO = (
+    os.getenv("SUPABASE_EMAIL_CONFIRM_REDIRECT_TO") or ""
+).strip() or None
+# Optional destination that onboarding should navigate to after completion.
+ONBOARDING_AFTER_COMPLETE_REDIRECT_TO = (
+    os.getenv("ONBOARDING_AFTER_COMPLETE_REDIRECT_TO") or ""
+).strip() or None
 
 
 # Internationalization
@@ -203,6 +255,12 @@ BANKING_REQUIRE_FINANCIAL_CONSENT = os.getenv(
 # Optional Fernet key (urlsafe base64) for app-layer encryption of Plaid access tokens at rest.
 # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 PLAID_TOKEN_ENCRYPTION_KEY = os.getenv("PLAID_TOKEN_ENCRYPTION_KEY", "")
+# Optional rotation list. First key is used for new writes; remaining keys are accepted for decrypt.
+PLAID_TOKEN_ENCRYPTION_KEYS = os.getenv("PLAID_TOKEN_ENCRYPTION_KEYS", "")
+
+# General application-layer encryption for sensitive business/profile fields.
+APP_DATA_ENCRYPTION_KEY = os.getenv("APP_DATA_ENCRYPTION_KEY", "")
+APP_DATA_ENCRYPTION_KEYS = os.getenv("APP_DATA_ENCRYPTION_KEYS", "")
 
 # Retention hints (operational; actual deletion uses management commands / legal process)
 BANKING_DATA_RETENTION_DAYS_AFTER_DISCONNECT = int(

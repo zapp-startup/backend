@@ -1,10 +1,11 @@
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from banking.models import BankAccount, BankConnection, BankTransaction
 from gamification.models import (
     Badge,
     Group,
@@ -431,6 +432,92 @@ class GamificationApiTests(TestCase):
         self.assertEqual(len(payload["transaction_candidates"]), 1)
         self.assertEqual(payload["transaction_candidates"][0]["id"], transaction.id)
         self.assertFalse(payload["eligible_to_complete"])
+
+    def test_weekly_review_endpoint_hydrates_bank_transactions_into_candidates(self):
+        connection = BankConnection.objects.create(
+            user=self.user,
+            plaid_item_id="item-review-1",
+            plaid_access_token="token",
+            institution_id="ins-review",
+            institution_name="Review Bank",
+        )
+        account = BankAccount.objects.create(
+            connection=connection,
+            plaid_account_id="acct-review-1",
+            name="Checking",
+            mask="1234",
+            type="depository",
+            subtype="checking",
+        )
+        bank_transaction = BankTransaction.objects.create(
+            user=self.user,
+            connection=connection,
+            account=account,
+            plaid_transaction_id="txn-review-1",
+            name="Headphones Store",
+            merchant_name="Headphones Store",
+            amount="149.99",
+            iso_currency_code="USD",
+            date=timezone.now().date(),
+            zapp_primary_category="shopping",
+        )
+
+        response = self.client.get("/api/gamification/reviews/weekly/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["pending_transaction_feedback_count"], 1)
+        shadow_transaction = Transaction.objects.get(bank_transaction=bank_transaction)
+        self.assertEqual(payload["transaction_candidates"][0]["id"], shadow_transaction.id)
+        self.assertEqual(payload["transaction_candidates"][0]["description_raw"], "Headphones Store")
+        self.assertEqual(payload["transaction_candidates"][0]["category"], "shopping")
+
+    def test_monthly_review_uses_period_scope_when_current_period_is_empty(self):
+        now = timezone.now()
+        start_of_month = now.date().replace(day=1)
+        previous_month_transaction_date = start_of_month - timedelta(days=2)
+        Transaction.objects.create(
+            user=self.user,
+            amount="42.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=timezone.make_aware(datetime.combine(previous_month_transaction_date, time(hour=12))),
+            category="shopping",
+            payment_channel="card",
+        )
+
+        response = self.client.get("/api/gamification/reviews/monthly/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["minimum_transactions_required"], 0)
+        self.assertEqual(payload["reviewed_transaction_count"], 0)
+        self.assertEqual(payload["pending_transaction_feedback_count"], 0)
+        self.assertEqual(payload["transaction_candidates"], [])
+
+    def test_weekly_review_uses_period_scope_when_current_period_is_empty(self):
+        now = timezone.now()
+        start_of_week = now.date() - timedelta(days=now.date().weekday())
+        previous_week_transaction_date = start_of_week - timedelta(days=2)
+        Transaction.objects.create(
+            user=self.user,
+            amount="25.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=timezone.make_aware(datetime.combine(previous_week_transaction_date, time(hour=12))),
+            category="shopping",
+            payment_channel="card",
+            satisfaction_rating=8,
+        )
+
+        response = self.client.get("/api/gamification/reviews/weekly/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["minimum_transactions_required"], 0)
+        self.assertEqual(payload["reviewed_transaction_count"], 0)
+        self.assertEqual(payload["pending_transaction_feedback_count"], 0)
+        self.assertEqual(payload["transaction_candidates"], [])
 
     def test_weekly_review_completion_requires_feedback_and_summary(self):
         transaction = Transaction.objects.create(

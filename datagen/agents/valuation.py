@@ -596,8 +596,12 @@ class ValuationAgent(BaseAgent):
         if tier in ("low", "moderate") and price_fairness < 0.5 and need_fit < 0.6:
             buy_logit -= (0.5 - price_fairness) * 1.5
         if luxury_signal > 0 and state.liquidity in ("tight", "overdraft_risk", "overdrafted"):
-            buy_logit -= 0.8 * luxury_signal
-            skip_logit += 0.9 * luxury_signal
+            buy_logit -= 1.15 * luxury_signal
+            skip_logit += 1.2 * luxury_signal
+        if luxury_signal > 0 and state.credit_stress >= 0.6:
+            buy_logit -= 0.45 * luxury_signal
+            wait_logit += 0.18 * luxury_signal
+            skip_logit += 0.22 * luxury_signal
         return _softmax_choice(rng, [buy_logit, wait_logit, skip_logit], ("buy", "wait", "skip"))
 
     def _sample_fair_price(

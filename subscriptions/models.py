@@ -1,6 +1,15 @@
 from django.conf import settings
 from django.db import models
 
+from zapp.security.encrypted_fields import (
+    EncryptedCharField,
+    EncryptedDateField,
+    EncryptedDecimalField,
+    EncryptedFloatField,
+    EncryptedIntegerField,
+    EncryptedTextField,
+)
+
 
 class SubscriptionEligibility(models.TextChoices):
     NOT_SUBSCRIBABLE = "not_subscribable", "Not Subscribable"
@@ -92,7 +101,7 @@ class Subscription(models.Model):
         help_text="Merchant is PROTECT to avoid breaking historical records.",
     )
 
-    plan_name = models.CharField(max_length=255, blank=True, null=True)
+    plan_name = EncryptedCharField(blank=True, null=True)
 
     status = models.CharField(
         max_length=16,
@@ -105,41 +114,41 @@ class Subscription(models.Model):
         default=BillingCycle.MONTHLY,
     )
 
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = EncryptedDecimalField()
     currency = models.CharField(max_length=3, default="USD")
 
-    started_on = models.DateField(blank=True, null=True)
-    renewal_date = models.DateField(blank=True, null=True)
-    cancelled_on = models.DateField(blank=True, null=True)
+    started_on = EncryptedDateField(blank=True, null=True)
+    renewal_date = EncryptedDateField(blank=True, null=True)
+    cancelled_on = EncryptedDateField(blank=True, null=True)
 
-    notes = models.TextField(blank=True, null=True)
+    notes = EncryptedTextField(blank=True, null=True)
 
-    usage_frequency = models.PositiveSmallIntegerField(
+    usage_frequency = EncryptedIntegerField(
         blank=True,
         null=True,
         help_text="Uses per week or your chosen unit",
     )
-    reactivation_count = models.PositiveIntegerField(
+    reactivation_count = EncryptedIntegerField(
         default=0,
         help_text="Number of times this subscription has been reactivated",
     )
 
-    feedback_value_score = models.FloatField(
+    feedback_value_score = EncryptedFloatField(
         blank=True,
         null=True,
         help_text="0-1 derived from reflection_text + ratings (user feedback on value)",
     )
-    feedback_confidence = models.FloatField(
+    feedback_confidence = EncryptedFloatField(
         blank=True,
         null=True,
         help_text="0-1 confidence in feedback_value_score",
     )
-    subscription_utilization = models.FloatField(
+    subscription_utilization = EncryptedFloatField(
         blank=True,
         null=True,
         help_text="0-1 normalized utilization score derived from valuation runs.",
     )
-    subscription_cost_benefit = models.FloatField(
+    subscription_cost_benefit = EncryptedFloatField(
         blank=True,
         null=True,
         help_text="0-1 bounded value-vs-cost score derived from valuation runs.",
@@ -156,22 +165,6 @@ class Subscription(models.Model):
             models.Index(fields=["user", "renewal_date"]),
         ]
         constraints = [
-            models.CheckConstraint(
-                condition=models.Q(feedback_value_score__gte=0, feedback_value_score__lte=1) | models.Q(feedback_value_score__isnull=True),
-                name="valid_subscription_feedback_value_score",
-            ),
-            models.CheckConstraint(
-                condition=models.Q(feedback_confidence__gte=0, feedback_confidence__lte=1) | models.Q(feedback_confidence__isnull=True),
-                name="valid_subscription_feedback_confidence",
-            ),
-            models.CheckConstraint(
-                condition=models.Q(subscription_utilization__gte=0, subscription_utilization__lte=1) | models.Q(subscription_utilization__isnull=True),
-                name="valid_subscription_utilization",
-            ),
-            models.CheckConstraint(
-                condition=models.Q(subscription_cost_benefit__gte=0, subscription_cost_benefit__lte=1) | models.Q(subscription_cost_benefit__isnull=True),
-                name="valid_subscription_cost_benefit",
-            ),
             # Prevent duplicate active subscriptions to the same merchant for a user.
             # If you later want multiple (e.g., multiple Netflix profiles), loosen this.
             models.UniqueConstraint(

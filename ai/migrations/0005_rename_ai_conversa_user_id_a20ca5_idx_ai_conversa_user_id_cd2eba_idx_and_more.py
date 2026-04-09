@@ -1,0 +1,25 @@
+from django.db import migrations
+
+
+class Migration(migrations.Migration):
+    dependencies = [
+        ("ai", "0004_conversationmemoryitem"),
+    ]
+
+    operations = [
+        migrations.RenameIndex(
+            model_name="conversationmemoryitem",
+            old_name="ai_conversa_user_id_a20ca5_idx",
+            new_name="ai_conversa_user_id_cd2eba_idx",
+        ),
+        migrations.RenameIndex(
+            model_name="conversationmemoryitem",
+            old_name="ai_conversa_user_id_27ae94_idx",
+            new_name="ai_conversa_user_id_df3597_idx",
+        ),
+        migrations.RenameIndex(
+            model_name="conversationmemoryitem",
+            old_name="ai_conversa_convers_1a03db_idx",
+            new_name="ai_conversa_convers_90711f_idx",
+        ),
+    ]

@@ -1,0 +1,42 @@
+{
+  "version": "2026-03-31",
+  "rules": [
+    {
+      "id": "auth_failed_login_spike",
+      "window_minutes": 10,
+      "thresholds": { "medium": 5, "high": 10 },
+      "routing": {
+        "medium": "security-triage",
+        "high": "security-page"
+      },
+      "dashboard": "security-auth-overview",
+      "runbook": "runbooks/security-alerts.md#failed-logins"
+    },
+    {
+      "id": "privileged_action_event",
+      "window_minutes": 30,
+      "event_names": [
+        "rbac.group_member_role_change",
+        "admin.group_member_remove",
+        "admin.group_invite_delete"
+      ],
+      "routing": {
+        "medium": "security-triage",
+        "high": "security-page"
+      },
+      "dashboard": "security-admin-activity",
+      "runbook": "runbooks/security-alerts.md#privileged-actions"
+    },
+    {
+      "id": "banking_policy_denied_spike",
+      "window_minutes": 15,
+      "thresholds": { "medium": 3, "high": 6 },
+      "routing": {
+        "medium": "security-triage",
+        "high": "security-page"
+      },
+      "dashboard": "security-banking-assurance",
+      "runbook": "runbooks/security-alerts.md#banking-policy-denials"
+    }
+  ]
+}

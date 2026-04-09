@@ -1,7 +1,7 @@
 from .base import *
 
 DEBUG = False
-ALLOWED_HOSTS = ["your-production-domain.com"]  # update later
+# ALLOWED_HOSTS is inherited from base and must be provided via env (comma-separated).
 
 # Disable server-side cursors for Supabase/PgBouncer transaction pooler
 DATABASES["default"]["DISABLE_SERVER_SIDE_CURSORS"] = True
@@ -10,7 +10,9 @@ DATABASES["default"]["DISABLE_SERVER_SIDE_CURSORS"] = True
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_SSL_REDIRECT = True
 SESSION_COOKIE_SECURE = True
+SESSION_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_SECURE = True
+CSRF_COOKIE_SAMESITE = "Lax"
 SECURE_HSTS_SECONDS = 31536000
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 SECURE_HSTS_PRELOAD = True
@@ -18,6 +20,7 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
 
 # Production Plaid / banking policy
+AUTH_REQUIRE_AAL2 = True
 BANKING_REQUIRE_MFA = True
 BANKING_REQUIRE_FINANCIAL_CONSENT = True
 ALLOW_DEV_HEADER_AUTH = False

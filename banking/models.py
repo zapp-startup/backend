@@ -9,6 +9,12 @@ from django.conf import settings
 from django.db import models
 
 from banking.categories import ZappPrimaryCategory, ZappSubcategory
+from zapp.security.encrypted_fields import (
+    EncryptedCharField,
+    EncryptedDateField,
+    EncryptedDecimalField,
+    EncryptedJSONField,
+)
 
 
 class BankConnection(models.Model):
@@ -31,13 +37,13 @@ class BankConnection(models.Model):
     # Encrypted-at-app-layer tokens may exceed 512 chars; never expose via API.
     plaid_access_token = models.TextField()
     institution_id = models.CharField(max_length=64, blank=True, db_index=True)
-    institution_name = models.CharField(max_length=256, blank=True)
+    institution_name = EncryptedCharField(blank=True)
     status = models.CharField(
         max_length=32,
         choices=Status.choices,
         default=Status.ACTIVE,
     )
-    sync_cursor = models.TextField(blank=True)
+    sync_cursor = EncryptedCharField(blank=True)
     last_synced_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -64,25 +70,15 @@ class BankAccount(models.Model):
         related_name="accounts",
     )
     plaid_account_id = models.CharField(max_length=64, db_index=True)
-    name = models.CharField(max_length=256)
-    official_name = models.CharField(max_length=256, blank=True)
-    mask = models.CharField(max_length=8, blank=True)
+    name = EncryptedCharField()
+    official_name = EncryptedCharField(blank=True)
+    mask = EncryptedCharField(blank=True)
     type = models.CharField(max_length=64, blank=True)
     subtype = models.CharField(max_length=64, blank=True)
-    current_balance = models.DecimalField(
-        max_digits=14,
-        decimal_places=2,
-        null=True,
-        blank=True,
-    )
-    available_balance = models.DecimalField(
-        max_digits=14,
-        decimal_places=2,
-        null=True,
-        blank=True,
-    )
+    current_balance = EncryptedDecimalField(null=True, blank=True)
+    available_balance = EncryptedDecimalField(null=True, blank=True)
     iso_currency_code = models.CharField(max_length=3, default="USD")
-    raw_payload = models.JSONField(default=dict, blank=True)
+    raw_payload = EncryptedJSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -126,20 +122,20 @@ class BankTransaction(models.Model):
     )
     plaid_transaction_id = models.CharField(max_length=64, db_index=True)
     pending_transaction_id = models.CharField(max_length=64, blank=True)
-    name = models.CharField(max_length=512)
-    merchant_name = models.CharField(max_length=512, blank=True)
-    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    name = EncryptedCharField()
+    merchant_name = EncryptedCharField(blank=True)
+    amount = EncryptedDecimalField()
     iso_currency_code = models.CharField(max_length=3, default="USD")
     date = models.DateField()
-    authorized_date = models.DateField(null=True, blank=True)
+    authorized_date = EncryptedDateField(null=True, blank=True)
     pending = models.BooleanField(default=False)
     removed = models.BooleanField(
         default=False,
         help_text="Soft-delete: transaction was removed in Plaid sync",
     )
     # --- Plaid raw category (preserved, never overwritten by Zapp) ---
-    category_primary = models.CharField(max_length=128, blank=True)
-    category_detailed = models.CharField(max_length=256, blank=True)
+    category_primary = EncryptedCharField(blank=True)
+    category_detailed = EncryptedCharField(blank=True)
 
     # --- Zapp categorization layer ---
     zapp_primary_category = models.CharField(
@@ -148,18 +144,15 @@ class BankTransaction(models.Model):
         blank=True,
         db_index=True,
     )
-    zapp_subcategory = models.CharField(
-        max_length=64,
+    zapp_subcategory = EncryptedCharField(
         choices=ZappSubcategory.choices,
         blank=True,
     )
-    user_override_category = models.CharField(
-        max_length=128,
+    user_override_category = EncryptedCharField(
         blank=True,
         help_text="User-assigned category; takes precedence over Zapp categories",
     )
-    category_source = models.CharField(
-        max_length=32,
+    category_source = EncryptedCharField(
         blank=True,
         help_text="Source of assigned category: plaid, merchant_override, zapp_mapping, user_override",
     )
@@ -170,7 +163,7 @@ class BankTransaction(models.Model):
         blank=True,
     )
 
-    raw_payload = models.JSONField(default=dict, blank=True)
+    raw_payload = EncryptedJSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

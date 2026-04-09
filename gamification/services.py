@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
+from banking.categories import ZappPrimaryCategory
+from banking.models import BankTransaction
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Count, Q, Sum, TextField, Value
-from django.db.models.functions import Coalesce, Trim
+from django.db.models import Count, Q, Sum
 from django.utils import timezone
 
 from subscriptions.models import Subscription, SubscriptionStatus
-from transactions.feedback_candidates import get_feedback_candidates
+from transactions.feedback_candidates import _has_feedback, get_feedback_candidates
 from transactions.models import Transaction, TransactionCategory, TransactionReflection
 from .badges import ACTION_POINTS, BADGE_CATALOG
 from .models import (
@@ -41,6 +42,22 @@ LEVEL_STEP_POINTS = 25
 LOW_SIGNAL_REVIEW_CATEGORIES = {
     TransactionCategory.GROCERIES,
     TransactionCategory.BILLS,
+}
+PRIMARY_CATEGORY_TO_TRANSACTION_CATEGORY = {
+    ZappPrimaryCategory.UTILITIES_BILLS: TransactionCategory.BILLS,
+    ZappPrimaryCategory.GROCERIES_ESSENTIALS: TransactionCategory.GROCERIES,
+    ZappPrimaryCategory.DINING_CAFES: TransactionCategory.EATING_OUT,
+    ZappPrimaryCategory.TRANSPORTATION: TransactionCategory.TRANSPORT,
+    ZappPrimaryCategory.TRAVEL: TransactionCategory.TRANSPORT,
+    ZappPrimaryCategory.SHOPPING: TransactionCategory.SHOPPING,
+    ZappPrimaryCategory.SUBSCRIPTIONS: TransactionCategory.SUBSCRIPTIONS,
+    ZappPrimaryCategory.ENTERTAINMENT_SOCIAL: TransactionCategory.ENTERTAINMENT,
+    ZappPrimaryCategory.HEALTH_WELLNESS: TransactionCategory.HEALTH,
+    ZappPrimaryCategory.EDUCATION_CAREER: TransactionCategory.EDUCATION,
+    ZappPrimaryCategory.HOUSING_LIVING: TransactionCategory.BILLS,
+    ZappPrimaryCategory.FAMILY_GIFTS: TransactionCategory.SHOPPING,
+    ZappPrimaryCategory.FINANCIAL_TRANSFERS: TransactionCategory.OTHER,
+    ZappPrimaryCategory.MISCELLANEOUS: TransactionCategory.OTHER,
 }
 REVIEW_SUMMARY_REQUIREMENTS = {
     PeriodicReviewType.WEEKLY: ("wins", "regrets", "adjustment"),
@@ -175,26 +192,99 @@ def get_or_create_periodic_review(*, user: User, review_type: str, anchor_date: 
     return review
 
 
-def _transaction_feedback_filter() -> Q:
-    return (
-        Q(satisfaction_rating__isnull=False)
-        | Q(regret_rating__isnull=False)
-        | Q(repurchase_likelihood__isnull=False)
-        | ~Q(trimmed_reflection_text="")
-    )
-
-
 def _review_effective_end(review: PeriodicReview, reference_date: date | None = None) -> date:
     today = reference_date or timezone.now().date()
     return min(review.period_end, today)
 
 
-def _with_trimmed_reflection_text(queryset):
-    return queryset.annotate(
-        trimmed_reflection_text=Trim(
-            Coalesce("reflection_text", Value("", output_field=TextField())),
-        ),
+def _bank_transaction_description(bank_transaction: BankTransaction) -> str:
+    return (bank_transaction.merchant_name or bank_transaction.name or "").strip()
+
+
+def _bank_transaction_category(bank_transaction: BankTransaction) -> str:
+    category = PRIMARY_CATEGORY_TO_TRANSACTION_CATEGORY.get(bank_transaction.zapp_primary_category)
+    if category:
+        return category
+    return TransactionCategory.OTHER
+
+
+def _bank_transaction_occurred_at(bank_transaction: BankTransaction):
+    bank_date = bank_transaction.authorized_date or bank_transaction.date
+    naive = datetime.combine(bank_date, time(hour=12))
+    if timezone.is_naive(naive):
+        return timezone.make_aware(naive, timezone.get_current_timezone())
+    return naive
+
+
+def _sync_review_bank_transactions(review: PeriodicReview, reference_date: date | None = None) -> None:
+    effective_end = _review_effective_end(review, reference_date)
+    bank_transactions = list(
+        BankTransaction.objects.filter(
+            user=review.user,
+            removed=False,
+            pending=False,
+            date__gte=review.period_start,
+            date__lte=effective_end,
+        ).select_related("account", "connection")
     )
+
+    for bank_transaction in bank_transactions:
+        amount = bank_transaction.amount
+        if amount is None or amount <= 0:
+            continue
+
+        defaults = {
+            "user": review.user,
+            "amount": amount,
+            "currency": bank_transaction.iso_currency_code or "USD",
+            "direction": "spend",
+            "occurred_at": _bank_transaction_occurred_at(bank_transaction),
+            "category": _bank_transaction_category(bank_transaction),
+            "payment_channel": "bank",
+            "description_raw": _bank_transaction_description(bank_transaction),
+        }
+        shadow, created = Transaction.objects.get_or_create(
+            bank_transaction=bank_transaction,
+            defaults=defaults,
+        )
+        if created:
+            continue
+
+        changed_fields = []
+        for field, value in defaults.items():
+            if getattr(shadow, field) != value:
+                setattr(shadow, field, value)
+                changed_fields.append(field)
+        if shadow.user_id != review.user.id:
+            shadow.user = review.user
+            changed_fields.append("user")
+        if changed_fields:
+            shadow.save(update_fields=changed_fields)
+
+
+def _review_window_transactions(
+    review: PeriodicReview, reference_date: date | None = None
+) -> list[Transaction]:
+    effective_end = _review_effective_end(review, reference_date)
+    return list(
+        Transaction.objects.filter(
+            user=review.user,
+            direction="spend",
+            occurred_at__date__gte=review.period_start,
+            occurred_at__date__lte=effective_end,
+        )
+        .select_related("merchant", "subscription")
+        .order_by("-occurred_at")
+    )
+
+
+def _minimum_transaction_feedback_required_for_review(
+    review: PeriodicReview, reference_date: date | None = None
+) -> int:
+    period_transactions = _review_window_transactions(review, reference_date)
+    if not period_transactions:
+        return 0
+    return minimum_transaction_feedback_required(review.review_type)
 
 
 def _summary_value_present(value) -> bool:
@@ -204,84 +294,45 @@ def _summary_value_present(value) -> bool:
 
 
 def reviewed_transactions_count(review: PeriodicReview, reference_date: date | None = None) -> int:
-    effective_end = _review_effective_end(review, reference_date)
-    return (
-        _with_trimmed_reflection_text(
-            Transaction.objects.filter(
-                user=review.user,
-                direction="spend",
-                occurred_at__date__gte=review.period_start,
-                occurred_at__date__lte=effective_end,
-            )
-        )
-        .filter(_transaction_feedback_filter())
-        .count()
-    )
+    _sync_review_bank_transactions(review, reference_date)
+    transactions = _review_window_transactions(review, reference_date)
+    return sum(1 for transaction in transactions if _has_feedback(transaction))
 
 
 def pending_transaction_feedback_count(review: PeriodicReview, reference_date: date | None = None) -> int:
-    effective_end = _review_effective_end(review, reference_date)
-    return (
-        _with_trimmed_reflection_text(
-            Transaction.objects.filter(
-                user=review.user,
-                direction="spend",
-                occurred_at__date__gte=review.period_start,
-                occurred_at__date__lte=effective_end,
-            )
-        )
-        .exclude(category__in=LOW_SIGNAL_REVIEW_CATEGORIES)
-        .filter(
-            satisfaction_rating__isnull=True,
-            regret_rating__isnull=True,
-            repurchase_likelihood__isnull=True,
-            trimmed_reflection_text="",
-        )
-        .count()
+    _sync_review_bank_transactions(review, reference_date)
+    transactions = _review_window_transactions(review, reference_date)
+    return sum(
+        1
+        for transaction in transactions
+        if not _has_feedback(transaction)
     )
 
 
 def review_transaction_candidates(review: PeriodicReview, reference_date: date | None = None) -> list[Transaction]:
+    _sync_review_bank_transactions(review, reference_date)
+    scope_transactions = _review_window_transactions(review, reference_date)
+    scope_ids = {transaction.id for transaction in scope_transactions}
     effective_end = _review_effective_end(review, reference_date)
     days_window = max((effective_end - review.period_start).days + 1, 1)
     limit = REVIEW_TRANSACTION_CANDIDATE_LIMIT[review.review_type]
     raw_candidates = get_feedback_candidates(review.user, days_window=days_window, top_n=max(limit * 3, 10))
-    ordered_ids = [candidate["transaction_id"] for candidate in raw_candidates]
+    ordered_ids = [
+        candidate["transaction_id"]
+        for candidate in raw_candidates
+        if candidate["transaction_id"] in scope_ids
+    ]
 
-    transactions = list(
-        Transaction.objects.filter(
-            user=review.user,
-            id__in=ordered_ids,
-            direction="spend",
-            occurred_at__date__gte=review.period_start,
-            occurred_at__date__lte=effective_end,
-        )
-        .select_related("merchant", "subscription")
-    )
-    by_id = {transaction.id: transaction for transaction in transactions}
+    by_id = {transaction.id: transaction for transaction in scope_transactions}
     ordered_transactions = [by_id[transaction_id] for transaction_id in ordered_ids if transaction_id in by_id]
 
     if len(ordered_transactions) < limit:
-        fallback_transactions = list(
-            _with_trimmed_reflection_text(
-                Transaction.objects.filter(
-                    user=review.user,
-                    direction="spend",
-                    occurred_at__date__gte=review.period_start,
-                    occurred_at__date__lte=effective_end,
-                )
-            )
-            .exclude(category__in=LOW_SIGNAL_REVIEW_CATEGORIES)
-            .exclude(id__in=[transaction.id for transaction in ordered_transactions])
-            .filter(
-                satisfaction_rating__isnull=True,
-                regret_rating__isnull=True,
-                repurchase_likelihood__isnull=True,
-                trimmed_reflection_text="",
-            )
-            .select_related("merchant", "subscription")
-            .order_by("-occurred_at")[: max(limit - len(ordered_transactions), 0)]
-        )
+        fallback_transactions = [
+            transaction
+            for transaction in scope_transactions
+            if transaction.id not in [ordered.id for ordered in ordered_transactions]
+            and not _has_feedback(transaction)
+        ][: max(limit - len(ordered_transactions), 0)]
         ordered_transactions.extend(fallback_transactions)
 
     return ordered_transactions[:limit]
@@ -329,7 +380,7 @@ def can_complete_periodic_review(review: PeriodicReview, *, summary_json: dict |
         if not _summary_value_present(summary_json.get(field))
     ]
     reviewed_count = reviewed_transactions_count(review)
-    if reviewed_count < minimum_transaction_feedback_required(review.review_type):
+    if reviewed_count < _minimum_transaction_feedback_required_for_review(review):
         missing_fields.append("reviewed_transactions")
     return len(missing_fields) == 0, missing_fields, reviewed_count
 
@@ -342,7 +393,7 @@ def build_periodic_review_payload(review: PeriodicReview) -> dict:
         "review": review,
         "period_label": periodic_review_period_label(review),
         "summary_requirements": list(review_summary_requirements(review.review_type)),
-        "minimum_transactions_required": minimum_transaction_feedback_required(review.review_type),
+        "minimum_transactions_required": _minimum_transaction_feedback_required_for_review(review),
         "reviewed_transaction_count": reviewed_count,
         "pending_transaction_feedback_count": pending_count,
         "eligible_to_complete": eligible,
