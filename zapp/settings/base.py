@@ -73,6 +73,7 @@ INSTALLED_APPS = [
     'banking',
     'compliance',
     'gamification',
+    'integrations.apps.IntegrationsConfig',
 ]
 
 MIDDLEWARE = [
@@ -155,6 +156,7 @@ REST_FRAMEWORK = {
         "banking_sensitive": os.getenv("THROTTLE_BANKING_SENSITIVE", "120/hour"),
         "banking_link_token": os.getenv("THROTTLE_BANKING_LINK_TOKEN", "30/hour"),
         "compliance_consent": os.getenv("THROTTLE_COMPLIANCE_CONSENT", "60/hour"),
+        "integrations_spotify": os.getenv("THROTTLE_INTEGRATIONS_SPOTIFY", "60/hour"),
     },
 }
 
@@ -258,9 +260,26 @@ PLAID_TOKEN_ENCRYPTION_KEY = os.getenv("PLAID_TOKEN_ENCRYPTION_KEY", "")
 # Optional rotation list. First key is used for new writes; remaining keys are accepted for decrypt.
 PLAID_TOKEN_ENCRYPTION_KEYS = os.getenv("PLAID_TOKEN_ENCRYPTION_KEYS", "")
 
-# General application-layer encryption for sensitive business/profile fields.
+# Optional Fernet key(s) for app data encrypted fields at rest.
 APP_DATA_ENCRYPTION_KEY = os.getenv("APP_DATA_ENCRYPTION_KEY", "")
 APP_DATA_ENCRYPTION_KEYS = os.getenv("APP_DATA_ENCRYPTION_KEYS", "")
+
+# Spotify (category integration — OAuth + Web API)
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "")
+# Browser redirect after successful OAuth (e.g. https://app.example.com/settings/integrations)
+SPOTIFY_OAUTH_SUCCESS_REDIRECT_URL = os.getenv("SPOTIFY_OAUTH_SUCCESS_REDIRECT_URL", "")
+# Optional: dedicated Fernet key; falls back to PLAID_TOKEN_ENCRYPTION_KEY then plaintext
+SPOTIFY_TOKEN_ENCRYPTION_KEY = os.getenv("SPOTIFY_TOKEN_ENCRYPTION_KEY", "")
+SPOTIFY_DEFAULT_MONTHLY_PRICE_USD = os.getenv("SPOTIFY_DEFAULT_MONTHLY_PRICE_USD", "10.99")
+SPOTIFY_AUTO_CREATE_SUBSCRIPTION = os.getenv(
+    "SPOTIFY_AUTO_CREATE_SUBSCRIPTION", "true"
+).lower() in ("1", "true", "yes")
+# Run initial data sync in OAuth callback (sets last_synced_at; disable if redirect is too slow)
+SPOTIFY_SYNC_ON_CONNECT = os.getenv(
+    "SPOTIFY_SYNC_ON_CONNECT", "true"
+).lower() in ("1", "true", "yes")
 
 # Retention hints (operational; actual deletion uses management commands / legal process)
 BANKING_DATA_RETENTION_DAYS_AFTER_DISCONNECT = int(

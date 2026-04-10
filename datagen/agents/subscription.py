@@ -179,7 +179,7 @@ class SubscriptionAgent(BaseAgent):
         status = "active"
         cancelled_on = None
         reactivation_count = 0
-        usage_frequency = int(rng.integers(0, 8))
+        usage_frequency = float(rng.integers(0, 8)) / 7.0
 
         period_days = 365 if billing_cycle == "yearly" else 30
         current = started
@@ -235,7 +235,7 @@ class SubscriptionAgent(BaseAgent):
                 cancel_p += CANCEL_STRETCH_GAMMA
             if state.subscription_burden_state == "overloaded":
                 cancel_p += CANCEL_OVERLOAD_GAMMA
-            if usage_frequency < 2:
+            if usage_frequency < (2.0 / 7.0):
                 cancel_p += 0.02
 
             if rng.random() < cancel_p:

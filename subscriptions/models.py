@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 from zapp.security.encrypted_fields import (
@@ -123,10 +124,11 @@ class Subscription(models.Model):
 
     notes = EncryptedTextField(blank=True, null=True)
 
-    usage_frequency = EncryptedIntegerField(
+    usage_frequency = EncryptedFloatField(
         blank=True,
         null=True,
-        help_text="Uses per week or your chosen unit",
+        help_text="0-1 normalized usage intensity (e.g. Spotify: active listening days / 30).",
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)],
     )
     reactivation_count = EncryptedIntegerField(
         default=0,
