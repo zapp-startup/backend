@@ -6,8 +6,10 @@ from gamification.services import (
     award_points_for_subscription_cancelled,
     award_points_for_subscription_paused,
 )
+from subscriptions.services.events import mark_subscription_dirty
 
 from valuations.value_score_views import annotate_subscriptions_with_latest_score
+from valuations.services.value_score_orchestrator import run_value_scores_for_user
 
 from .models import Merchant, Subscription
 from .serializers import MerchantSerializer, SubscriptionSerializer
@@ -36,11 +38,15 @@ class SubscriptionViewSet(ModelViewSet):
         # Force ownership
         subscription = serializer.save(user=self.request.user)
         award_points_for_subscription_added(subscription)
+        mark_subscription_dirty(subscription, reason="subscription_created", priority=3)
+        run_value_scores_for_user(self.request.user.id, subscription_ids=[subscription.id])
 
     def perform_update(self, serializer):
         previous = self.get_object()
         previous_status = previous.status
         subscription = serializer.save(user=self.request.user)
+        mark_subscription_dirty(subscription, reason="subscription_updated", priority=3)
+        run_value_scores_for_user(self.request.user.id, subscription_ids=[subscription.id])
 
         if previous_status != subscription.status:
             if subscription.status == "canceled":

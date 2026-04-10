@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from gamification.services import award_points_for_subscription_valuation
 from subscriptions.models import Subscription
+from users.services.state_orchestrator import recompute_user_state
 
 from ..models import Recommendation, SubscriptionValuation, ValuationContext, ValuationModelVersion
 from .value_score_data import score_to_financial_fields
@@ -107,6 +108,10 @@ def persist_subscription_value_scores(
                 "estimated_value": estimated_value,
                 "net_value": net_value,
                 "personal_value_score": min(max(vs, 0), 150),
+                "base_value_score": min(max(base_vs, 0), 150),
+                "tier_used": tier_label,
+                "inference_status": "success",
+                "feature_window_days": period_days,
                 "recommendation": rec,
                 "confidence": min(max(conf, 0.0), 1.0),
                 "evidence_json": evidence,
@@ -142,6 +147,7 @@ def run_value_scores_for_user(
 
     ver = model_version_str or getattr(settings, "VALUE_SCORE_MODEL_VERSION", "bundle")
     try:
+        recompute_user_state(user_id)
         df = predict_user_subscriptions(user_id, subscription_ids=subscription_ids)
     except ValueScoreModelNotAvailable as e:
         return {"ok": False, "error": str(e), "valuations": []}

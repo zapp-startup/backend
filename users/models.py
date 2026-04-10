@@ -144,6 +144,9 @@ class UserRawInferred(models.Model):
 
     # Snapshot window for these metrics
     window_days = models.PositiveSmallIntegerField(default=90)
+    feature_logic_version = models.CharField(max_length=32, default="v1")
+    data_sufficiency_tier = EncryptedCharField(blank=True, default="")
+    sparse_signals_json = EncryptedJSONField(default=dict, blank=True)
 
     # Examples (keep as nullable since you’ll fill progressively)
     avg_purchase_price = EncryptedDecimalField(blank=True, null=True)
@@ -207,6 +210,8 @@ class UserComputed(models.Model):
     impulse_susceptibility_score = models.FloatField(blank=True, null=True)
     regret_sensitivity = models.FloatField(blank=True, null=True)
     budget_adherence_score = models.FloatField(blank=True, null=True)
+    feature_logic_version = models.CharField(max_length=32, default="v1")
+    computed_from_inferred_at = models.DateTimeField(blank=True, null=True)
 
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -108,6 +108,8 @@ class EncryptedDateField(EncryptedValueMixin, models.TextField):
         return isinstance(value, date) and not isinstance(value, datetime)
 
     def serialize_plain_value(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value
         return value.isoformat()
 
     def deserialize_plain_value(self, value: str) -> date:
@@ -122,6 +124,8 @@ class EncryptedDateTimeField(EncryptedValueMixin, models.TextField):
         return isinstance(value, datetime)
 
     def serialize_plain_value(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value
         return value.isoformat()
 
     def deserialize_plain_value(self, value: str) -> datetime:

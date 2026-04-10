@@ -6,7 +6,7 @@ from rest_framework.test import APIClient
 from banking.categories import ZappPrimaryCategory, ZappSubcategory
 from compliance.models import AuditEvent, ConsentType
 from compliance.services import record_financial_consent
-from banking.models import BankAccount, BankConnection, MerchantCategoryRule
+from banking.models import BankAccount, BankConnection, BankTransaction, MerchantCategoryRule
 from banking.services.categorization_service import apply_merchant_override_rules
 from banking.lifecycle import purge_user_bank_data
 from banking.services.plaid_service import (
@@ -15,6 +15,7 @@ from banking.services.plaid_service import (
     upsert_transactions_from_plaid,
 )
 from users.models import User
+from transactions.models import Transaction
 
 
 class BankingAPITestCase(TestCase):
@@ -152,6 +153,59 @@ class BankingAPITestCase(TestCase):
         body = response.json()
         code = body.get("code") or (body.get("detail") or {}).get("code")
         self.assertEqual(code, "mfa_not_enrolled")
+
+    @override_settings(BANKING_REQUIRE_MFA=False, BANKING_REQUIRE_FINANCIAL_CONSENT=False)
+    @patch("valuations.services.transaction_value_score.get_value_score_model")
+    def test_bank_transaction_score_endpoint_persists_value_score_via_feedback_transaction(self, mock_get_model):
+        class DummyModel:
+            def predict(self, _data):
+                import pandas as pd
+
+                return pd.DataFrame(
+                    [
+                        {
+                            "subscription_id": bank_transaction.id,
+                            "value_score": 96,
+                            "base_value_score": 90,
+                            "confidence": 0.66,
+                            "tier_used": 1,
+                        }
+                    ]
+                )
+
+        connection = BankConnection.objects.create(
+            user=self.user,
+            plaid_item_id="item-score",
+            plaid_access_token="access-token",
+        )
+        account = BankAccount.objects.create(
+            connection=connection,
+            plaid_account_id="acct-score",
+            name="Checking",
+        )
+        bank_transaction = BankTransaction.objects.create(
+            user=self.user,
+            connection=connection,
+            account=account,
+            plaid_transaction_id="plaid-txn-score",
+            name="Coffee Shop",
+            merchant_name="Coffee Shop",
+            amount=8.50,
+            date="2026-04-08",
+            pending=False,
+        )
+        mock_get_model.return_value = DummyModel()
+        self.client.force_authenticate(
+            user=self.user,
+            token={"aal": "aal1", "mfa_factors_count": -1, "amr": []},
+        )
+
+        response = self.client.post(f"/api/banking/transactions/{bank_transaction.id}/score/")
+
+        self.assertEqual(response.status_code, 200)
+        mirrored = Transaction.objects.get(bank_transaction=bank_transaction)
+        self.assertIsNotNone(mirrored.personal_value_score)
+        self.assertEqual(response.json()["personal_value_score"], mirrored.personal_value_score)
 
     @override_settings(BANKING_REQUIRE_MFA=True, BANKING_REQUIRE_FINANCIAL_CONSENT=False)
     @patch("banking.views.sync_transactions_for_connection")
@@ -392,3 +446,7 @@ class CategorizationServiceTestCase(TestCase):
             result,
             (ZappPrimaryCategory.DINING_CAFES, ZappSubcategory.DELIVERY),
         )
+
+
+# New tests for bank transaction feedback and user-state inference are in
+# banking/tests_workflow.py (no plaid dependency, runnable in all environments).

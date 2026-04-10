@@ -53,6 +53,9 @@ class UserRawInferredSerializer(serializers.ModelSerializer):
         fields = [
             "user",
             "window_days",
+            "feature_logic_version",
+            "data_sufficiency_tier",
+            "sparse_signals_json",
             "avg_purchase_price",
             "purchase_price_variance",
             "category_distribution_json",
@@ -81,6 +84,8 @@ class UserComputedSerializer(serializers.ModelSerializer):
         model = UserComputed
         fields = [
             "user",
+            "feature_logic_version",
+            "computed_from_inferred_at",
             "spending_personality",
             "product_spending_style",
             "subscription_behavior_type",

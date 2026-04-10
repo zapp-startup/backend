@@ -172,6 +172,26 @@ class Transaction(models.Model):
         null=True,
         help_text="0-1 confidence in feedback_value_score",
     )
+    personal_value_score = EncryptedIntegerField(
+        blank=True,
+        null=True,
+        help_text="0-150 persisted model-backed value score for this transaction",
+    )
+    value_score_confidence = EncryptedFloatField(
+        blank=True,
+        null=True,
+        help_text="0-1 confidence in personal_value_score",
+    )
+    value_score_model_version = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text="Model version used to produce personal_value_score",
+    )
+    value_score_computed_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text="When personal_value_score was last computed",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 

@@ -1,3 +1,4 @@
+from rest_framework import status
 from rest_framework import mixins
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -8,10 +9,15 @@ from gamification.services import (
     award_points_for_same_day_reflection,
     award_points_for_transaction,
 )
+from valuations.serializers import TransactionValuationSerializer
 
 from .feedback_candidates import get_feedback_candidates
 from .models import Transaction, TransactionReflection
 from .serializers import TransactionReflectionSerializer, TransactionSerializer
+from .services.events import mark_transaction_dirty
+from .services.feedback_scoring import apply_feedback_scoring
+from valuations.services.value_score_inference import ValueScoreModelNotAvailable
+from valuations.services.transaction_value_score import persist_transaction_value_score
 
 class TransactionViewSet(ModelViewSet):
     serializer_class = TransactionSerializer
@@ -69,6 +75,32 @@ class TransactionViewSet(ModelViewSet):
         # Force ownership
         transaction = serializer.save(user=self.request.user)
         award_points_for_transaction(transaction)
+        mark_transaction_dirty(transaction, reason="transaction_created", priority=4)
+
+    def perform_update(self, serializer):
+        transaction = serializer.save(user=self.request.user)
+        # Derive feedback_value_score / feedback_confidence from ratings whenever
+        # the transaction is updated.  These fields are backend-owned and not
+        # accepted from the client (declared read-only in TransactionSerializer).
+        apply_feedback_scoring(transaction, save=True)
+        mark_transaction_dirty(transaction, reason="transaction_updated", priority=4)
+
+    @action(detail=True, methods=["post"], url_path="score")
+    def score(self, request, pk=None):
+        try:
+            persist_transaction_value_score(self.get_object())
+        except ValueScoreModelNotAvailable as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        transaction = self.get_object()
+        return Response(self.get_serializer(transaction).data)
+
+    @action(detail=True, methods=["get"], url_path="valuation")
+    def valuation(self, request, pk=None):
+        transaction = self.get_object()
+        valuation = transaction.valuations.select_related("model_version").order_by("-created_at").first()
+        if valuation is None:
+            return Response({"detail": "No valuation found for this transaction."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(TransactionValuationSerializer(valuation).data)
 
 
 class TransactionReflectionViewSet(
@@ -90,3 +122,4 @@ class TransactionReflectionViewSet(
     def perform_create(self, serializer):
         reflection = serializer.save(user=self.request.user)
         award_points_for_same_day_reflection(reflection)
+        mark_transaction_dirty(reflection.transaction, reason="transaction_reflection_created", priority=2)

@@ -33,6 +33,22 @@ def _empty_feedback_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=["user_id", "merchant_id", "feedback_value_score", "feedback_confidence"])
 
 
+def _transaction_frame_columns(include_tx_feedback: bool) -> list[str]:
+    columns = ["id", "user_id", "merchant_id", "occurred_at", "amount", "direction"]
+    if include_tx_feedback:
+        columns.extend(
+            [
+                "satisfaction_rating",
+                "regret_rating",
+                "repurchase_likelihood",
+                "impulse_score",
+                "regret_score",
+                "usage_frequency",
+            ]
+        )
+    return columns
+
+
 def build_value_score_dataframes(
     user_id: int,
     *,
@@ -214,7 +230,7 @@ def build_value_score_dataframes(
     return {
         "merchants": pd.DataFrame(merchant_rows),
         "subscriptions": pd.DataFrame(sub_rows),
-        "transactions": pd.DataFrame(tx_rows),
+        "transactions": pd.DataFrame(tx_rows, columns=_transaction_frame_columns(include_tx_feedback)),
         "user_explicit": explicit_df,
         "user_computed": computed_df,
         "user_inferred": inferred_df,
@@ -232,7 +248,8 @@ def score_to_financial_fields(
     Map model score (0–150) to monetary fields required by SubscriptionValuation.
     Interpretation: estimated_value scales with score vs a 100 baseline; net = value - cost.
     """
-    total_cost, _, _ = subscription_financial_window(subscription, period_days=period_days)
+    monthly_cost = Decimal(str(_monthly_equivalent(subscription.price, subscription.billing_cycle)))
+    total_cost = (monthly_cost * Decimal(str(period_days)) / Decimal("30")).quantize(Decimal("0.01"))
     baseline = Decimal("100")
     vs = Decimal(min(max(int(value_score), 0), 150))
     estimated_value = (total_cost * vs / baseline).quantize(Decimal("0.01"))
