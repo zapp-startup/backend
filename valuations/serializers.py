@@ -16,10 +16,17 @@ class SubscriptionValuationSerializer(serializers.ModelSerializer):
 
 
 class ItemValuationSerializer(serializers.ModelSerializer):
+    def _existing_value(self, attrs, field_name):
+        if field_name in attrs:
+            return attrs[field_name]
+        if self.instance is None:
+            return None
+        return getattr(self.instance, field_name, None)
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
 
-        if not attrs.get("model_version"):
+        if self._existing_value(attrs, "model_version") is None:
             model_version, _ = ValuationModelVersion.objects.get_or_create(
                 name="item_value",
                 version="manual-entry-v1",
@@ -27,16 +34,16 @@ class ItemValuationSerializer(serializers.ModelSerializer):
             )
             attrs["model_version"] = model_version
 
-        observed_price = attrs.get("observed_price")
-        if attrs.get("personal_value_score") is None:
+        observed_price = self._existing_value(attrs, "observed_price")
+        if self._existing_value(attrs, "personal_value_score") is None and "personal_value_score" not in attrs:
             score = 95
             if observed_price is not None:
                 price = float(observed_price)
                 score = round(max(35, min(120, 115 - (price / 4.0))))
             attrs["personal_value_score"] = score
 
-        if not attrs.get("recommendation"):
-            score = attrs["personal_value_score"]
+        if self._existing_value(attrs, "recommendation") in (None, "") and "recommendation" not in attrs:
+            score = self._existing_value(attrs, "personal_value_score")
             if score >= 98:
                 attrs["recommendation"] = Recommendation.BUY
             elif score <= 55:
@@ -44,19 +51,19 @@ class ItemValuationSerializer(serializers.ModelSerializer):
             else:
                 attrs["recommendation"] = Recommendation.WAIT
 
-        if attrs.get("confidence") is None:
+        if self._existing_value(attrs, "confidence") is None and "confidence" not in attrs:
             attrs["confidence"] = 0.35
 
-        evidence_json = attrs.get("evidence_json") or {}
-        if not evidence_json:
+        evidence_json = self._existing_value(attrs, "evidence_json") or {}
+        if not evidence_json and "evidence_json" not in attrs:
             evidence_json = {
                 "source": "manual_entry_bootstrap",
                 "observed_price": float(observed_price) if observed_price is not None else None,
             }
         attrs["evidence_json"] = evidence_json
 
-        reasoning_json = attrs.get("reasoning_json") or {}
-        if not reasoning_json:
+        reasoning_json = self._existing_value(attrs, "reasoning_json") or {}
+        if not reasoning_json and "reasoning_json" not in attrs:
             reasoning_json = {
                 "summary": "Bootstrap valuation created from manual entry.",
                 "next_step": "Add more transaction feedback to replace this with a personalized model score.",

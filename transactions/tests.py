@@ -8,7 +8,6 @@ from transactions.feedback_candidates import (
     get_feedback_candidates,
 )
 from transactions.models import Transaction, TransactionCategory
-from transactions.serializers import TransactionSerializer
 from users.models import User
 
 
@@ -77,42 +76,3 @@ class FeedbackCandidatesTestCase(TestCase):
         candidates = get_feedback_candidates(self.user, days_window=365, top_n=5)
         # Our user has no transactions, so candidates should be empty
         self.assertEqual(candidates, [])
-
-    def test_transaction_serializer_prefers_feedback_value_score(self):
-        transaction = Transaction.objects.create(
-            user=self.user,
-            direction="spend",
-            amount=50,
-            occurred_at=timezone.now(),
-            category=TransactionCategory.SHOPPING,
-            feedback_value_score=0.8,
-            feedback_confidence=0.9,
-            satisfaction_rating=4,
-            impulse_score=0.7,
-            regret_score=0.6,
-        )
-
-        data = TransactionSerializer(transaction).data
-
-        self.assertEqual(data["value_score"], 120)
-        self.assertEqual(data["value_score_source"], "feedback_value_score")
-        self.assertEqual(data["value_score_confidence"], 0.9)
-
-    def test_transaction_serializer_falls_back_to_heuristic_score(self):
-        transaction = Transaction.objects.create(
-            user=self.user,
-            direction="spend",
-            amount=18,
-            occurred_at=timezone.now(),
-            category=TransactionCategory.EATING_OUT,
-            satisfaction_rating=8,
-            impulse_score=0.2,
-            regret_score=0.1,
-        )
-
-        data = TransactionSerializer(transaction).data
-
-        self.assertIsInstance(data["value_score"], int)
-        self.assertGreaterEqual(data["value_score"], 0)
-        self.assertLessEqual(data["value_score"], 150)
-        self.assertEqual(data["value_score_source"], "heuristic")

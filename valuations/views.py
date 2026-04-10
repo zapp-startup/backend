@@ -23,6 +23,10 @@ class SubscriptionValuationViewSet(ModelViewSet):
     def get_queryset(self):
         queryset = SubscriptionValuation.objects.filter(user=self.request.user).select_related("subscription", "model_version")
         subscription_id = self.request.query_params.get("subscription")
+        try:
+            subscription_id = int(subscription_id)
+        except (TypeError, ValueError):
+            subscription_id = None
         if subscription_id is not None:
             queryset = queryset.filter(subscription_id=subscription_id)
         return queryset

@@ -81,3 +81,9 @@ class SubscriptionValuationViewSetFilterTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data), 1)
         self.assertEqual(response.data[0]["subscription"], self.subscription_one.id)
+
+    def test_list_ignores_invalid_subscription_filter_values(self):
+        response = self.client.get("/api/subscription-valuations/?subscription=abc")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 2)
