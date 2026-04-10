@@ -147,7 +147,7 @@ class ValuationAgentTests(TestCase):
             "price": Decimal("120.00"),
             "started_on": date(2025, 1, 15),
             "cancelled_on": date(2025, 4, 10),
-            "usage_frequency": 3,
+            "usage_frequency": 3.0 / 7.0,
         }
 
         valuations = agent._valuate_subscription(
@@ -177,7 +177,7 @@ class ValuationAgentTests(TestCase):
             "price": Decimal("15.99"),
             "started_on": date(2025, 1, 1),
             "cancelled_on": date(2025, 3, 20),
-            "usage_frequency": 6,
+            "usage_frequency": 6.0 / 7.0,
             "feedback_value_score": 0.82,
             "feedback_confidence": 0.88,
             "merchant_info": {
@@ -243,7 +243,7 @@ class ValuationAgentTests(TestCase):
             "status": "active",
             "billing_cycle": "monthly",
             "started_on": date(2025, 1, 1),
-            "usage_frequency": 6,
+            "usage_frequency": 6.0 / 7.0,
             "merchant_info": {
                 "name": "Netflix",
                 "category": "streaming",
@@ -604,7 +604,7 @@ class SyntheticRealismPatchTests(TestCase):
                     "status": "active",
                     "price": Decimal("10.00"),
                     "billing_cycle": "monthly",
-                    "usage_frequency": 1,
+                    "usage_frequency": 1.0 / 7.0,
                     "merchant_info": {"name": f"S{i}"},
                 }
             )
@@ -699,7 +699,7 @@ class SyntheticRealismPatchTests(TestCase):
                 "price": price,
                 "started_on": date(2025, 1, 1),
                 "cancelled_on": None,
-                "usage_frequency": 1,
+                "usage_frequency": 1.0 / 7.0,
             }
             vals = agent._valuate_subscription(
                 state=state, sub=sub,

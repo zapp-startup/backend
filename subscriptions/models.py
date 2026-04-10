@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 
@@ -114,10 +115,11 @@ class Subscription(models.Model):
 
     notes = models.TextField(blank=True, null=True)
 
-    usage_frequency = models.PositiveSmallIntegerField(
+    usage_frequency = models.FloatField(
         blank=True,
         null=True,
-        help_text="Uses per week or your chosen unit",
+        help_text="0-1 normalized usage intensity (e.g. Spotify: active listening days / 30).",
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)],
     )
     reactivation_count = models.PositiveIntegerField(
         default=0,
@@ -172,6 +174,8 @@ class Subscription(models.Model):
                 condition=models.Q(subscription_cost_benefit__gte=0, subscription_cost_benefit__lte=1) | models.Q(subscription_cost_benefit__isnull=True),
                 name="valid_subscription_cost_benefit",
             ),
+            # usage_frequency 0-1: enforced via MinValueValidator/MaxValueValidator (no DB CHECK:
+            # Supabase/PG can reject ADD CONSTRAINT after row triggers with "pending trigger events").
             # Prevent duplicate active subscriptions to the same merchant for a user.
             # If you later want multiple (e.g., multiple Netflix profiles), loosen this.
             models.UniqueConstraint(
