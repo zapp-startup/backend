@@ -11,5 +11,6 @@ staticfiles/
 .idea/
 .env/
 *.log
+debug-*.ndjson
 *.pot
 exports/

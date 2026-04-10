@@ -560,11 +560,11 @@ class SpendAgent(BaseAgent):
         cat: str,
         state: UserState,
         current: date,
-        routine: SpendRoutine,
+        routine: SpendRoutine | None,
         *,
-        payday_window: float,
-        liq: float,
-        mi: float,
+        payday_window: float = 0.0,
+        liq: float = 0.0,
+        mi: float = 0.0,
     ) -> tuple[str, str]:
         rng = self.rng
         if cat == "dining":

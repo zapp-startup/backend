@@ -88,7 +88,8 @@ class FinancialContextTests(TestCase):
         )
 
     def test_build_financial_context_returns_recent_user_data(self):
-        context = build_financial_context(self.user)
+        with patch("ai.views.timezone.now", return_value=self.now):
+            context = build_financial_context(self.user)
 
         self.assertEqual(context["summary"]["transaction_count"], 3)
         self.assertEqual(context["summary"]["active_subscription_count"], 1)
@@ -106,14 +107,15 @@ class FinancialContextTests(TestCase):
         self.assertEqual(context["spending_by_category_30d"][0]["amount"], "31.99")
 
     def test_build_financial_context_includes_requested_spend_window_summary(self):
-        now = timezone.now()
+        Transaction.objects.filter(user=self.user).delete()
+
         Transaction.objects.create(
             user=self.user,
             merchant=self.netflix,
             amount=Decimal("7.00"),
             currency="USD",
             direction=TransactionDirection.SPEND,
-            occurred_at=now - timedelta(days=1),
+            occurred_at=self.now - timedelta(days=1),
             category=TransactionCategory.ENTERTAINMENT,
             description_raw="RECENT WINDOW SPEND 1",
         )
@@ -123,7 +125,7 @@ class FinancialContextTests(TestCase):
             amount=Decimal("8.00"),
             currency="USD",
             direction=TransactionDirection.SPEND,
-            occurred_at=now - timedelta(hours=47),
+            occurred_at=self.now - timedelta(hours=47),
             category=TransactionCategory.SHOPPING,
             description_raw="RECENT WINDOW SPEND 2",
         )
@@ -133,12 +135,13 @@ class FinancialContextTests(TestCase):
             amount=Decimal("9.00"),
             currency="USD",
             direction=TransactionDirection.SPEND,
-            occurred_at=now - timedelta(days=12),
+            occurred_at=self.now - timedelta(days=12),
             category=TransactionCategory.ENTERTAINMENT,
             description_raw="OLDER SPEND",
         )
 
-        context = build_financial_context(self.user, requested_spend_window_days=2)
+        with patch("ai.views.timezone.now", return_value=self.now):
+            context = build_financial_context(self.user, requested_spend_window_days=2)
 
         self.assertEqual(context["summary"]["requested_spend_window_days"], 2)
         self.assertEqual(context["summary"]["spend_in_requested_window"], "15.00")

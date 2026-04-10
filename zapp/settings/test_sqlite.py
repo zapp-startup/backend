@@ -10,3 +10,5 @@ DATABASES = {
         "NAME": BASE_DIR / "test.sqlite3",
     }
 }
+APP_DATA_ENCRYPTION_KEY = ""
+APP_DATA_ENCRYPTION_KEYS = ""

@@ -9,6 +9,7 @@ This document maps **implemented** backend controls to evidence and questionnair
 | JWT `aal` / factor hints in auth context | `users/supabase_auth.py` | Log sample JWT claims (redacted) showing `aal` after MFA challenge |
 | Policy: require `aal2` in production | `users/security_assurance.py`, `zapp/settings/production.py` `BANKING_REQUIRE_MFA` | Screenshot of 403 with `mfa_not_enrolled` / `mfa_verification_needed` when `aal1` |
 | Frontend assurance API | `GET /api/security/auth-assurance/` | API response JSON |
+| Backend-managed MFA lifecycle API | `users/auth_views.py`, `users/session_auth.py` | API responses for snapshot, enroll, verify-enrollment, challenge, verify, and factor delete |
 
 **Assumption:** Supabase issues `aal` in access tokens per [Supabase Auth MFA](https://supabase.com/docs/guides/auth/auth-mfa). Verify in your project’s JWT payload; if `aal` is absent, enable MFA and test, or add a Supabase hook to enrich sessions.
 
@@ -46,8 +47,18 @@ Consent validity ties to `PRIVACY_POLICY_VERSION` — users must re-consent when
 | SSL redirect, secure cookies, HSTS | `zapp/settings/production.py` | Infra screenshot: TLS 1.2+ at load balancer |
 | Startup validation | `zapp/security/production_validation.py` | Failed deploy logs if misconfigured |
 | Proxy header | `SECURE_PROXY_SSL_HEADER` | Nginx/ALB config sets `X-Forwarded-Proto: https` |
+| Frontend production URL validation | `frontend/src/config/apiEnv.ts`, `frontend/src/api/client.ts`, `frontend/src/api/ai.api.ts`, `frontend/src/api/supabaseClient.ts` | Production build/runtime error if API or Supabase URLs are not HTTPS |
+
+Questionnaire item 12 ("encrypt data-in-transit between clients and servers using TLS 1.2 or better") maps to this control. Answer **Yes** only when:
+
+- frontend hosting serves the app over HTTPS;
+- the public API domain terminates TLS 1.2+ at the managed edge/load balancer;
+- browser-to-Supabase traffic uses the hosted `https://<project-ref>.supabase.co` origin; and
+- production `VITE_API_URL` / `VITE_SUPABASE_URL` point only to HTTPS origins.
 
 **Manual:** TLS certificates, cipher suites, and penetration test of TLS — outside app code.
+
+**Evidence set:** managed-hosting or load-balancer TLS policy screenshot, browser network screenshot showing only `https://` requests to app/API/Supabase, and one external TLS scan or platform TLS settings export.
 
 ---
 
@@ -56,10 +67,19 @@ Consent validity ties to `PRIVACY_POLICY_VERSION` — users must re-consent when
 | Item | Location | Evidence |
 |------|----------|----------|
 | Tokens never in serializers | `banking/serializers.py` | Code review |
-| Optional Fernet encryption | `banking/token_storage.py`, `PLAID_TOKEN_ENCRYPTION_KEY` | Env in prod; decrypt path in tests |
+| Fernet encryption at rest | `banking/token_storage.py`, `PLAID_TOKEN_ENCRYPTION_KEY` | Env in prod; decrypt path in tests |
+| Legacy token backfill | `python manage.py encrypt_plaid_access_tokens` | Command output showing plaintext rows upgraded |
 | Admin hides token | `banking/admin.py` | Django admin screenshot |
 
+Production expectation: Plaid access tokens are stored encrypted at the app layer, never returned by serializers, and existing plaintext legacy rows are backfilled with `encrypt_plaid_access_tokens`.
+
 **Manual:** Supabase/Postgres encryption at rest, disk encryption, backups — provider-managed.
+
+See also:
+
+- `AUTH_ARCHITECTURE.md`
+- `DATA_ENCRYPTION_DECISION.md`
+- `DEPLOYMENT_VERIFICATION_CHECKLIST.md`
 
 ---
 
@@ -105,8 +125,8 @@ Secrets, raw Plaid payloads, and full account numbers are **not** logged.
 
 | Item | Location | Evidence |
 |------|----------|----------|
-| Dependabot | `.github/dependabot.yml` | GitHub Security tab |
-| CI | `.github/workflows/ci.yml` | Green workflow run |
+| Targeted automated tests | `users/tests_auth_assurance.py`, `compliance/tests.py`, `banking/tests.py`, frontend Vitest suites | Local test run output or external CI |
+| CI / dependency scanning | Not repo-confirmed in the current repos | External CI/security evidence if present |
 
 **Manual:** SAST/DAST, pen test, Plaid security questionnaire final submission.
 
