@@ -25,6 +25,22 @@ _PG_ALTER_REVERSE = (
 )
 
 
+def _pg_column_data_type(conn, table: str, column: str) -> str | None:
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT data_type
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = %s
+              AND column_name = %s
+            """,
+            [table, column],
+        )
+        row = cursor.fetchone()
+    return row[0] if row else None
+
+
 def _pg_run_autocommit_sql(conn, sql: str) -> None:
     conn.ensure_connection()
     old = conn.get_autocommit()
@@ -39,6 +55,11 @@ def _pg_run_autocommit_sql(conn, sql: str) -> None:
 def forward_usage_frequency(apps, schema_editor):
     conn = schema_editor.connection
     if conn.vendor == "postgresql":
+        current_type = _pg_column_data_type(conn, "subscriptions_subscription", "usage_frequency")
+        if current_type in {"text", "character varying"}:
+            # Parallel migration path already moved usage_frequency to encrypted text storage.
+            # Skip numeric ALTER in that case; merged migrations later normalize encrypted float state.
+            return
         _pg_run_autocommit_sql(conn, _PG_ALTER_FLOAT)
         return
 
@@ -57,6 +78,9 @@ def forward_usage_frequency(apps, schema_editor):
 def reverse_usage_frequency(apps, schema_editor):
     conn = schema_editor.connection
     if conn.vendor == "postgresql":
+        current_type = _pg_column_data_type(conn, "subscriptions_subscription", "usage_frequency")
+        if current_type in {"text", "character varying"}:
+            return
         _pg_run_autocommit_sql(conn, _PG_ALTER_REVERSE)
         return
 
