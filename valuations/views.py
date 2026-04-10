@@ -21,7 +21,11 @@ class SubscriptionValuationViewSet(ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return SubscriptionValuation.objects.filter(user=self.request.user).select_related("subscription", "model_version")
+        queryset = SubscriptionValuation.objects.filter(user=self.request.user).select_related("subscription", "model_version")
+        subscription_id = self.request.query_params.get("subscription")
+        if subscription_id is not None:
+            queryset = queryset.filter(subscription_id=subscription_id)
+        return queryset
 
     def perform_create(self, serializer):
         valuation = serializer.save(user=self.request.user)
