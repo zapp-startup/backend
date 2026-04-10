@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 import sys
-lfrom urllib.parse import urlparse
+from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 

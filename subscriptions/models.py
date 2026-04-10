@@ -124,7 +124,7 @@ class Subscription(models.Model):
 
     notes = EncryptedTextField(blank=True, null=True)
 
-    usage_frequency = EncryptedIntegerField(
+    usage_frequency = EncryptedFloatField(
         blank=True,
         null=True,
         help_text="0-1 normalized usage intensity (e.g. Spotify: active listening days / 30).",
