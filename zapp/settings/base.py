@@ -142,6 +142,11 @@ REST_FRAMEWORK = {
         "rest_framework.authentication.SessionAuthentication",
         "users.supabase_auth.SupabaseJWTAuthentication",
     ),
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.ScopedRateThrottle",
+    ),
     "DEFAULT_THROTTLE_RATES": {
         "anon": API_THROTTLE_ANON_RATE,
         "user": API_THROTTLE_USER_RATE,
@@ -252,6 +257,12 @@ BANKING_REQUIRE_FINANCIAL_CONSENT = os.getenv(
 # Optional Fernet key (urlsafe base64) for app-layer encryption of Plaid access tokens at rest.
 # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 PLAID_TOKEN_ENCRYPTION_KEY = os.getenv("PLAID_TOKEN_ENCRYPTION_KEY", "")
+# Optional rotation list. First key is used for new writes; remaining keys are accepted for decrypt.
+PLAID_TOKEN_ENCRYPTION_KEYS = os.getenv("PLAID_TOKEN_ENCRYPTION_KEYS", "")
+
+# Optional Fernet key(s) for app data encrypted fields at rest.
+APP_DATA_ENCRYPTION_KEY = os.getenv("APP_DATA_ENCRYPTION_KEY", "")
+APP_DATA_ENCRYPTION_KEYS = os.getenv("APP_DATA_ENCRYPTION_KEYS", "")
 
 # Spotify (category integration — OAuth + Web API)
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
