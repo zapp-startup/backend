@@ -3,6 +3,8 @@ from .models import Conversation, Message, UserFact
 
 
 class ConversationSerializer(serializers.ModelSerializer):
+    session_state_json = serializers.JSONField(read_only=True)
+
     class Meta:
         model = Conversation
         fields = (
@@ -30,6 +32,8 @@ class ConversationSerializer(serializers.ModelSerializer):
 
 
 class MessageSerializer(serializers.ModelSerializer):
+    metadata_json = serializers.JSONField(read_only=True)
+
     class Meta:
         model = Message
         fields = (
@@ -44,6 +48,8 @@ class MessageSerializer(serializers.ModelSerializer):
 
 
 class UserFactSerializer(serializers.ModelSerializer):
+    fact_value_json = serializers.JSONField(required=False)
+
     class Meta:
         model = UserFact
         fields = (

@@ -17,19 +17,36 @@ from rest_framework.exceptions import AuthenticationFailed
 User = get_user_model()
 logger = logging.getLogger(__name__)
 
-# Read from Django settings (populated from env at startup) - avoids os.getenv in worker/reloader contexts
+# Module-level aliases kept for test patchability and backward compatibility.
+SUPABASE_URL = getattr(settings, "SUPABASE_URL", None) or os.getenv("SUPABASE_URL")
+SUPABASE_JWT_AUD = getattr(settings, "SUPABASE_JWT_AUD", None) or os.getenv("SUPABASE_JWT_AUD", "authenticated")
+SUPABASE_ANON_KEY = getattr(settings, "SUPABASE_ANON_KEY", None) or os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_JWT_ISS = getattr(settings, "SUPABASE_JWT_ISS", None) or os.getenv("SUPABASE_JWT_ISS")
+SUPABASE_JWKS_CACHE_TTL_SECONDS = getattr(
+    settings,
+    "SUPABASE_JWKS_CACHE_TTL_SECONDS",
+    None,
+) or int(os.getenv("SUPABASE_JWKS_CACHE_TTL_SECONDS", "300"))
+SUPABASE_JWT_SECRET = getattr(settings, "SUPABASE_JWT_SECRET", None) or os.getenv("SUPABASE_JWT_SECRET")
+
+
+# Read from Django settings (populated from env at startup) while honoring patched module constants in tests.
 def _supabase_url():
-    return getattr(settings, "SUPABASE_URL", None) or os.getenv("SUPABASE_URL")
+    return SUPABASE_URL or getattr(settings, "SUPABASE_URL", None) or os.getenv("SUPABASE_URL")
 def _supabase_jwt_aud():
-    return getattr(settings, "SUPABASE_JWT_AUD", None) or os.getenv("SUPABASE_JWT_AUD", "authenticated")
+    return SUPABASE_JWT_AUD or getattr(settings, "SUPABASE_JWT_AUD", None) or os.getenv("SUPABASE_JWT_AUD", "authenticated")
 def _supabase_anon_key():
-    return getattr(settings, "SUPABASE_ANON_KEY", None) or os.getenv("SUPABASE_ANON_KEY")
+    return SUPABASE_ANON_KEY or getattr(settings, "SUPABASE_ANON_KEY", None) or os.getenv("SUPABASE_ANON_KEY")
 def _supabase_jwt_iss():
-    return getattr(settings, "SUPABASE_JWT_ISS", None) or os.getenv("SUPABASE_JWT_ISS")
+    return SUPABASE_JWT_ISS or getattr(settings, "SUPABASE_JWT_ISS", None) or os.getenv("SUPABASE_JWT_ISS")
 def _supabase_jwks_ttl():
-    return getattr(settings, "SUPABASE_JWKS_CACHE_TTL_SECONDS", None) or int(os.getenv("SUPABASE_JWKS_CACHE_TTL_SECONDS", "300"))
+    return (
+        SUPABASE_JWKS_CACHE_TTL_SECONDS
+        or getattr(settings, "SUPABASE_JWKS_CACHE_TTL_SECONDS", None)
+        or int(os.getenv("SUPABASE_JWKS_CACHE_TTL_SECONDS", "300"))
+    )
 def _supabase_jwt_secret():
-    return getattr(settings, "SUPABASE_JWT_SECRET", None) or os.getenv("SUPABASE_JWT_SECRET")
+    return SUPABASE_JWT_SECRET or getattr(settings, "SUPABASE_JWT_SECRET", None) or os.getenv("SUPABASE_JWT_SECRET")
 
 
 # How long (seconds) to suppress JWKS refreshes triggered by an unknown kid.
@@ -122,14 +139,24 @@ def _extract_amr(payload: dict | None, user_data: dict | None) -> list:
 
 
 def _count_mfa_factors(user_data: dict | None) -> int:
-    """Number of enrolled MFA factors from /auth/v1/user when available."""
+    """Number of usable MFA factors from /auth/v1/user when available."""
     if not user_data:
         return -1
     factors = user_data.get("factors")
     if factors is None:
         return -1
     if isinstance(factors, list):
-        return len(factors)
+        usable = 0
+        for factor in factors:
+            if not isinstance(factor, dict):
+                continue
+            factor_id = str(factor.get("id") or "").strip()
+            if not factor_id:
+                continue
+            status = str(factor.get("status") or "").strip().lower()
+            if status in ("", "verified"):
+                usable += 1
+        return usable
     return -1
 
 
