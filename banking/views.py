@@ -19,6 +19,7 @@ from .services import (
     sync_transactions_for_connection,
 )
 from .throttles import BankingLinkTokenThrottle, BankingSensitiveThrottle
+from users.session_authentication import AuthSessionAuthentication
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class LinkTokenView(APIView):
     Frontend uses this to initialize Plaid Link.
     """
 
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingLinkTokenThrottle]
 
@@ -41,9 +43,13 @@ class LinkTokenView(APIView):
                 request.user.pk,
             )
             return Response({"link_token": link_token})
-        except ValueError as e:
+        except ValueError:
+            logger.exception(
+                "banking_link_token_failed user_id=%s",
+                request.user.pk,
+            )
             return Response(
-                {"error": str(e)},
+                {"error": "Failed to create link token"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
         except Exception:
@@ -60,6 +66,7 @@ class ExchangePublicTokenView(APIView):
     Requires authentication.
     """
 
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
@@ -85,10 +92,10 @@ class ExchangePublicTokenView(APIView):
                 },
                 status=status.HTTP_201_CREATED,
             )
-        except Exception as e:
+        except Exception:
             logger.exception("Plaid token exchange failed")
             return Response(
-                {"error": "Failed to exchange token", "detail": str(e)},
+                {"error": "Failed to exchange token"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -98,10 +105,12 @@ class BankConnectionsView(APIView):
     List user's bank connections.
     """
 
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
     def get(self, request):
+        enforce_banking_policies(request)
         connections = BankConnection.objects.filter(user=request.user).order_by(
             "-created_at"
         )
@@ -114,10 +123,12 @@ class BankAccountsView(APIView):
     List user's linked bank accounts from our DB.
     """
 
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
     def get(self, request):
+        enforce_banking_policies(request)
         accounts = BankAccount.objects.filter(
             connection__user=request.user
         ).select_related("connection")
@@ -131,10 +142,12 @@ class BankTransactionsView(APIView):
     Supports filtering by account_id, date_from, date_to, pending, removed.
     """
 
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
     def get(self, request):
+        enforce_banking_policies(request)
         qs = (
             BankTransaction.objects.filter(user=request.user)
             .select_related("account", "connection")
@@ -179,10 +192,12 @@ class ManualSyncView(APIView):
     Manually trigger transactions/sync for a bank connection.
     """
 
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [BankingSensitiveThrottle]
 
     def post(self, request, connection_id):
+        enforce_banking_policies(request)
         try:
             connection = BankConnection.objects.get(
                 id=connection_id,
@@ -208,8 +223,13 @@ class ManualSyncView(APIView):
                     "sync_result": result,
                 }
             )
-        except Exception as e:
+        except Exception:
+            logger.exception(
+                "banking_manual_sync_failed user_id=%s connection_id=%s",
+                request.user.pk,
+                connection_id,
+            )
             return Response(
-                {"error": "Sync failed", "detail": str(e)},
+                {"error": "Sync failed"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )

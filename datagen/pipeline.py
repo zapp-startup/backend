@@ -1049,9 +1049,9 @@ def _compute_raw_inferred(user, db_txns: list, db_subs: list, state: UserState):
         cat = s.merchant.category if s.merchant else "other"
         freq = s.usage_frequency
         if freq is not None:
-            if freq >= 5:
+            if freq >= 5.0 / 7.0:
                 sub_usage[cat] = "daily"
-            elif freq >= 2:
+            elif freq >= 2.0 / 7.0:
                 sub_usage[cat] = "weekly"
             else:
                 sub_usage[cat] = "monthly"

@@ -120,12 +120,13 @@ class ConversationAgent(BaseAgent):
                 sub = subscriptions[linked_sub_idx]
                 template_vars["merchant"] = sub.get("merchant_info", {}).get("name", "Unknown")
                 template_vars["price"] = str(sub.get("price", "9.99"))
-                template_vars["usage"] = str(sub.get("usage_frequency", 3))
+                uf = float(sub.get("usage_frequency", 3.0 / 7.0) or 0)
+                template_vars["usage"] = str(round(uf, 3))
                 template_vars["per_use"] = str(round(
-                    float(sub.get("price", 10)) / max(1, sub.get("usage_frequency", 3) * 4), 2
+                    float(sub.get("price", 10)) / max(0.05, uf * 28), 2
                 ))
                 template_vars["recommendation"] = (
-                    "I'd suggest keeping it" if sub.get("usage_frequency", 0) > 3
+                    "I'd suggest keeping it" if uf > (3.0 / 7.0)
                     else "You might want to reconsider"
                 )
                 template_vars["usage_trend"] = rng.choice(["increasing", "steady", "declining"])
@@ -196,7 +197,7 @@ class ConversationAgent(BaseAgent):
         mi = max(1.0, float(state.monthly_income))
         monthlyized = sum(_monthly_sub_cost(s) for s in active_subs)
         if len(active_subs) > 6 and monthlyized / mi > 0.12:
-            low_usage = sum(1 for s in active_subs if s.get("usage_frequency", 0) < 2)
+            low_usage = sum(1 for s in active_subs if float(s.get("usage_frequency", 0) or 0) < (2.0 / 7.0))
             conversation_facts.append({
                 "fact_key": "over_subscribed",
                 "fact_value_json": {"total": len(active_subs), "low_usage": low_usage},

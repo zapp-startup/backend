@@ -50,3 +50,49 @@ class FinancialConsent(models.Model):
 
     def __str__(self) -> str:
         return f"{self.user_id} {self.consent_type} v{self.policy_version} @ {self.accepted_at}"
+
+
+class AuditEvent(models.Model):
+    class Outcome(models.TextChoices):
+        ATTEMPT = "attempt", "Attempt"
+        SUCCESS = "success", "Success"
+        FAILURE = "failure", "Failure"
+
+    class ActorType(models.TextChoices):
+        USER = "user", "User"
+        ANONYMOUS = "anonymous", "Anonymous"
+        SYSTEM = "system", "System"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="audit_events",
+    )
+    event_name = models.CharField(max_length=128, db_index=True)
+    occurred_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    outcome = models.CharField(max_length=16, choices=Outcome.choices, db_index=True)
+    actor_id = models.CharField(max_length=128, blank=True)
+    actor_type = models.CharField(max_length=16, choices=ActorType.choices, db_index=True)
+    source_system = models.CharField(max_length=64, db_index=True)
+    request_id = models.CharField(max_length=128, blank=True, db_index=True)
+    action = models.CharField(max_length=64, blank=True)
+    resource_type = models.CharField(max_length=64, blank=True, db_index=True)
+    resource_id = models.CharField(max_length=128, blank=True)
+    route = models.CharField(max_length=255, blank=True)
+    method = models.CharField(max_length=16, blank=True)
+    status_code = models.PositiveSmallIntegerField(null=True, blank=True)
+    error_code = models.CharField(max_length=64, blank=True)
+    error_message = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-occurred_at", "-id"]
+        indexes = [
+            models.Index(fields=["user", "occurred_at"]),
+            models.Index(fields=["resource_type", "resource_id"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.event_name} ({self.outcome})"

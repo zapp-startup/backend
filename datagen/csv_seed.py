@@ -527,9 +527,9 @@ def _compute_raw_inferred_row(user_id: int, transaction_rows: list[dict], subscr
         usage_frequency = sub.get("usage_frequency")
         if usage_frequency is None:
             continue
-        if usage_frequency >= 5:
+        if usage_frequency >= 5.0 / 7.0:
             subscription_usage[category] = "daily"
-        elif usage_frequency >= 2:
+        elif usage_frequency >= 2.0 / 7.0:
             subscription_usage[category] = "weekly"
         else:
             subscription_usage[category] = "monthly"
