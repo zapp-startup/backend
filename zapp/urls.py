@@ -15,10 +15,17 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
+from django.http import JsonResponse
 from django.urls import path, include
+
+
+def healthcheck(_request):
+    return JsonResponse({"ok": True, "service": "zapp-backend"})
+
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path("healthz/", healthcheck),
     #path('subscriptions/', include('subscriptions.urls')),
 
     path("api/", include("subscriptions.urls")),
@@ -28,6 +35,7 @@ urlpatterns = [
     path("api/ai/", include("ai.urls")),
     path("api/", include("banking.urls")),
     path("api/", include("compliance.urls")),
+    path("api/", include("waitlist.urls")),
     path("api/gamification/", include("gamification.urls")),
     path("api/", include("integrations.urls")),
 ]

@@ -74,6 +74,7 @@ INSTALLED_APPS = [
     'compliance',
     'gamification',
     'integrations.apps.IntegrationsConfig',
+    'waitlist.apps.WaitlistConfig',
 ]
 
 MIDDLEWARE = [
@@ -117,6 +118,9 @@ DATABASES = {
         ssl_require=True,
     )
 }
+
+if DATABASES["default"]["ENGINE"] == "django.db.backends.sqlite3":
+    DATABASES["default"].pop("OPTIONS", None)
 
 
 # Password validation
