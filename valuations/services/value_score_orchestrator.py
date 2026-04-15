@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+import threading
 from datetime import timedelta
 from typing import Any
 
-from django.db import transaction
+from django.db import close_old_connections, transaction
 from django.utils import timezone
 
 from gamification.services import award_points_for_subscription_valuation
@@ -16,6 +18,7 @@ from ..models import Recommendation, SubscriptionValuation, ValuationContext, Va
 from .value_score_data import score_to_financial_fields
 from .value_score_inference import ValueScoreModelNotAvailable, predict_user_subscriptions
 
+logger = logging.getLogger(__name__)
 
 TIER_LABELS = {1: "cold_start", 2: "xgboost", 3: "neural"}
 
@@ -161,3 +164,34 @@ def run_value_scores_for_user(
 
     ser = SubscriptionValuationSerializer(vals, many=True)
     return {"ok": True, "valuations": ser.data, "model_version": f"{model_name}@{ver}"}
+
+
+def schedule_value_scores_for_user_after_commit(
+    user_id: int,
+    subscription_ids: list[int] | None = None,
+) -> None:
+    """
+    Run value-score ML inference after the current DB transaction commits, in a
+    background thread. Subscription create/update should not block the HTTP response
+    on model load + inference (often multiple seconds).
+    """
+
+    ids = list(subscription_ids) if subscription_ids is not None else None
+
+    def work() -> None:
+        close_old_connections()
+        try:
+            run_value_scores_for_user(user_id, subscription_ids=ids)
+        except Exception:
+            logger.exception(
+                "Background value score recomputation failed (user_id=%s subscription_ids=%s)",
+                user_id,
+                ids,
+            )
+        finally:
+            close_old_connections()
+
+    def after_commit() -> None:
+        threading.Thread(target=work, name="value-score-recompute", daemon=True).start()
+
+    transaction.on_commit(after_commit)

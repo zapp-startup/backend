@@ -296,8 +296,44 @@ def build_transaction_value_score_dataframes(transaction: Transaction) -> tuple[
         ]
     )
 
+    # FeatureEngineer requires `subscriptions` (same schema as subscription scoring).
+    # One-off transactions use a synthetic row; id matches transaction_id so
+    # predict() output rows align with predict_transaction_value_score() lookup.
+    if transaction.occurred_at:
+        aware = (
+            transaction.occurred_at
+            if timezone.is_aware(transaction.occurred_at)
+            else timezone.make_aware(transaction.occurred_at, timezone.utc)
+        )
+        started_on = aware.isoformat()
+    else:
+        started_on = None
+
+    subscriptions_df = pd.DataFrame(
+        [
+            {
+                "id": transaction_id,
+                "user_id": user_id,
+                "merchant_id": synthetic_merchant_id,
+                "price": float(transaction.amount),
+                "started_on": started_on,
+                "billing_cycle": "monthly",
+                "status": "active",
+                "usage_frequency": (
+                    float(transaction.usage_frequency)
+                    if transaction.usage_frequency is not None and transaction.usage_frequency > 0
+                    else 1.0
+                ),
+                "reactivation_count": 0,
+                "subscription_utilization": None,
+                "subscription_cost_benefit": None,
+            }
+        ]
+    )
+
     data = {
         "merchants": merchants_df,
+        "subscriptions": subscriptions_df,
         "transactions": pd.DataFrame(tx_rows),
         "transaction_entities": transaction_entities,
         "user_explicit": pd.DataFrame([_row_explicit(user_id, explicit)]),

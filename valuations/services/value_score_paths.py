@@ -25,9 +25,20 @@ def value_score_checkpoint_dir() -> Path:
 
 
 def ensure_platform_bundle_importable() -> Path:
-    """Insert the project parent on sys.path so `import value_score_model` works."""
+    """
+    Insert the correct directory on sys.path so `import value_score_model` works.
+
+    - If `root` contains a `value_score_model/` package (e.g. .../platform_bundle),
+      sys.path must include `root`.
+    - Legacy layout: `root` is the package dir (.../value_score_model); sys.path
+      needs its parent.
+    """
     root = platform_bundle_root()
-    s = str(root.parent)
+    if (root / "value_score_model").is_dir():
+        import_root = root
+    else:
+        import_root = root.parent
+    s = str(import_root.resolve())
     if s not in sys.path:
         sys.path.insert(0, s)
     return root
