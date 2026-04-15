@@ -1,7 +1,28 @@
 from .base import *
+import os
 
 DEBUG = False
-ALLOWED_HOSTS = ["your-production-domain.com"]  # update later
+
+
+def _csv_env(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name, "")
+    values = [item.strip() for item in raw.split(",") if item.strip()]
+    return values or default
+
+
+ALLOWED_HOSTS = _csv_env(
+    "ALLOWED_HOSTS",
+    ["api.zappai.co", "zappai.co", "www.zappai.co"],
+)
+CORS_ALLOWED_ORIGINS = _csv_env(
+    "CORS_ALLOWED_ORIGINS",
+    ["https://zappai.co", "https://www.zappai.co"],
+)
+CSRF_TRUSTED_ORIGINS = _csv_env(
+    "CSRF_TRUSTED_ORIGINS",
+    ["https://zappai.co", "https://www.zappai.co", "https://api.zappai.co"],
+)
+CORS_ALLOW_CREDENTIALS = True
 
 # Disable server-side cursors for Supabase/PgBouncer transaction pooler
 DATABASES["default"]["DISABLE_SERVER_SIDE_CURSORS"] = True
