@@ -72,3 +72,16 @@ class WaitlistSignupViewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(response.data["created"])
         self.assertEqual(response.data["email"], "public@example.com")
+
+    def test_rejects_malformed_email_addresses(self):
+        response = self.client.post(
+            "/api/waitlist-signups/",
+            {
+                "name": "Bad Email",
+                "email": "not-an-email",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("email", response.data)
