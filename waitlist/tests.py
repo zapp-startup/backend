@@ -56,3 +56,19 @@ class WaitlistSignupViewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("name", response.data)
         self.assertIn("email", response.data)
+
+    def test_ignores_invalid_bearer_token_for_public_signup(self):
+        self.client.credentials(HTTP_AUTHORIZATION="Bearer expired-or-invalid-token")
+
+        response = self.client.post(
+            "/api/waitlist-signups/",
+            {
+                "name": "Public User",
+                "email": "public@example.com",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data["created"])
+        self.assertEqual(response.data["email"], "public@example.com")

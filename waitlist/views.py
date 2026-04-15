@@ -8,6 +8,7 @@ from .serializers import WaitlistSignupSerializer
 
 
 class WaitlistSignupView(APIView):
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
