@@ -28,5 +28,6 @@ urlpatterns = [
     path("api/ai/", include("ai.urls")),
     path("api/", include("banking.urls")),
     path("api/", include("compliance.urls")),
+    path("api/", include("waitlist.urls")),
     path("api/gamification/", include("gamification.urls")),
 ]
