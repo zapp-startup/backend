@@ -5,11 +5,13 @@ from rest_framework.views import APIView
 
 from .models import WaitlistSignup
 from .serializers import WaitlistSignupSerializer
+from .throttles import WaitlistSignupThrottle
 
 
 class WaitlistSignupView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [WaitlistSignupThrottle]
 
     def post(self, request):
         serializer = WaitlistSignupSerializer(data=request.data)

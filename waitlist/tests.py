@@ -1,10 +1,27 @@
+from copy import deepcopy
+
+from django.conf import settings
+from django.core.cache import cache
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from .models import WaitlistSignup
 
+REST_FRAMEWORK_WAITLIST_THROTTLE_REGRESSION = {
+    **deepcopy(settings.REST_FRAMEWORK),
+    "DEFAULT_THROTTLE_RATES": {
+        **deepcopy(settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]),
+        "anon": "1/minute",
+        "waitlist_signup": "10/minute",
+    },
+}
+
 
 class WaitlistSignupViewTests(APITestCase):
+    def setUp(self):
+        cache.clear()
+
     def test_creates_waitlist_signup(self):
         response = self.client.post(
             "/api/waitlist-signups/",
@@ -85,3 +102,25 @@ class WaitlistSignupViewTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("email", response.data)
+
+    @override_settings(REST_FRAMEWORK=REST_FRAMEWORK_WAITLIST_THROTTLE_REGRESSION)
+    def test_waitlist_signup_uses_dedicated_throttle_scope(self):
+        first = self.client.post(
+            "/api/waitlist-signups/",
+            {
+                "name": "First User",
+                "email": "first@example.com",
+            },
+            format="json",
+        )
+        second = self.client.post(
+            "/api/waitlist-signups/",
+            {
+                "name": "Second User",
+                "email": "second@example.com",
+            },
+            format="json",
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)

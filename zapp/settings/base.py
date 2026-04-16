@@ -52,6 +52,7 @@ API_THROTTLE_ANON_RATE = (os.getenv("API_THROTTLE_ANON_RATE") or "30/minute").st
 API_THROTTLE_USER_RATE = (os.getenv("API_THROTTLE_USER_RATE") or "120/minute").strip()
 API_THROTTLE_AI_RATE = (os.getenv("API_THROTTLE_AI_RATE") or "20/minute").strip()
 API_THROTTLE_AUDIT_INGEST_RATE = (os.getenv("API_THROTTLE_AUDIT_INGEST_RATE") or "120/minute").strip()
+API_THROTTLE_WAITLIST_SIGNUP_RATE = (os.getenv("THROTTLE_WAITLIST_SIGNUP") or "30/hour").strip()
 
 
 # Application definition
@@ -156,6 +157,7 @@ REST_FRAMEWORK = {
         "user": API_THROTTLE_USER_RATE,
         "ai": API_THROTTLE_AI_RATE,
         "audit_ingest": API_THROTTLE_AUDIT_INGEST_RATE,
+        "waitlist_signup": API_THROTTLE_WAITLIST_SIGNUP_RATE,
         # Banking / compliance: per-user; tune per environment
         "banking_sensitive": os.getenv("THROTTLE_BANKING_SENSITIVE", "120/hour"),
         "banking_link_token": os.getenv("THROTTLE_BANKING_LINK_TOKEN", "30/hour"),
