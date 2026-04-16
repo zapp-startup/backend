@@ -21,6 +21,7 @@ from .auth_views import (
 from .security_views import AuthAssuranceView
 from .views import (
     SupabaseUserSyncView,
+    UserStateView,
     UserRawExplicitViewSet,
     UserRawInferredViewSet,
     UserComputedViewSet,
@@ -52,5 +53,6 @@ urlpatterns = [
     path("auth/assurance/", AssuranceView.as_view(), name="auth-assurance"),
     path("auth/sync/", SupabaseUserSyncView.as_view(), name="supabase-user-sync"),
     path("security/auth-assurance/", AuthAssuranceView.as_view(), name="auth-assurance-legacy"),
+    path("user-state/", UserStateView.as_view(), name="user-state"),
     path("", include(router.urls)),
 ]

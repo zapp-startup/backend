@@ -203,12 +203,24 @@ def _build_transactions_rows(user_id: int, transaction_dicts: list[dict], mercha
     for txn in transaction_dicts:
         merchant_name = (txn.get("merchant_info") or {}).get("name")
         merchant_row = merchant_rows_by_name.get(merchant_name) if merchant_name else None
-        subscription_row = subscription_rows_by_merchant.get(merchant_name) if merchant_name else None
+        has_subscription_link = any(
+            (
+                txn.get("subscription_id") is not None,
+                txn.get("subscription_obj") is not None,
+                txn.get("subscription_idx") is not None,
+                bool(txn.get("_sub_key")),
+            )
+        )
+        subscription_row = (
+            subscription_rows_by_merchant.get(merchant_name)
+            if merchant_name and has_subscription_link
+            else None
+        )
         rows.append(
             {
                 "id": next_id,
                 "user_id": user_id,
-                "merchant_id": merchant_row["id"] if merchant_row else None,
+                "merchant_id": merchant_row["id"] if merchant_row and has_subscription_link else None,
                 "subscription_id": subscription_row["id"] if subscription_row else None,
                 "direction": txn.get("direction", "spend"),
                 "amount": abs(txn["amount"]),

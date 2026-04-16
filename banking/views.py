@@ -10,6 +10,7 @@ from .security_checks import enforce_banking_policies
 from .serializers import (
     BankAccountListSerializer,
     BankConnectionSerializer,
+    BankTransactionFeedbackSerializer,
     BankTransactionSerializer,
     ExchangePublicTokenSerializer,
 )
@@ -19,6 +20,9 @@ from .services import (
     sync_transactions_for_connection,
 )
 from .throttles import BankingLinkTokenThrottle, BankingSensitiveThrottle
+from transactions.services.feedback_scoring import apply_feedback_scoring
+from valuations.services.transaction_value_score import ensure_bank_feedback_transaction, persist_transaction_value_score
+from valuations.services.value_score_inference import ValueScoreModelNotAvailable
 from users.session_authentication import AuthSessionAuthentication
 
 logger = logging.getLogger(__name__)
@@ -150,7 +154,7 @@ class BankTransactionsView(APIView):
         enforce_banking_policies(request)
         qs = (
             BankTransaction.objects.filter(user=request.user)
-            .select_related("account", "connection")
+            .select_related("account", "connection", "feedback_transaction")
             .order_by("-date", "-created_at")
         )
 
@@ -185,6 +189,114 @@ class BankTransactionsView(APIView):
 
         serializer = BankTransactionSerializer(qs, many=True)
         return Response(serializer.data)
+
+
+class BankTransactionScoreView(APIView):
+    """
+    Persist a model-backed value score for one bank transaction.
+    """
+
+    authentication_classes = [AuthSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [BankingSensitiveThrottle]
+
+    def post(self, request, transaction_id):
+        enforce_banking_policies(request)
+        try:
+            bank_transaction = (
+                BankTransaction.objects
+                .select_related("feedback_transaction")
+                .get(id=transaction_id, user=request.user, removed=False)
+            )
+        except BankTransaction.DoesNotExist:
+            return Response({"error": "Transaction not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        feedback_transaction = ensure_bank_feedback_transaction(bank_transaction)
+        try:
+            persist_transaction_value_score(feedback_transaction)
+        except ValueScoreModelNotAvailable as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        bank_transaction.refresh_from_db()
+        return Response(BankTransactionSerializer(bank_transaction).data, status=status.HTTP_200_OK)
+
+
+class BankTransactionFeedbackView(APIView):
+    """
+    PATCH /api/banking/transactions/<plaid_transaction_id>/
+
+    Accept user feedback (satisfaction, regret, repurchase, usage, reflection)
+    for a bank-synced transaction.  Feedback is stored on the associated
+    feedback Transaction record (not on BankTransaction, which mirrors Plaid).
+
+    This endpoint mirrors what PATCH /api/transactions/<id>/ does for manually
+    tracked transactions, keeping both flows behaviourally consistent.
+    """
+
+    authentication_classes = [AuthSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [BankingSensitiveThrottle]
+
+    def patch(self, request, plaid_transaction_id: str):
+        enforce_banking_policies(request)
+        try:
+            bank_transaction = (
+                BankTransaction.objects
+                .select_related("feedback_transaction")
+                .get(
+                    plaid_transaction_id=plaid_transaction_id,
+                    user=request.user,
+                    removed=False,
+                )
+            )
+        except BankTransaction.DoesNotExist:
+            return Response({"error": "Transaction not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = BankTransactionFeedbackSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+
+        # Ensure a feedback Transaction exists (creates one if missing).
+        feedback_tx = ensure_bank_feedback_transaction(bank_transaction)
+
+        # Apply the writable feedback fields to the feedback transaction.
+        FEEDBACK_FIELDS = [
+            "satisfaction_rating",
+            "regret_rating",
+            "repurchase_likelihood",
+            "usage_frequency",
+            "reflection_text",
+            "considered_at",
+        ]
+        update_fields = []
+        for field in FEEDBACK_FIELDS:
+            if field in data:
+                value = data[field]
+                # considered_at sanity check: discard if >= occurred_at
+                # (same rule as TransactionSerializer._sanitize_considered_at).
+                if field == "considered_at" and value is not None:
+                    if value >= feedback_tx.occurred_at:
+                        logger.debug(
+                            "bank feedback: considered_at (%s) >= occurred_at (%s); discarding",
+                            value,
+                            feedback_tx.occurred_at,
+                        )
+                        value = None
+                setattr(feedback_tx, field, value)
+                update_fields.append(field)
+
+        if update_fields:
+            feedback_tx.save(update_fields=update_fields)
+
+        # Derive feedback_value_score / feedback_confidence from ratings.
+        apply_feedback_scoring(feedback_tx, save=True)
+
+        from transactions.services.events import mark_transaction_dirty
+        mark_transaction_dirty(feedback_tx, reason="bank_transaction_feedback", priority=4)
+
+        bank_transaction.refresh_from_db()
+        return Response(BankTransactionSerializer(bank_transaction).data, status=status.HTTP_200_OK)
 
 
 class ManualSyncView(APIView):

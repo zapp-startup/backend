@@ -566,13 +566,12 @@ def _persist_transactions(user, txn_dicts: list[dict], merchant_db_map: dict):
 
     objs = []
     for td in txn_dicts:
-        merchant = td.get("merchant_obj")
-        if not merchant:
+        subscription = td.get("subscription_obj")
+        merchant = td.get("merchant_obj") if subscription else None
+        if subscription and not merchant:
             merch_info = td.get("merchant_info")
             if merch_info:
                 merchant = merchant_db_map.get(merch_info.get("name"))
-
-        subscription = td.get("subscription_obj")
 
         direction = direction_map.get(td.get("direction", "spend"), TransactionDirection.SPEND)
         category = category_map.get(td.get("category", "other"), TransactionCategory.OTHER)

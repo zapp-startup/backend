@@ -15,6 +15,8 @@ from .session_auth import (
 )
 from .session_authentication import AuthSessionAuthentication
 from .models import UserRawExplicit, UserRawInferred, UserComputed, UserPreference
+from .services.state_computed import recompute_user_computed
+from .services.state_orchestrator import mark_user_state_dirty, recompute_user_state
 from .serializers import (
     UserRawExplicitSerializer,
     UserRawInferredSerializer,
@@ -55,9 +57,13 @@ class UserRawExplicitViewSet(ModelViewSet):
     def perform_create(self, serializer):
         profile = serializer.save(user=self.request.user)
         award_points_for_onboarding(profile.user)
+        recompute_user_computed(self.request.user.id)
+        mark_user_state_dirty(self.request.user.id, reason="raw_explicit_created", priority=2)
 
     def perform_update(self, serializer):
         serializer.save(user=self.request.user)
+        recompute_user_computed(self.request.user.id)
+        mark_user_state_dirty(self.request.user.id, reason="raw_explicit_updated", priority=2)
 
 
 class UserRawInferredViewSet(ReadOnlyModelViewSet):
@@ -202,5 +208,25 @@ class SupabaseUserSyncView(APIView):
                 "onboarding_required": not onboarding_completed,
                 "next_step": next_step,
                 "post_mfa_step": post_mfa_step,
+            }
+        )
+
+
+class UserStateView(APIView):
+    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        recompute = request.query_params.get("recompute")
+        if recompute == "true":
+            recompute_user_state(request.user.id)
+        explicit = UserRawExplicit.objects.filter(user=request.user).first()
+        inferred = UserRawInferred.objects.filter(user=request.user).first()
+        computed = UserComputed.objects.filter(user=request.user).first()
+        return Response(
+            {
+                "explicit": UserRawExplicitSerializer(explicit).data if explicit else None,
+                "inferred": UserRawInferredSerializer(inferred).data if inferred else None,
+                "computed": UserComputedSerializer(computed).data if computed else None,
             }
         )

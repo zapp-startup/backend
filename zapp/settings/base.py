@@ -52,6 +52,7 @@ API_THROTTLE_ANON_RATE = (os.getenv("API_THROTTLE_ANON_RATE") or "30/minute").st
 API_THROTTLE_USER_RATE = (os.getenv("API_THROTTLE_USER_RATE") or "120/minute").strip()
 API_THROTTLE_AI_RATE = (os.getenv("API_THROTTLE_AI_RATE") or "20/minute").strip()
 API_THROTTLE_AUDIT_INGEST_RATE = (os.getenv("API_THROTTLE_AUDIT_INGEST_RATE") or "120/minute").strip()
+API_THROTTLE_WAITLIST_SIGNUP_RATE = (os.getenv("THROTTLE_WAITLIST_SIGNUP") or "30/hour").strip()
 
 
 # Application definition
@@ -156,6 +157,7 @@ REST_FRAMEWORK = {
         "user": API_THROTTLE_USER_RATE,
         "ai": API_THROTTLE_AI_RATE,
         "audit_ingest": API_THROTTLE_AUDIT_INGEST_RATE,
+        "waitlist_signup": API_THROTTLE_WAITLIST_SIGNUP_RATE,
         # Banking / compliance: per-user; tune per environment
         "banking_sensitive": os.getenv("THROTTLE_BANKING_SENSITIVE", "120/hour"),
         "banking_link_token": os.getenv("THROTTLE_BANKING_LINK_TOKEN", "30/hour"),
@@ -288,4 +290,19 @@ SPOTIFY_SYNC_ON_CONNECT = os.getenv(
 # Retention hints (operational; actual deletion uses management commands / legal process)
 BANKING_DATA_RETENTION_DAYS_AFTER_DISCONNECT = int(
     os.getenv("BANKING_DATA_RETENTION_DAYS_AFTER_DISCONNECT", "0")
+)
+
+# --- Value score model (platform_bundle) ---
+# Path containing the `value_score_model` package (parent of the package directory).
+VALUE_SCORE_BUNDLE_PATH = (os.getenv("VALUE_SCORE_BUNDLE_PATH") or "").strip() or None
+# Default: <platform_bundle>/checkpoints/ (meta.pkl, feature_engineer.pkl, tier*.pkl, tier3_neural.pt optional)
+VALUE_SCORE_CHECKPOINT_DIR = (os.getenv("VALUE_SCORE_CHECKPOINT_DIR") or "").strip() or None
+VALUE_SCORE_ENABLED = os.getenv("VALUE_SCORE_ENABLED", "true").lower() in ("1", "true", "yes")
+VALUE_SCORE_MODEL_VERSION = (os.getenv("VALUE_SCORE_MODEL_VERSION") or "bundle").strip()
+# When false, omit transaction satisfaction/regret/etc. columns so the pipeline uses neutral defaults
+# until a feedback→numeric pipeline is deployed.
+VALUE_SCORE_INCLUDE_FEEDBACK_NUMERICS = os.getenv("VALUE_SCORE_INCLUDE_FEEDBACK_NUMERICS", "false").lower() in (
+    "1",
+    "true",
+    "yes",
 )

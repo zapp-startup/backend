@@ -89,6 +89,14 @@ class SubscriptionValuation(models.Model):
         null=True,
         help_text="0-150 personalized fit score (match ~100, underused <80, extremely useful >100)",
     )
+    base_value_score = models.PositiveSmallIntegerField(
+        blank=True,
+        null=True,
+        help_text="0-150 baseline score before tier/context adjustments.",
+    )
+    tier_used = models.CharField(max_length=32, blank=True, default="")
+    inference_status = models.CharField(max_length=32, blank=True, default="success")
+    feature_window_days = models.PositiveSmallIntegerField(default=30)
 
     recommendation = models.CharField(
         max_length=16,
@@ -136,6 +144,10 @@ class SubscriptionValuation(models.Model):
             models.CheckConstraint(
                 condition=models.Q(personal_value_score__gte=0, personal_value_score__lte=150) | models.Q(personal_value_score__isnull=True),
                 name="valid_subscription_personal_value_score",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(base_value_score__gte=0, base_value_score__lte=150) | models.Q(base_value_score__isnull=True),
+                name="valid_subscription_base_value_score",
             ),
         ]
 
@@ -237,3 +249,98 @@ class ItemValuation(models.Model):
 
     def __str__(self) -> str:
         return f"{self.user} • {self.item_name} • {self.recommendation} • {self.personal_value_score}/100"
+
+
+class TransactionValuation(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="transaction_valuations",
+    )
+    transaction = models.ForeignKey(
+        "transactions.Transaction",
+        on_delete=models.CASCADE,
+        related_name="valuations",
+    )
+    model_version = models.ForeignKey(
+        ValuationModelVersion,
+        on_delete=models.PROTECT,
+        related_name="transaction_valuations",
+    )
+    context = models.CharField(
+        max_length=32,
+        choices=ValuationContext.choices,
+        default=ValuationContext.ONE_OFF_PURCHASE,
+    )
+    value_score = models.PositiveSmallIntegerField()
+    base_value_score = models.PositiveSmallIntegerField(blank=True, null=True)
+    confidence = models.FloatField(default=1.0)
+    tier_used = models.CharField(max_length=32, blank=True, default="")
+    inference_status = models.CharField(max_length=32, blank=True, default="success")
+    stale_at = models.DateTimeField(blank=True, null=True)
+    evidence_json = EncryptedJSONField(default=dict, blank=True)
+    reasoning_json = EncryptedJSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "created_at"]),
+            models.Index(fields=["transaction", "created_at"]),
+            models.Index(fields=["model_version", "created_at"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(value_score__gte=0, value_score__lte=150),
+                name="valid_transaction_value_score",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(base_value_score__gte=0, base_value_score__lte=150) | models.Q(base_value_score__isnull=True),
+                name="valid_transaction_base_value_score",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(confidence__gte=0, confidence__lte=1),
+                name="valid_transaction_confidence",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user} • txn {self.transaction_id} • {self.value_score}"
+
+
+class ValuationDirtyState(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="valuation_dirty_states",
+    )
+    transaction = models.ForeignKey(
+        "transactions.Transaction",
+        on_delete=models.CASCADE,
+        related_name="dirty_states",
+        blank=True,
+        null=True,
+    )
+    subscription = models.ForeignKey(
+        "subscriptions.Subscription",
+        on_delete=models.CASCADE,
+        related_name="dirty_states",
+        blank=True,
+        null=True,
+    )
+    dirty_reason = models.CharField(max_length=64)
+    priority = models.PositiveSmallIntegerField(default=5)
+    dirty_since = models.DateTimeField(auto_now_add=True)
+    attempt_count = models.PositiveIntegerField(default=0)
+    last_error_code = models.CharField(max_length=64, blank=True, default="")
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["priority", "dirty_since"]),
+            models.Index(fields=["user", "dirty_since"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user} dirty {self.dirty_reason}"

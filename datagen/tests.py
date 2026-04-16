@@ -26,13 +26,13 @@ from datagen.config import (
     compat_status_family,
     resolve_transaction_description,
 )
-from datagen.csv_seed import _compute_raw_inferred_row
+from datagen.csv_seed import _build_transactions_rows, _compute_raw_inferred_row
 from datagen.distributions import make_rng
 from datagen.export_utils import compute_subscription_cost_benefit
-from datagen.pipeline import run_pipeline
+from datagen.pipeline import _persist_transactions, run_pipeline
 from datagen.state import UserState
 from datagen.text import generate_conversation_title, generate_reflection, reset_conversation_dedup
-from subscriptions.models import Subscription, SubscriptionEligibility, SubscriptionStatus
+from subscriptions.models import Merchant, Subscription, SubscriptionEligibility, SubscriptionStatus
 from transactions.models import Transaction, TransactionDirection
 from users.models import UserComputed, UserRawInferred
 from valuations.models import SubscriptionValuation, ValuationContext
@@ -119,7 +119,6 @@ class DatagenPipelineTests(TestCase):
                 self.assertEqual(conversation.linked_subscription.user_id, user.id)
             if conversation.linked_item_valuation_id:
                 self.assertEqual(conversation.linked_item_valuation.user_id, user.id)
-
             messages = list(conversation.messages.all())
             self.assertGreaterEqual(len(messages), 2)
             self.assertEqual(
@@ -130,6 +129,97 @@ class DatagenPipelineTests(TestCase):
             self.assertEqual(conversation.updated_at, messages[-1].created_at)
 
         self.assertTrue(any(convo.created_at < self.fixed_now - timedelta(minutes=5) for convo in conversations))
+
+    def test_csv_transaction_rows_only_link_merchant_and_subscription_for_real_subscription_charges(self):
+        now = timezone.make_aware(datetime(2026, 3, 21, 12, 0, 0))
+        merchant_rows_by_name = {
+            "Netflix": {"id": 11, "name": "Netflix", "category": "subscriptions"},
+        }
+        subscription_rows_by_merchant = {
+            "Netflix": {"id": 27, "merchant_id": 11},
+        }
+        transaction_rows, _next_id = _build_transactions_rows(
+            1,
+            [
+                {
+                    "direction": "spend",
+                    "amount": Decimal("15.99"),
+                    "occurred_at": now - timedelta(days=2),
+                    "merchant_info": {"name": "Netflix"},
+                    "description_raw": "NETFLIX.COM",
+                    "_sub_key": "Netflix::2026-03-19",
+                },
+                {
+                    "direction": "spend",
+                    "amount": Decimal("42.00"),
+                    "occurred_at": now - timedelta(days=1),
+                    "merchant_info": {"name": "Netflix"},
+                    "description_raw": "NETFLIX MERCH STORE",
+                },
+            ],
+            merchant_rows_by_name,
+            subscription_rows_by_merchant,
+            now,
+            1,
+        )
+
+        self.assertEqual(transaction_rows[0]["merchant_id"], 11)
+        self.assertEqual(transaction_rows[0]["subscription_id"], 27)
+        self.assertIsNone(transaction_rows[1]["merchant_id"])
+        self.assertIsNone(transaction_rows[1]["subscription_id"])
+
+    def test_persist_transactions_only_links_merchant_for_real_subscription_charges(self):
+        user = User.objects.create_user(username="merchant_link_seed_user", password="password123")
+        merchant = Merchant.objects.create(
+            name="Netflix",
+            category="streaming",
+            subscription_eligibility=SubscriptionEligibility.STANDARD_SUBSCRIPTION,
+        )
+        subscription = Subscription.objects.create(
+            user=user,
+            merchant=merchant,
+            price=Decimal("15.99"),
+            started_on=date(2026, 1, 1),
+        )
+        now = timezone.make_aware(datetime(2026, 3, 21, 12, 0, 0))
+
+        _persist_transactions(
+            user,
+            [
+                {
+                    "direction": "spend",
+                    "amount": Decimal("42.00"),
+                    "occurred_at": now - timedelta(days=1),
+                    "category": "shopping",
+                    "payment_channel": "card",
+                    "merchant_info": {"name": "Netflix"},
+                    "description_raw": "NETFLIX MERCH STORE",
+                },
+                {
+                    "direction": "spend",
+                    "amount": Decimal("15.99"),
+                    "occurred_at": now - timedelta(days=2),
+                    "category": "subscriptions",
+                    "payment_channel": "online",
+                    "merchant_info": {"name": "Netflix"},
+                    "merchant_obj": merchant,
+                    "subscription_obj": subscription,
+                    "description_raw": "NETFLIX.COM",
+                },
+            ],
+            {"Netflix": merchant},
+        )
+
+        txns = list(Transaction.objects.filter(user=user))
+        self.assertEqual(len(txns), 2)
+
+        merch_txn = next(txn for txn in txns if txn.description_raw == "NETFLIX MERCH STORE")
+        sub_txn = next(txn for txn in txns if txn.description_raw == "NETFLIX.COM")
+
+        self.assertIsNone(merch_txn.merchant_id)
+        self.assertIsNone(merch_txn.subscription_id)
+        self.assertEqual(sub_txn.merchant_id, merchant.id)
+        self.assertEqual(sub_txn.subscription_id, subscription.id)
 
 
 class ValuationAgentTests(TestCase):

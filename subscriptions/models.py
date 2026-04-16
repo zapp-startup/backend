@@ -28,6 +28,10 @@ class MerchantCategory(models.TextChoices):
     UTILITIES = "utilities", "Utilities"
     FOOD = "food", "Food & Delivery"
     EDUCATION = "education", "Education"
+    # Health/pharmacy category. Note: not in the trained ML model's merchant-category
+    # vocabulary (MERCHANT_CATEGORY_VOCAB). At the model input boundary this is mapped to
+    # "other" to preserve backward compatibility. Use this value everywhere else in app logic.
+    HEALTH = "health", "Health & Pharmacy"
     OTHER = "other", "Other"
 
 
