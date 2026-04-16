@@ -17,6 +17,7 @@ from banking.exceptions import MfaVerificationNeededException
 from banking.security_checks import enforce_banking_policies
 from users.security_assurance import banking_step_up_fresh, extract_assurance_from_request
 from users.auth_views import _complete_mfa_verification
+from users.models import UserRawExplicit
 from users.session_auth import (
     AUTH_SESSION_KEY,
     SupabaseAuthError,
@@ -364,6 +365,7 @@ class MeViewTests(TestCase):
         self.assertEqual(r.status_code, status.HTTP_200_OK)
         self.assertEqual(r.json()["email"], "me@example.com")
         self.assertEqual(r.json()["aal"], "aal2")
+        self.assertEqual(r.json()["name"], "me_u")
 
     def test_me_pending_mfa_session(self):
         session = self.client.session
@@ -385,6 +387,56 @@ class MeViewTests(TestCase):
         self.assertEqual(r.json()["email"], "me@example.com")
         self.assertTrue(r.json()["mfa_pending"])
         self.assertTrue(r.json()["mfa_enrollment_required"])
+
+    def test_me_uses_saved_display_name(self):
+        self.user.first_name = "Saved Display Name"
+        self.user.save(update_fields=["first_name"])
+
+        self.client.force_login(self.user)
+        r = self.client.get(reverse("auth-me"))
+
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.json()["name"], "Saved Display Name")
+
+    def test_patch_me_updates_display_name(self):
+        self.client.force_login(self.user)
+
+        r = self.client.patch(
+            reverse("auth-me"),
+            {"name": "Updated Display Name"},
+            format="json",
+        )
+
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, "Updated Display Name")
+        self.assertEqual(r.json()["name"], "Updated Display Name")
+
+    def test_patch_me_syncs_existing_raw_explicit_display_name(self):
+        UserRawExplicit.objects.create(user=self.user, display_name="Old Name")
+        self.client.force_login(self.user)
+
+        r = self.client.patch(
+            reverse("auth-me"),
+            {"name": "Updated Display Name"},
+            format="json",
+        )
+
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        explicit = UserRawExplicit.objects.get(user=self.user)
+        self.assertEqual(explicit.display_name, "Updated Display Name")
+
+    def test_patch_me_does_not_create_raw_explicit(self):
+        self.client.force_login(self.user)
+
+        r = self.client.patch(
+            reverse("auth-me"),
+            {"name": "Updated Display Name"},
+            format="json",
+        )
+
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertFalse(UserRawExplicit.objects.filter(user=self.user).exists())
 
 
 class MfaVerifySessionUpgradeTests(TestCase):

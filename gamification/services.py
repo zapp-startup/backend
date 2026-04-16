@@ -312,28 +312,34 @@ def pending_transaction_feedback_count(review: PeriodicReview, reference_date: d
 def review_transaction_candidates(review: PeriodicReview, reference_date: date | None = None) -> list[Transaction]:
     _sync_review_bank_transactions(review, reference_date)
     scope_transactions = _review_window_transactions(review, reference_date)
-    scope_ids = {transaction.id for transaction in scope_transactions}
+    pending_transactions = [transaction for transaction in scope_transactions if not _has_feedback(transaction)]
+    reviewed_transactions = [transaction for transaction in scope_transactions if _has_feedback(transaction)]
     effective_end = _review_effective_end(review, reference_date)
     days_window = max((effective_end - review.period_start).days + 1, 1)
     limit = REVIEW_TRANSACTION_CANDIDATE_LIMIT[review.review_type]
-    raw_candidates = get_feedback_candidates(review.user, days_window=days_window, top_n=max(limit * 3, 10))
-    ordered_ids = [
-        candidate["transaction_id"]
-        for candidate in raw_candidates
-        if candidate["transaction_id"] in scope_ids
-    ]
+    pending_by_id = {transaction.id: transaction for transaction in pending_transactions}
+    ordered_transactions: list[Transaction] = []
 
-    by_id = {transaction.id: transaction for transaction in scope_transactions}
-    ordered_transactions = [by_id[transaction_id] for transaction_id in ordered_ids if transaction_id in by_id]
+    if pending_transactions:
+        raw_candidates = get_feedback_candidates(review.user, days_window=days_window, top_n=max(limit * 3, 10))
+        ordered_transactions.extend(
+            pending_by_id[candidate["transaction_id"]]
+            for candidate in raw_candidates
+            if candidate["transaction_id"] in pending_by_id
+        )
 
-    if len(ordered_transactions) < limit:
-        fallback_transactions = [
-            transaction
-            for transaction in scope_transactions
-            if transaction.id not in [ordered.id for ordered in ordered_transactions]
-            and not _has_feedback(transaction)
-        ][: max(limit - len(ordered_transactions), 0)]
-        ordered_transactions.extend(fallback_transactions)
+    seen_ids = {transaction.id for transaction in ordered_transactions}
+    ordered_transactions.extend(
+        transaction
+        for transaction in pending_transactions
+        if transaction.id not in seen_ids
+    )
+    seen_ids = {transaction.id for transaction in ordered_transactions}
+    ordered_transactions.extend(
+        transaction
+        for transaction in reviewed_transactions
+        if transaction.id not in seen_ids
+    )
 
     return ordered_transactions[:limit]
 

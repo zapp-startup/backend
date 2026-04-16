@@ -164,6 +164,46 @@ def _auth_state_payload(
     return payload
 
 
+def _resolve_display_name(user) -> str:
+    first_name = (getattr(user, "first_name", "") or "").strip()
+    if first_name:
+        return first_name
+    explicit = getattr(user, "raw_explicit", None)
+    explicit_name = getattr(explicit, "display_name", "") or ""
+    normalized = explicit_name.strip()
+    if normalized:
+        return normalized
+    return user.username
+
+
+def _me_payload(request, state: dict[str, object] | None) -> dict[str, object]:
+    onboarding_completed = _has_completed_onboarding(request.user)
+    next_step, post_mfa_step = _resolve_next_steps(
+        state or {},
+        onboarding_completed=onboarding_completed,
+    )
+    return {
+        "id": request.user.id,
+        "email": request.user.email,
+        "username": request.user.username,
+        "name": _resolve_display_name(request.user),
+        "supabase_uid": str(request.user.supabase_uid)
+        if request.user.supabase_uid
+        else None,
+        "aal": state.get("aal") if state else None,
+        "mfa_factor_count": state.get("mfa_factor_count", -1) if state else -1,
+        "last_step_up_at": state.get("last_step_up_at") if state else None,
+        "logged_in_at": state.get("logged_in_at") if state else None,
+        "mfa_pending": bool(state.get("mfa_pending")) if state else False,
+        "next_aal": state.get("next_aal") if state else None,
+        "mfa_enrollment_required": bool(state.get("mfa_enrollment_required")) if state else False,
+        "onboarding_completed": onboarding_completed,
+        "onboarding_required": not onboarding_completed,
+        "next_step": next_step,
+        "post_mfa_step": post_mfa_step,
+    }
+
+
 def _resolve_session_bits(access_token: str, data: dict) -> dict[str, object]:
     session_bits = extract_session_data(data)
     if not auth_requires_aal2() or not access_token:
@@ -473,55 +513,22 @@ class MeView(APIView):
     def get(self, request):
         refresh_session_tokens_if_needed(request)
         state = get_session_auth_state(request)
-        onboarding_completed = _has_completed_onboarding(request.user)
-        if state:
-            next_step, post_mfa_step = _resolve_next_steps(
-                state,
-                onboarding_completed=onboarding_completed,
-            )
-            return Response(
-                {
-                    "id": request.user.id,
-                    "email": request.user.email,
-                    "username": request.user.username,
-                    "supabase_uid": str(request.user.supabase_uid)
-                    if request.user.supabase_uid
-                    else None,
-                    "aal": state.get("aal"),
-                    "mfa_factor_count": state.get("mfa_factor_count", -1),
-                    "last_step_up_at": state.get("last_step_up_at"),
-                    "logged_in_at": state.get("logged_in_at"),
-                    "mfa_pending": bool(state.get("mfa_pending")),
-                    "next_aal": state.get("next_aal"),
-                    "mfa_enrollment_required": bool(state.get("mfa_enrollment_required")),
-                    "onboarding_completed": onboarding_completed,
-                    "onboarding_required": not onboarding_completed,
-                    "next_step": next_step,
-                    "post_mfa_step": post_mfa_step,
-                }
-            )
-        next_step, _ = _resolve_next_steps({}, onboarding_completed=onboarding_completed)
-        return Response(
-            {
-                "id": request.user.id,
-                "email": request.user.email,
-                "username": request.user.username,
-                "supabase_uid": str(request.user.supabase_uid)
-                if request.user.supabase_uid
-                else None,
-                "aal": None,
-                "mfa_factor_count": -1,
-                "last_step_up_at": None,
-                "logged_in_at": None,
-                "mfa_pending": False,
-                "next_aal": None,
-                "mfa_enrollment_required": False,
-                "onboarding_completed": onboarding_completed,
-                "onboarding_required": not onboarding_completed,
-                "next_step": next_step,
-                "post_mfa_step": None,
-            }
-        )
+        return Response(_me_payload(request, state))
+
+    def patch(self, request):
+        name = (request.data.get("name") or "").strip()
+        request.user.first_name = name
+        request.user.save(update_fields=["first_name"])
+
+        explicit = UserRawExplicit.objects.filter(user=request.user).first()
+        if explicit is not None:
+            explicit.display_name = name
+            explicit.save(update_fields=["display_name", "updated_at"])
+
+        refresh_session_tokens_if_needed(request)
+        state = get_session_auth_state(request)
+        request.user.refresh_from_db()
+        return Response(_me_payload(request, state))
 
 
 class OAuthStartView(APIView):
