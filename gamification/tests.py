@@ -433,6 +433,28 @@ class GamificationApiTests(TestCase):
         self.assertEqual(payload["transaction_candidates"][0]["id"], transaction.id)
         self.assertFalse(payload["eligible_to_complete"])
 
+    def test_weekly_review_endpoint_keeps_reviewed_transactions_in_period_list(self):
+        transaction = Transaction.objects.create(
+            user=self.user,
+            amount="42.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=timezone.now(),
+            category="shopping",
+            payment_channel="card",
+            satisfaction_rating=9,
+            reflection_text="Still worth it.",
+        )
+
+        response = self.client.get("/api/gamification/reviews/weekly/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["reviewed_transaction_count"], 1)
+        self.assertEqual(len(payload["transaction_candidates"]), 1)
+        self.assertEqual(payload["transaction_candidates"][0]["id"], transaction.id)
+        self.assertEqual(int(payload["transaction_candidates"][0]["satisfaction_rating"]), 9)
+
     def test_weekly_review_endpoint_hydrates_bank_transactions_into_candidates(self):
         connection = BankConnection.objects.create(
             user=self.user,
@@ -518,6 +540,70 @@ class GamificationApiTests(TestCase):
         self.assertEqual(payload["reviewed_transaction_count"], 0)
         self.assertEqual(payload["pending_transaction_feedback_count"], 0)
         self.assertEqual(payload["transaction_candidates"], [])
+
+    def test_weekly_review_endpoint_filters_candidates_to_requested_week(self):
+        now = timezone.now()
+        start_of_week = now.date() - timedelta(days=now.date().weekday())
+        in_scope_date = start_of_week + timedelta(days=1)
+        out_of_scope_date = start_of_week - timedelta(days=2)
+        in_scope_transaction = Transaction.objects.create(
+            user=self.user,
+            amount="25.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=timezone.make_aware(datetime.combine(in_scope_date, time(hour=12))),
+            category="shopping",
+            payment_channel="card",
+        )
+        Transaction.objects.create(
+            user=self.user,
+            amount="39.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=timezone.make_aware(datetime.combine(out_of_scope_date, time(hour=12))),
+            category="shopping",
+            payment_channel="card",
+        )
+
+        response = self.client.get(f"/api/gamification/reviews/weekly/?date={in_scope_date.isoformat()}")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["review"]["period_start"], start_of_week.isoformat())
+        self.assertEqual(len(payload["transaction_candidates"]), 1)
+        self.assertEqual(payload["transaction_candidates"][0]["id"], in_scope_transaction.id)
+
+    def test_monthly_review_endpoint_filters_candidates_to_requested_month(self):
+        now = timezone.now()
+        start_of_month = now.date().replace(day=1)
+        in_scope_date = start_of_month + timedelta(days=2)
+        out_of_scope_date = start_of_month - timedelta(days=2)
+        in_scope_transaction = Transaction.objects.create(
+            user=self.user,
+            amount="52.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=timezone.make_aware(datetime.combine(in_scope_date, time(hour=12))),
+            category="shopping",
+            payment_channel="card",
+        )
+        Transaction.objects.create(
+            user=self.user,
+            amount="67.00",
+            currency="USD",
+            direction="spend",
+            occurred_at=timezone.make_aware(datetime.combine(out_of_scope_date, time(hour=12))),
+            category="shopping",
+            payment_channel="card",
+        )
+
+        response = self.client.get(f"/api/gamification/reviews/monthly/?month={start_of_month.strftime('%Y-%m')}")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["review"]["period_start"], start_of_month.isoformat())
+        self.assertEqual(len(payload["transaction_candidates"]), 1)
+        self.assertEqual(payload["transaction_candidates"][0]["id"], in_scope_transaction.id)
 
     def test_weekly_review_completion_requires_feedback_and_summary(self):
         transaction = Transaction.objects.create(
