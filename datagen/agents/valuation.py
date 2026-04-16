@@ -184,7 +184,7 @@ class ValuationAgent(BaseAgent):
         *,
         sub: dict,
         usage: float,
-        usage_frequency: int,
+        usage_frequency: float,
         fit_signal: float,
         friction_signal: float,
         support_confidence: float,
@@ -202,7 +202,7 @@ class ValuationAgent(BaseAgent):
         feedback_value = sub.get("feedback_value_score")
         feedback_confidence = sub.get("feedback_confidence")
 
-        usage_score = clip01(0.72 * usage + 0.28 * (max(0, usage_frequency) / 7.0))
+        usage_score = clip01(0.72 * usage + 0.28 * clip01(float(usage_frequency)))
         category_floor_base = SUBSCRIPTION_UTILIZATION_CATEGORY_FLOORS.get(
             category_key,
             SUBSCRIPTION_UTILIZATION_CATEGORY_FLOORS["default"],
@@ -331,8 +331,9 @@ class ValuationAgent(BaseAgent):
                 lifecycle_end,
             )
 
-            usage_frequency = int(sub.get("usage_frequency", 0) or 0)
-            usage = clip01(float(rng.beta(2, 3)) * (1 + (usage_frequency / 7.0)))
+            usage_frequency = float(sub.get("usage_frequency", 0) or 0)
+            usage_frequency = max(0.0, min(1.0, usage_frequency))
+            usage = clip01(float(rng.beta(2, 3)) * (1.0 + usage_frequency))
             total_cost = self._period_cost(sub, period_start, period_end)
             total_cost_float = float(total_cost)
             monthly_income = max(1, float(state.monthly_income))
@@ -356,7 +357,7 @@ class ValuationAgent(BaseAgent):
             support_confidence = clip01(
                 0.35
                 + 0.18 * int(usage > 0.3)
-                + 0.15 * int(usage_frequency >= 3)
+                + 0.15 * int(usage_frequency >= (3.0 / 7.0))
                 + 0.22 * fit_signal
                 - 0.18 * friction_signal
             )

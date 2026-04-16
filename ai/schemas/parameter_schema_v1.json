@@ -327,9 +327,11 @@
           },
           "usage_frequency": {
             "type": [
-              "integer",
+              "number",
               "null"
-            ]
+            ],
+            "minimum": 0,
+            "maximum": 1
           }
         },
         "additionalProperties": false
