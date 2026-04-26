@@ -14,7 +14,7 @@ openai>=1.0.0
 plaid-python>=20.0.0
 # Value score model (platform_bundle inference)
 pandas>=2.0.0
-PyYAML>=6.0
+PyYAML>=6.0.3
 joblib>=1.3.0
 scikit-learn>=1.3.0
 # macOS: XGBoost needs OpenMP — `brew install libomp` (see xgboost docs if import fails).
