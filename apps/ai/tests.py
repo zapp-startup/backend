@@ -155,6 +155,9 @@ class ConversationMessagesTests(TestCase):
         self.user = User.objects.create_user(username="seed_user_0", password="testpass")
         self.client.force_authenticate(user=self.user)
         self.fixed_now = timezone.make_aware(datetime(2026, 3, 28, 12, 0, 0))
+        self.now_patcher = patch("apps.ai.views.timezone.now", return_value=self.fixed_now)
+        self.now_patcher.start()
+        self.addCleanup(self.now_patcher.stop)
 
         merchant = Merchant.objects.create(name="YouTube Premium")
         Transaction.objects.create(
