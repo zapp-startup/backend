@@ -1,0 +1,125 @@
+from rest_framework import status
+from rest_framework import mixins
+from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.viewsets import GenericViewSet, ModelViewSet
+
+from apps.gamification.services import (
+    award_points_for_same_day_reflection,
+    award_points_for_transaction,
+)
+from apps.valuations.serializers import TransactionValuationSerializer
+
+from .feedback_candidates import get_feedback_candidates
+from .models import Transaction, TransactionReflection
+from .serializers import TransactionReflectionSerializer, TransactionSerializer
+from .services.events import mark_transaction_dirty
+from .services.feedback_scoring import apply_feedback_scoring
+from apps.valuations.services.value_score_inference import ValueScoreModelNotAvailable
+from apps.valuations.services.transaction_value_score import persist_transaction_value_score
+
+class TransactionViewSet(ModelViewSet):
+    serializer_class = TransactionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = (
+            Transaction.objects
+            .filter(user=self.request.user)
+            .select_related("merchant", "subscription")
+        )
+        category = self.request.query_params.get("category")
+        direction = self.request.query_params.get("direction")
+        date_from = self.request.query_params.get("date_from")
+        date_to = self.request.query_params.get("date_to")
+
+        if category:
+            qs = qs.filter(category=category)
+        if direction:
+            qs = qs.filter(direction=direction)
+        if date_from:
+            qs = qs.filter(occurred_at__date__gte=date_from)
+        if date_to:
+            qs = qs.filter(occurred_at__date__lte=date_to)
+
+        limit = self.request.query_params.get("limit")
+        if limit:
+            qs = qs[:int(limit)]
+        return qs
+
+    @action(detail=False, methods=["get"], url_path="feedback-candidates")
+    def feedback_candidates(self, request):
+        """
+        Return the top N transaction candidates for feedback.
+        Prioritizes high-signal discretionary purchases over routine expenses.
+        """
+        top_n = request.query_params.get("n", "2")
+        try:
+            top_n = min(max(1, int(top_n)), 10)
+        except ValueError:
+            top_n = 2
+        days = request.query_params.get("days", "90")
+        try:
+            days = min(max(1, int(days)), 365)
+        except ValueError:
+            days = 90
+        candidates = get_feedback_candidates(
+            user=request.user,
+            days_window=days,
+            top_n=top_n,
+        )
+        return Response(candidates)
+
+    def perform_create(self, serializer):
+        # Force ownership
+        transaction = serializer.save(user=self.request.user)
+        award_points_for_transaction(transaction)
+        mark_transaction_dirty(transaction, reason="transaction_created", priority=4)
+
+    def perform_update(self, serializer):
+        transaction = serializer.save(user=self.request.user)
+        # Derive feedback_value_score / feedback_confidence from ratings whenever
+        # the transaction is updated.  These fields are backend-owned and not
+        # accepted from the client (declared read-only in TransactionSerializer).
+        apply_feedback_scoring(transaction, save=True)
+        mark_transaction_dirty(transaction, reason="transaction_updated", priority=4)
+
+    @action(detail=True, methods=["post"], url_path="score")
+    def score(self, request, pk=None):
+        try:
+            persist_transaction_value_score(self.get_object())
+        except ValueScoreModelNotAvailable as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        transaction = self.get_object()
+        return Response(self.get_serializer(transaction).data)
+
+    @action(detail=True, methods=["get"], url_path="valuation")
+    def valuation(self, request, pk=None):
+        transaction = self.get_object()
+        valuation = transaction.valuations.select_related("model_version").order_by("-created_at").first()
+        if valuation is None:
+            return Response({"detail": "No valuation found for this transaction."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(TransactionValuationSerializer(valuation).data)
+
+
+class TransactionReflectionViewSet(
+    mixins.CreateModelMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    GenericViewSet,
+):
+    serializer_class = TransactionReflectionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return (
+            TransactionReflection.objects
+            .filter(user=self.request.user)
+            .select_related("transaction")
+        )
+
+    def perform_create(self, serializer):
+        reflection = serializer.save(user=self.request.user)
+        award_points_for_same_day_reflection(reflection)
+        mark_transaction_dirty(reflection.transaction, reason="transaction_reflection_created", priority=2)
