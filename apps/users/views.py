@@ -10,7 +10,6 @@ from apps.gamification.services import award_points_for_onboarding
 
 from .session_auth import (
     get_session_auth_state,
-    issue_pending_mfa_session,
     session_requires_pending_mfa,
 )
 from .session_authentication import AuthSessionAuthentication
@@ -23,7 +22,6 @@ from .serializers import (
     UserComputedSerializer,
     UserPreferenceSerializer,
 )
-from .supabase_auth import SupabaseJWTAuthentication
 
 
 def _has_completed_onboarding(user) -> bool:
@@ -48,7 +46,7 @@ def _resolve_next_steps(
 
 class UserRawExplicitViewSet(ModelViewSet):
     serializer_class = UserRawExplicitSerializer
-    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -68,7 +66,7 @@ class UserRawExplicitViewSet(ModelViewSet):
 
 class UserRawInferredViewSet(ReadOnlyModelViewSet):
     serializer_class = UserRawInferredSerializer
-    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -77,7 +75,7 @@ class UserRawInferredViewSet(ReadOnlyModelViewSet):
 
 class UserComputedViewSet(ReadOnlyModelViewSet):
     serializer_class = UserComputedSerializer
-    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -86,7 +84,7 @@ class UserComputedViewSet(ReadOnlyModelViewSet):
 
 class UserPreferenceViewSet(ModelViewSet):
     serializer_class = UserPreferenceSerializer
-    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -107,7 +105,7 @@ class SupabaseUserSyncView(APIView):
     Sync the authenticated Supabase session into a backend user profile payload.
     """
 
-    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -143,24 +141,10 @@ class SupabaseUserSyncView(APIView):
             elif factor_count_int > 0:
                 enrollment_required = False
             if pending_mfa:
-                auth_source = str(auth_context.get("_assurance_source") or "jwt")
-                header = request.headers.get("Authorization") or ""
-                if header.startswith("Bearer "):
-                    access_token = header.split(" ", 1)[1].strip()
-                    if access_token:
-                        issue_pending_mfa_session(
-                            request,
-                            user,
-                            {
-                                "aal": auth_context.get("aal"),
-                                "auth_method": "supabase_jwt",
-                                "mfa_factor_count": auth_context.get("mfa_factors_count", -1),
-                            },
-                            access_token,
-                            None,
-                            None,
-                            mfa_enrollment_required=enrollment_required,
-                        )
+                # Session is the only auth path; the pending-MFA session was
+                # already issued by the login/OAuth/email-confirm flow. This
+                # endpoint only reports the resulting state.
+                auth_source = str(auth_context.get("_assurance_source") or "session")
                 next_step, post_mfa_step = _resolve_next_steps(
                     mfa_pending=True,
                     mfa_enrollment_required=enrollment_required,
@@ -213,7 +197,7 @@ class SupabaseUserSyncView(APIView):
 
 
 class UserStateView(APIView):
-    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):

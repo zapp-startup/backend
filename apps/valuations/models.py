@@ -38,9 +38,6 @@ class ValuationModelVersion(models.Model):
 
     class Meta:
         unique_together = ("name", "version")
-        indexes = [
-            models.Index(fields=["name", "version"]),
-        ]
 
     def __str__(self) -> str:
         return f"{self.name}@{self.version}"

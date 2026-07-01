@@ -5,7 +5,10 @@ from .models import Merchant, Subscription
 class MerchantSerializer(serializers.ModelSerializer):
     class Meta:
         model = Merchant
-        fields = "__all__"
+        # Explicit display allowlist. Internal/operator fields (website_domain
+        # used for matching, subscription_eligibility for synthetic data, and
+        # the timestamps) are intentionally excluded from the catalog response.
+        fields = ["id", "name", "category"]
 
 
 class SubscriptionSerializer(serializers.ModelSerializer):

@@ -1,4 +1,3 @@
-from apps.users.supabase_auth import SupabaseJWTAuthentication
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -12,7 +11,7 @@ class AuthAssuranceView(APIView):
     Exposes current session assurance / MFA-related state for the frontend.
     """
 
-    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):

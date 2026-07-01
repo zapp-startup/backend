@@ -1424,3 +1424,124 @@ class AIAuthenticationTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 405)
+
+
+def _streaming_openai_mock(deltas):
+    """Build a Mock requests response that mimics OpenAI's SSE stream."""
+    lines = [
+        f'data: {json.dumps({"choices": [{"delta": {"content": delta}}]})}'
+        for delta in deltas
+    ]
+    lines.append("data: [DONE]")
+    mock_response = Mock()
+    mock_response.iter_lines.return_value = iter(lines)
+    mock_response.raise_for_status.return_value = None
+    return mock_response
+
+
+def _parse_sse(body: str):
+    events = []
+    for block in body.split("\n\n"):
+        block = block.strip()
+        if not block.startswith("data:"):
+            continue
+        events.append(json.loads(block[len("data:"):].strip()))
+    return events
+
+
+class ConversationStreamingTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="stream_user", password="testpass")
+        self.client.force_authenticate(user=self.user)
+        self.conversation = Conversation.objects.create(
+            user=self.user,
+            context_type=ConversationContext.GENERAL,
+        )
+
+    def _consume(self, response) -> str:
+        return b"".join(response.streaming_content).decode()
+
+    @patch("apps.ai.views.requests.post")
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_stream_emits_openai_deltas_and_persists_final_message(self, mock_post):
+        mock_post.return_value = _streaming_openai_mock(["Hello", " from", " Zapp"])
+
+        response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/stream/",
+            {"content": "Can you help me optimize spending?"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/event-stream")
+        self.assertEqual(response["X-Accel-Buffering"], "no")
+
+        events = _parse_sse(self._consume(response))
+        delta_text = "".join(e["text"] for e in events if e["type"] == "delta")
+        self.assertEqual(delta_text, "Hello from Zapp")
+        self.assertEqual(events[-1]["type"], "done")
+
+        done = events[-1]
+        self.assertEqual(done["assistant_message"]["content"], "Hello from Zapp")
+        self.assertEqual(done["assistant_message"]["metadata_json"]["mode"], "openai")
+
+        # Persisted so a page refresh shows the same reply.
+        persisted = Message.objects.filter(
+            conversation=self.conversation, role=MessageRole.ASSISTANT
+        )
+        self.assertEqual(persisted.count(), 1)
+        self.assertEqual(persisted.first().content, "Hello from Zapp")
+        # The streaming model call was requested with stream=True.
+        self.assertTrue(mock_post.call_args.kwargs["json"]["stream"])
+
+    @patch("apps.ai.views.requests.post", side_effect=requests.RequestException("boom"))
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_stream_falls_back_to_placeholder_when_openai_fails(self, mock_post):
+        response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/stream/",
+            {"content": "Can you help me optimize spending?"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        events = _parse_sse(self._consume(response))
+        self.assertEqual(events[-1]["type"], "done")
+
+        assistant = Message.objects.filter(
+            conversation=self.conversation, role=MessageRole.ASSISTANT
+        ).first()
+        self.assertIsNotNone(assistant)
+        self.assertIn("temporarily unavailable", assistant.content)
+
+    @patch("apps.ai.views.requests.post")
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_stream_local_route_emits_single_delta_without_calling_openai(self, mock_post):
+        response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/stream/",
+            {"content": "hi"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        events = _parse_sse(self._consume(response))
+        mock_post.assert_not_called()
+
+        delta_events = [e for e in events if e["type"] == "delta"]
+        self.assertEqual(len(delta_events), 1)
+        self.assertEqual(events[-1]["type"], "done")
+
+        assistant = Message.objects.filter(
+            conversation=self.conversation, role=MessageRole.ASSISTANT
+        ).first()
+        self.assertEqual(assistant.metadata_json["mode"], "router")
+
+    def test_stream_requires_content(self):
+        response = self.client.post(
+            f"/api/ai/conversations/{self.conversation.id}/messages/stream/",
+            {},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)

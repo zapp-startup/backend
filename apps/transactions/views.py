@@ -1,7 +1,6 @@
 from rest_framework import status
 from rest_framework import mixins
 from rest_framework.decorators import action
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet, ModelViewSet
 
@@ -9,10 +8,12 @@ from apps.gamification.services import (
     award_points_for_same_day_reflection,
     award_points_for_transaction,
 )
+from apps.users.permissions import IsFullyAuthenticated
 from apps.valuations.serializers import TransactionValuationSerializer
 
 from .feedback_candidates import get_feedback_candidates
 from .models import Transaction, TransactionReflection
+from .pagination import TransactionCursorPagination
 from .serializers import TransactionReflectionSerializer, TransactionSerializer
 from .services.events import mark_transaction_dirty
 from .services.feedback_scoring import apply_feedback_scoring
@@ -21,7 +22,17 @@ from apps.valuations.services.transaction_value_score import persist_transaction
 
 class TransactionViewSet(ModelViewSet):
     serializer_class = TransactionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsFullyAuthenticated]
+    pagination_class = TransactionCursorPagination
+
+    def paginate_queryset(self, queryset):
+        # Legacy ``?limit=N`` callers (e.g. the dashboard "recent" widget) expect
+        # a plain JSON array, not a paginated envelope. Returning None here makes
+        # ListModelMixin.list() fall through to a bare array, preserving that
+        # contract. Requests without an explicit limit get cursor pagination.
+        if self.request.query_params.get("limit"):
+            return None
+        return super().paginate_queryset(queryset)
 
     def get_queryset(self):
         qs = (
@@ -45,7 +56,12 @@ class TransactionViewSet(ModelViewSet):
 
         limit = self.request.query_params.get("limit")
         if limit:
-            qs = qs[:int(limit)]
+            try:
+                # Clamp to a sane upper bound so a hostile/huge value cannot
+                # request an unbounded result set.
+                qs = qs[: max(0, min(int(limit), 500))]
+            except (TypeError, ValueError):
+                pass
         return qs
 
     @action(detail=False, methods=["get"], url_path="feedback-candidates")
@@ -110,7 +126,7 @@ class TransactionReflectionViewSet(
     GenericViewSet,
 ):
     serializer_class = TransactionReflectionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsFullyAuthenticated]
 
     def get_queryset(self):
         return (

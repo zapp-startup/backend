@@ -508,3 +508,90 @@ class UsageFrequencyValidationTestCase(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 400)
+
+
+class TransactionPaginationTestCase(TestCase):
+    """Cursor pagination on the timeline, plus the legacy ?limit= bypass."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="pagination-user", email="pg@example.com", password="x"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        now = timezone.now()
+        # 30 transactions with strictly-decreasing occurred_at (index 0 = newest).
+        self.txns = [
+            Transaction.objects.create(
+                user=self.user,
+                direction="spend",
+                amount=10 + i,
+                occurred_at=now - timedelta(days=i),
+                category=TransactionCategory.SHOPPING,
+            )
+            for i in range(30)
+        ]
+
+    def test_list_without_limit_is_cursor_paginated(self):
+        response = self.client.get("/api/transactions/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("results", response.data)
+        self.assertIn("next", response.data)
+        # Default page size = 25.
+        self.assertEqual(len(response.data["results"]), 25)
+        self.assertIsNotNone(response.data["next"])
+        # Newest-first ordering (ISO timestamps compare lexicographically).
+        self.assertGreater(
+            response.data["results"][0]["occurred_at"],
+            response.data["results"][1]["occurred_at"],
+        )
+
+    def test_following_cursor_returns_next_page_without_overlap(self):
+        from urllib.parse import urlparse
+
+        first = self.client.get("/api/transactions/")
+        next_url = first.data["next"]
+        self.assertIsNotNone(next_url)
+        parsed = urlparse(next_url)
+        second = self.client.get(f"{parsed.path}?{parsed.query}")
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(len(second.data["results"]), 5)  # 30 - 25
+        first_ids = {t["id"] for t in first.data["results"]}
+        second_ids = {t["id"] for t in second.data["results"]}
+        self.assertEqual(first_ids & second_ids, set())  # no overlap across pages
+        self.assertEqual(len(first_ids | second_ids), 30)  # together cover all rows
+
+    def test_limit_param_returns_plain_array_unpaginated(self):
+        response = self.client.get("/api/transactions/?limit=6")
+        self.assertEqual(response.status_code, 200)
+        self.assertIsInstance(response.data, list)  # bare array, no envelope
+        self.assertEqual(len(response.data), 6)
+
+    def test_category_filter_applies_with_pagination(self):
+        Transaction.objects.create(
+            user=self.user,
+            direction="spend",
+            amount=99,
+            occurred_at=timezone.now(),
+            category=TransactionCategory.GROCERIES,
+        )
+        response = self.client.get("/api/transactions/?category=groceries")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertEqual(response.data["results"][0]["category"], "groceries")
+
+    def test_list_is_scoped_to_requesting_user(self):
+        other = User.objects.create_user(
+            username="pg-other", email="pgo@example.com", password="x"
+        )
+        Transaction.objects.create(
+            user=other,
+            direction="spend",
+            amount=5,
+            occurred_at=timezone.now(),
+            category=TransactionCategory.SHOPPING,
+        )
+        response = self.client.get("/api/transactions/")
+        ids = {t["id"] for t in response.data["results"]}
+        self.assertEqual(len(ids), 25)  # own rows only, capped to page size
+        self.assertTrue(all(Transaction.objects.get(id=i).user == self.user for i in ids))

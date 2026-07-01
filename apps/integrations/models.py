@@ -32,7 +32,7 @@ class SpotifyConnection(models.Model):
         related_name="spotify_connection",
     )
 
-    spotify_user_id = models.CharField(max_length=64, blank=True, db_index=True)
+    spotify_user_id = models.CharField(max_length=64, blank=True)
     spotify_uri = models.CharField(max_length=128, blank=True)
     display_name = models.CharField(max_length=255, blank=True)
     email = models.EmailField(blank=True, null=True)
@@ -63,7 +63,6 @@ class SpotifyConnection(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=["spotify_user_id"]),
             models.Index(fields=["sync_status"]),
         ]
 

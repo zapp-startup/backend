@@ -266,7 +266,6 @@ class UserPreference(models.Model):
             models.UniqueConstraint(fields=["user", "key"], name="uniq_user_preference_key")
         ]
         indexes = [
-            models.Index(fields=["user", "key"]),
             models.Index(fields=["user", "updated_at"]),
         ]
 

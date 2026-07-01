@@ -1,4 +1,3 @@
-from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 
 from apps.gamification.services import (
@@ -11,23 +10,25 @@ from apps.subscriptions.services.events import mark_subscription_dirty
 from apps.valuations.value_score_views import annotate_subscriptions_with_latest_score
 from apps.valuations.services.value_score_orchestrator import schedule_value_scores_for_user_after_commit
 
+from apps.users.permissions import IsFullyAuthenticated
+
 from .models import Merchant, Subscription
 from .serializers import MerchantSerializer, SubscriptionSerializer
 
 
 class MerchantViewSet(ReadOnlyModelViewSet):
     """
-    Merchants are canonical/global. Usually read-only for normal users.
-    If you want users to create merchants, switch to ModelViewSet + permissions.
+    Merchants are canonical/global, read-only for normal users. The catalog is
+    only consumed from inside the authenticated dashboard, so it inherits the
+    project-wide IsAuthenticated default rather than being publicly exposed.
     """
     queryset = Merchant.objects.all()
     serializer_class = MerchantSerializer
-    permission_classes = [AllowAny]  # or IsAuthenticated if you want locked down
 
 
 class SubscriptionViewSet(ModelViewSet):
     serializer_class = SubscriptionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsFullyAuthenticated]
 
     def get_queryset(self):
         # Users can only see their own subscriptions

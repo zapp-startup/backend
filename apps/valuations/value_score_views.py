@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from django.db.models import OuterRef, Subquery
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.transactions.models import Transaction
+from apps.users.permissions import IsFullyAuthenticated
 
 from .models import SubscriptionValuation
 from .serializers import SubscriptionValuationSerializer, TransactionValuationSerializer
@@ -19,7 +19,7 @@ from .services.value_score_orchestrator import run_value_scores_for_user
 class ValueScoreMeView(APIView):
     """Latest subscription valuations for the current user (value-score pipeline)."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsFullyAuthenticated]
 
     def get(self, request):
         qs = latest_subscription_valuations_queryset(request.user).order_by("-period_end", "-created_at")
@@ -33,7 +33,7 @@ class ValueScoreMeView(APIView):
 class ValueScoreRecomputeView(APIView):
     """Run platform_bundle value-score model and persist SubscriptionValuation rows."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsFullyAuthenticated]
 
     def post(self, request):
         raw_ids = request.data.get("subscription_ids")
@@ -57,7 +57,7 @@ class ValueScoreRecomputeView(APIView):
 
 
 class TransactionValuationListView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsFullyAuthenticated]
 
     def get(self, request):
         qs = latest_transaction_valuations_queryset(request.user).order_by("-created_at")
@@ -69,7 +69,7 @@ class TransactionValuationListView(APIView):
 
 
 class TransactionValuationRecomputeView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsFullyAuthenticated]
 
     def post(self, request):
         raw_ids = request.data.get("transaction_ids")

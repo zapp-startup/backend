@@ -26,6 +26,9 @@ CORS_ALLOW_CREDENTIALS = True
 DATABASES["default"]["DISABLE_SERVER_SIDE_CURSORS"] = True
 
 # --- HTTPS / transport security (TLS terminates at load balancer; Django sees forwarded proto) ---
+# SECURITY (L-4): this trusts X-Forwarded-Proto. The load balancer MUST strip or
+# overwrite any client-supplied X-Forwarded-Proto header, otherwise a client can
+# spoof "https" and defeat SECURE_SSL_REDIRECT / secure-cookie enforcement.
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_SSL_REDIRECT = True
 SESSION_COOKIE_SECURE = True

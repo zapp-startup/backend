@@ -183,7 +183,7 @@ class BankTransactionsView(APIView):
         limit = request.query_params.get("limit")
         if limit:
             try:
-                qs = qs[: int(limit)]
+                qs = qs[: max(0, min(int(limit), 500))]
             except ValueError:
                 pass
 

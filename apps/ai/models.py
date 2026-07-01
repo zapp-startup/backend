@@ -166,9 +166,6 @@ class UserFact(models.Model):
 
     class Meta:
         unique_together = ("user", "fact_key")
-        indexes = [
-            models.Index(fields=["user", "fact_key"]),
-        ]
 
     def __str__(self) -> str:
         return f"{self.user} • {self.fact_key}"

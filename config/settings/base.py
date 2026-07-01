@@ -80,6 +80,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'core.security.headers.SecurityHeadersMiddleware',
     "corsheaders.middleware.CorsMiddleware",
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -143,9 +144,21 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 REST_FRAMEWORK = {
+    # Session cookies are the sole API authentication path (browser BFF).
+    # Plain SessionAuthentication only resolves fully logged-in Django sessions,
+    # so a pending-MFA session cannot reach general endpoints -- AAL2 is thereby
+    # enforced at the authentication layer. Endpoints that must operate mid
+    # MFA step-up opt into AuthSessionAuthentication explicitly. Supabase bearer
+    # tokens are no longer accepted as a request-auth method.
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework.authentication.SessionAuthentication",
-        "apps.users.supabase_auth.SupabaseJWTAuthentication",
+    ),
+    # Fail closed: any view that does not declare ``permission_classes``
+    # requires an authenticated session. Genuinely public endpoints must opt
+    # in with an explicit ``AllowAny``. Without this default DRF falls back to
+    # ``AllowAny``, which silently exposes any un-annotated view.
+    "DEFAULT_PERMISSION_CLASSES": (
+        "rest_framework.permissions.IsAuthenticated",
     ),
     "DEFAULT_THROTTLE_CLASSES": (
         "rest_framework.throttling.AnonRateThrottle",
@@ -158,6 +171,9 @@ REST_FRAMEWORK = {
         "ai": API_THROTTLE_AI_RATE,
         "audit_ingest": API_THROTTLE_AUDIT_INGEST_RATE,
         "waitlist_signup": API_THROTTLE_WAITLIST_SIGNUP_RATE,
+        # Credential endpoints: tight dedicated limits (anti brute-force).
+        "auth_login": os.getenv("THROTTLE_AUTH_LOGIN", "5/minute"),
+        "auth_signup": os.getenv("THROTTLE_AUTH_SIGNUP", "10/hour"),
         # Banking / compliance: per-user; tune per environment
         "banking_sensitive": os.getenv("THROTTLE_BANKING_SENSITIVE", "120/hour"),
         "banking_link_token": os.getenv("THROTTLE_BANKING_LINK_TOKEN", "30/hour"),
@@ -165,6 +181,19 @@ REST_FRAMEWORK = {
         "integrations_spotify": os.getenv("THROTTLE_INTEGRATIONS_SPOTIFY", "60/hour"),
     },
 }
+
+# --- Content-Security-Policy and related headers (see core.security.headers) ---
+# Strict policy for a JSON API: responses load no sub-resources, and the API is
+# never a framing/base target. The browser SPA is served separately with its own
+# CSP. Enforced by default; set CONTENT_SECURITY_POLICY_REPORT_ONLY=true to roll
+# out in observe-only mode first (development does this).
+CONTENT_SECURITY_POLICY = os.getenv(
+    "CONTENT_SECURITY_POLICY",
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+)
+CONTENT_SECURITY_POLICY_REPORT_ONLY = os.getenv(
+    "CONTENT_SECURITY_POLICY_REPORT_ONLY", "false"
+).lower() in ("1", "true", "yes")
 
 # --- Session / CSRF (browser BFF; explicit defaults) ---
 SESSION_COOKIE_HTTPONLY = True

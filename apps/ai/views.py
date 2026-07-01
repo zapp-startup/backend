@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 
 from django.conf import settings
+from django.http import StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 import requests
@@ -2235,6 +2236,277 @@ def build_assistant_placeholder_response(
     }
 
 
+STREAMING_SYSTEM_PROMPT = (
+    "You are Zapp, a personal finance assistant. Using only the JSON context in the "
+    "user message, answer in clear, concise plain text — no JSON, no markdown headers. "
+    "Never invent numbers or facts that are not present in the context. Ask at most one "
+    "clarifying question, and only when essential. "
+    + SAFETY_GUARDRAILS["disclaimer"]
+)
+
+
+def stream_openai_assistant_response(
+    *,
+    conversation,
+    user_message: str,
+    financial_context: dict,
+    purchase_advisor_report: dict | None,
+    conversation_memory: dict,
+    recalled_memories: list[dict],
+    intent: str,
+):
+    """Yield plain-text deltas from OpenAI's streaming Chat Completions API.
+
+    The non-streaming path requests a structured ``json_object`` response; that
+    cannot be streamed token-by-token without surfacing raw JSON punctuation, so
+    streaming uses a plain-text system prompt instead. Transport/HTTP errors
+    propagate to the caller, which falls back to the placeholder response.
+    """
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise ValueError("OpenAI API key is missing.")
+
+    payload = _build_openai_payload(
+        conversation,
+        user_message,
+        financial_context,
+        purchase_advisor_report,
+        conversation_memory,
+        recalled_memories,
+        intent,
+    )
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": getattr(settings, "OPENAI_MODEL", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL,
+            "stream": True,
+            "messages": [
+                {"role": "system", "content": STREAMING_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(payload)},
+            ],
+        },
+        stream=True,
+        timeout=30,
+    )
+    response.raise_for_status()
+    for raw_line in response.iter_lines(decode_unicode=True):
+        if not raw_line or not raw_line.startswith("data:"):
+            continue
+        data = raw_line[len("data:"):].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+        if delta:
+            yield delta
+
+
+def _sse_event(event_type: str, data: dict) -> str:
+    """Format a single Server-Sent Events frame."""
+    return f"data: {json.dumps({'type': event_type, **data})}\n\n"
+
+
+def _parse_turn_request(request):
+    """Validate a chat turn request body.
+
+    Returns ``(content, action_payload, error_detail)``; ``error_detail`` is a
+    string when the request is invalid, otherwise None.
+    """
+    action_payload = request.data.get("action_payload")
+    if action_payload is not None and not isinstance(action_payload, dict):
+        return None, None, "action_payload must be an object"
+
+    content = (request.data.get("content", "") or "").strip()
+    if not content and isinstance(action_payload, dict):
+        content = str(action_payload.get("label") or "").strip()
+    if not content and action_payload is None:
+        return None, None, "content is required"
+
+    return content, action_payload, None
+
+
+def _resolve_assistant_turn(*, convo, request, content, action_payload):
+    """Persist the user message and run intent routing for one chat turn.
+
+    Returns a dict describing the turn. ``assistant_payload`` is set for every
+    locally-resolved turn (router responses and the not-configured placeholder).
+    When the OpenAI path applies, ``assistant_payload`` is None and
+    ``openai_inputs`` holds the kwargs for ``build_openai_assistant_response`` /
+    ``stream_openai_assistant_response`` — so the caller decides whether to block
+    or stream. This is the single source of truth shared by the non-streaming and
+    streaming endpoints.
+    """
+    intent_detection = classify_intent(content)
+    user_metadata = {"intent_detection": intent_detection}
+    if action_payload is not None:
+        user_metadata["action_payload"] = action_payload
+        user_metadata[UI_ACTION_MESSAGE_KEY] = True
+
+    user_msg = Message.objects.create(
+        conversation=convo,
+        role=MessageRole.USER,
+        content=content,
+        metadata_json=user_metadata,
+    )
+
+    openai_key_issue = get_openai_api_key_issue()
+    openai_configured = openai_key_issue is None and bool(get_openai_api_key())
+    intent = intent_detection["intent"]
+    openai_error_code = OPENAI_MALFORMED_KEY_ERROR if openai_key_issue and openai_key_issue != "missing" else None
+    session_state = _get_mutable_session_state(convo)
+    financial_context = {}
+    purchase_advisor_report = None
+    prompt_conversation_memory = None
+    recalled_memories = []
+    spend_lookup_request = None
+    spend_summary_query = intent_detection.get("signals", {}).get("spend_summary_query", False)
+    normalized_content = _normalize_user_text(content)
+    openai_inputs = None
+
+    pending_action_payload = _handle_pending_satisfaction_action(
+        conversation=convo,
+        request_content=content,
+        session_state=session_state,
+        action_payload=action_payload,
+    )
+
+    if pending_action_payload is not None:
+        assistant_payload = pending_action_payload
+    elif intent == INTENT_UPDATE_SATISFACTION or _is_unsupported_feedback_update_request(normalized_content):
+        assistant_payload = _handle_update_satisfaction_request(
+            conversation=convo,
+            request_content=content,
+            session_state=session_state,
+        )
+    else:
+        previous_spend_lookup = session_state.get(LAST_SPEND_LOOKUP_KEY)
+        if intent == "ask":
+            spend_lookup_request = parse_spend_lookup_request(
+                content,
+                previous_lookup=previous_spend_lookup,
+            )
+
+        if spend_lookup_request is not None:
+            session_state[LAST_SPEND_LOOKUP_KEY] = _serialize_spend_lookup(spend_lookup_request)
+            assistant_payload = _build_spend_lookup_response(
+                _build_spend_lookup_context(request.user, spend_lookup_request)
+            )
+        elif intent == "record_transaction":
+            assistant_payload = _build_record_transaction_response()
+        elif intent == "smalltalk":
+            assistant_payload = _build_smalltalk_response(intent_detection)
+        elif intent == "meta_help":
+            assistant_payload = _build_meta_help_response()
+        else:
+            requested_spend_window_days = extract_requested_spend_window_days(content)
+            financial_context = build_financial_context(
+                request.user,
+                requested_spend_window_days=requested_spend_window_days,
+            )
+            if intent == "ask" and spend_summary_query:
+                assistant_payload = _build_spend_summary_response(content, financial_context)
+            else:
+                purchase_advisor_report = build_purchase_advisor_report(request.user, content)
+                prompt_conversation_memory = refresh_conversation_memory(convo)
+                recalled_memories = build_retrieved_memories(convo, content)
+                if openai_configured:
+                    # Defer the OpenAI call to the caller so it can stream or block.
+                    assistant_payload = None
+                    openai_inputs = dict(
+                        conversation=convo,
+                        user_message=content,
+                        financial_context=financial_context,
+                        purchase_advisor_report=purchase_advisor_report,
+                        conversation_memory=prompt_conversation_memory,
+                        recalled_memories=recalled_memories,
+                        intent=intent,
+                    )
+                else:
+                    assistant_payload = build_assistant_placeholder_response(
+                        intent,
+                        openai_configured=False,
+                        openai_error_code=openai_error_code,
+                    )
+
+    return {
+        "user_msg": user_msg,
+        "intent_detection": intent_detection,
+        "intent": intent,
+        "session_state": session_state,
+        "openai_configured": openai_configured,
+        "openai_error_code": openai_error_code,
+        "financial_context": financial_context,
+        "purchase_advisor_report": purchase_advisor_report,
+        "recalled_memories": recalled_memories,
+        "assistant_payload": assistant_payload,
+        "openai_inputs": openai_inputs,
+    }
+
+
+def _finalize_assistant_turn(
+    *,
+    convo,
+    user_msg,
+    assistant_payload,
+    action_payload,
+    session_state,
+    financial_context,
+    purchase_advisor_report,
+    recalled_memories,
+    intent_detection,
+    openai_configured,
+    openai_error_code,
+):
+    """Persist the assistant message + turn memory. Mirrors the non-streaming
+    persistence exactly so streamed and blocking turns produce identical history.
+    """
+    convo.session_state_json = session_state
+
+    assistant_text = assistant_payload["assistant_text"]
+    assistant_metadata = {
+        "mode": assistant_payload.get("mode")
+        or ("openai" if assistant_payload.get("model_response_json") else "placeholder"),
+        "openai_configured": openai_configured,
+        "openai_error_code": openai_error_code,
+        "model_response_json": assistant_payload.get("model_response_json"),
+        "financial_context": financial_context,
+        "intent_detection": intent_detection,
+        "purchase_advisor_report": purchase_advisor_report,
+        "retrieved_memories": recalled_memories,
+        "response_style": assistant_payload["response_style"],
+        "frontend_hint": assistant_payload["frontend_hint"],
+        "action": assistant_payload.get("action"),
+        "action_status": assistant_payload.get("status"),
+        "created_transaction_id": assistant_payload.get("created_transaction_id"),
+        "quick_actions": assistant_payload.get("quick_actions", []),
+        "safety_guardrails": assistant_payload.get("safety_guardrails", SAFETY_GUARDRAILS),
+        "action_payload": action_payload,
+    }
+
+    assistant_msg = Message.objects.create(
+        conversation=convo,
+        role=MessageRole.ASSISTANT,
+        content=assistant_text,
+        metadata_json=assistant_metadata,
+    )
+    _persist_turn_memory(
+        conversation=convo,
+        user_message=user_msg,
+        intent_detection=intent_detection,
+    )
+    assistant_metadata["conversation_memory"] = refresh_conversation_memory(convo)
+    assistant_msg.metadata_json = assistant_metadata
+    assistant_msg.save(update_fields=["metadata_json"])
+    return assistant_msg
+
+
 class AIViewSetMixin:
     authentication_classes = [SessionAuthentication, DebugHeaderAuthentication]
     permission_classes = [IsAuthenticated]
@@ -2303,163 +2575,141 @@ class ConversationViewSet(AIViewSetMixin, ModelViewSet):
             return Response(MessageSerializer(qs, many=True).data)
 
         # POST: create user msg + assistant reply
-        action_payload = request.data.get("action_payload")
-        if action_payload is not None and not isinstance(action_payload, dict):
-            return Response(
-                {"detail": "action_payload must be an object"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        content, action_payload, error_detail = _parse_turn_request(request)
+        if error_detail:
+            return Response({"detail": error_detail}, status=status.HTTP_400_BAD_REQUEST)
 
-        content = request.data.get("content", "")
-        content = (content or "").strip()
-        if not content and isinstance(action_payload, dict):
-            content = str(action_payload.get("label") or "").strip()
-        if not content and action_payload is None:
-            return Response({"detail": "content is required"}, status=status.HTTP_400_BAD_REQUEST)
-
-        intent_detection = classify_intent(content)
-        user_metadata = {"intent_detection": intent_detection}
-        if action_payload is not None:
-            user_metadata["action_payload"] = action_payload
-            user_metadata[UI_ACTION_MESSAGE_KEY] = True
-
-        user_msg = Message.objects.create(
-            conversation=convo,
-            role=MessageRole.USER,
+        turn = _resolve_assistant_turn(
+            convo=convo,
+            request=request,
             content=content,
-            metadata_json=user_metadata,
-        )
-
-        openai_key_issue = get_openai_api_key_issue()
-        openai_configured = openai_key_issue is None and bool(get_openai_api_key())
-        intent = intent_detection["intent"]
-        openai_error_code = OPENAI_MALFORMED_KEY_ERROR if openai_key_issue and openai_key_issue != "missing" else None
-        session_state = _get_mutable_session_state(convo)
-        financial_context = {}
-        purchase_advisor_report = None
-        prompt_conversation_memory = None
-        recalled_memories = []
-        spend_lookup_request = None
-        spend_summary_query = intent_detection.get("signals", {}).get("spend_summary_query", False)
-        normalized_content = _normalize_user_text(content)
-        pending_action_payload = _handle_pending_satisfaction_action(
-            conversation=convo,
-            request_content=content,
-            session_state=session_state,
             action_payload=action_payload,
         )
 
-        if pending_action_payload is not None:
-            assistant_payload = pending_action_payload
-        elif intent == INTENT_UPDATE_SATISFACTION or _is_unsupported_feedback_update_request(normalized_content):
-            assistant_payload = _handle_update_satisfaction_request(
-                conversation=convo,
-                request_content=content,
-                session_state=session_state,
-            )
-        else:
-            previous_spend_lookup = session_state.get(LAST_SPEND_LOOKUP_KEY)
-            if intent == "ask":
-                spend_lookup_request = parse_spend_lookup_request(
-                    content,
-                    previous_lookup=previous_spend_lookup,
+        assistant_payload = turn["assistant_payload"]
+        openai_error_code = turn["openai_error_code"]
+        if assistant_payload is None:
+            try:
+                assistant_payload = build_openai_assistant_response(**turn["openai_inputs"])
+            except (requests.RequestException, ValueError, KeyError, IndexError, json.JSONDecodeError) as exc:
+                openai_error_code = _classify_openai_error(exc)
+                logger.warning("OpenAI request failed; falling back to placeholder response: %s", exc)
+                assistant_payload = build_assistant_placeholder_response(
+                    turn["intent"],
+                    openai_configured=turn["openai_configured"],
+                    openai_failed=True,
+                    openai_error_code=openai_error_code,
                 )
 
-            if spend_lookup_request is not None:
-                session_state[LAST_SPEND_LOOKUP_KEY] = _serialize_spend_lookup(spend_lookup_request)
-                assistant_payload = _build_spend_lookup_response(
-                    _build_spend_lookup_context(request.user, spend_lookup_request)
-                )
-            elif intent == "record_transaction":
-                assistant_payload = _build_record_transaction_response()
-            elif intent == "smalltalk":
-                assistant_payload = _build_smalltalk_response(intent_detection)
-            elif intent == "meta_help":
-                assistant_payload = _build_meta_help_response()
-            else:
-                requested_spend_window_days = extract_requested_spend_window_days(content)
-                financial_context = build_financial_context(
-                    request.user,
-                    requested_spend_window_days=requested_spend_window_days,
-                )
-                if intent == "ask" and spend_summary_query:
-                    assistant_payload = _build_spend_summary_response(content, financial_context)
-                else:
-                    purchase_advisor_report = build_purchase_advisor_report(request.user, content)
-                    prompt_conversation_memory = refresh_conversation_memory(convo)
-                    recalled_memories = build_retrieved_memories(convo, content)
-                    if openai_configured:
-                        try:
-                            assistant_payload = build_openai_assistant_response(
-                                conversation=convo,
-                                user_message=content,
-                                financial_context=financial_context,
-                                purchase_advisor_report=purchase_advisor_report,
-                                conversation_memory=prompt_conversation_memory,
-                                recalled_memories=recalled_memories,
-                                intent=intent,
-                            )
-                        except (requests.RequestException, ValueError, KeyError, IndexError, json.JSONDecodeError) as exc:
-                            openai_error_code = _classify_openai_error(exc)
-                            logger.warning("OpenAI request failed; falling back to placeholder response: %s", exc)
-                            assistant_payload = build_assistant_placeholder_response(
-                                intent,
-                                openai_configured=openai_configured,
-                                openai_failed=True,
-                                openai_error_code=openai_error_code,
-                            )
-                    else:
-                        assistant_payload = build_assistant_placeholder_response(
-                            intent,
-                            openai_configured=False,
-                            openai_error_code=openai_error_code,
-                        )
-
-        convo.session_state_json = session_state
-
-        assistant_text = assistant_payload["assistant_text"]
-        assistant_metadata = {
-            "mode": assistant_payload.get("mode")
-            or ("openai" if assistant_payload.get("model_response_json") else "placeholder"),
-            "openai_configured": openai_configured,
-            "openai_error_code": openai_error_code,
-            "model_response_json": assistant_payload.get("model_response_json"),
-            "financial_context": financial_context,
-            "intent_detection": intent_detection,
-            "purchase_advisor_report": purchase_advisor_report,
-            "retrieved_memories": recalled_memories,
-            "response_style": assistant_payload["response_style"],
-            "frontend_hint": assistant_payload["frontend_hint"],
-            "action": assistant_payload.get("action"),
-            "action_status": assistant_payload.get("status"),
-            "created_transaction_id": assistant_payload.get("created_transaction_id"),
-            "quick_actions": assistant_payload.get("quick_actions", []),
-            "safety_guardrails": assistant_payload.get("safety_guardrails", SAFETY_GUARDRAILS),
-            "action_payload": action_payload,
-        }
-
-        assistant_msg = Message.objects.create(
-            conversation=convo,
-            role=MessageRole.ASSISTANT,
-            content=assistant_text,
-            metadata_json=assistant_metadata,
+        assistant_msg = _finalize_assistant_turn(
+            convo=convo,
+            user_msg=turn["user_msg"],
+            assistant_payload=assistant_payload,
+            action_payload=action_payload,
+            session_state=turn["session_state"],
+            financial_context=turn["financial_context"],
+            purchase_advisor_report=turn["purchase_advisor_report"],
+            recalled_memories=turn["recalled_memories"],
+            intent_detection=turn["intent_detection"],
+            openai_configured=turn["openai_configured"],
+            openai_error_code=openai_error_code,
         )
-        _persist_turn_memory(
-            conversation=convo,
-            user_message=user_msg,
-            intent_detection=intent_detection,
-        )
-        assistant_metadata["conversation_memory"] = refresh_conversation_memory(convo)
-        assistant_msg.metadata_json = assistant_metadata
-        assistant_msg.save(update_fields=["metadata_json"])
 
         return Response(
             {
-                "user_message": MessageSerializer(user_msg).data,
+                "user_message": MessageSerializer(turn["user_msg"]).data,
                 "assistant_message": MessageSerializer(assistant_msg).data,
             },
             status=status.HTTP_201_CREATED,
         )
+
+    @action(detail=True, methods=["post"], url_path="messages/stream")
+    def messages_stream(self, request, pk=None):
+        """
+        POST /api/ai/conversations/<id>/messages/stream/  body: { "content": "..." }
+
+        Streams the assistant reply as Server-Sent Events: ``delta`` frames carry
+        text as it arrives (token-by-token for the OpenAI path; a single frame for
+        locally-routed replies), then a ``done`` frame carries the persisted user +
+        assistant messages so refreshed history matches the blocking endpoint.
+        Falls back to the placeholder reply if OpenAI streaming fails.
+        """
+        convo = get_object_or_404(self.get_queryset(), id=pk)
+
+        content, action_payload, error_detail = _parse_turn_request(request)
+        if error_detail:
+            return Response({"detail": error_detail}, status=status.HTTP_400_BAD_REQUEST)
+
+        turn = _resolve_assistant_turn(
+            convo=convo,
+            request=request,
+            content=content,
+            action_payload=action_payload,
+        )
+
+        def event_stream():
+            assistant_payload = turn["assistant_payload"]
+            openai_error_code = turn["openai_error_code"]
+            try:
+                if assistant_payload is None:
+                    accumulated = []
+                    try:
+                        for delta in stream_openai_assistant_response(**turn["openai_inputs"]):
+                            accumulated.append(delta)
+                            yield _sse_event("delta", {"text": delta})
+                        text = "".join(accumulated).strip() or (
+                            "I don't have enough context yet to answer that clearly."
+                        )
+                        response_style = _get_response_style_for_intent(turn["intent"])
+                        assistant_payload = {
+                            "assistant_text": text,
+                            "response_style": response_style,
+                            "frontend_hint": _get_frontend_hint_for_response_style(response_style),
+                            "safety_guardrails": SAFETY_GUARDRAILS,
+                            "model_response_json": {"streamed": True, "message": text},
+                            "mode": "openai",
+                        }
+                    except (requests.RequestException, ValueError, KeyError, IndexError, json.JSONDecodeError) as exc:
+                        openai_error_code = _classify_openai_error(exc)
+                        logger.warning("OpenAI streaming failed; falling back to placeholder response: %s", exc)
+                        assistant_payload = build_assistant_placeholder_response(
+                            turn["intent"],
+                            openai_configured=turn["openai_configured"],
+                            openai_failed=True,
+                            openai_error_code=openai_error_code,
+                        )
+                        yield _sse_event("delta", {"text": assistant_payload["assistant_text"]})
+                else:
+                    yield _sse_event("delta", {"text": assistant_payload["assistant_text"]})
+
+                assistant_msg = _finalize_assistant_turn(
+                    convo=convo,
+                    user_msg=turn["user_msg"],
+                    assistant_payload=assistant_payload,
+                    action_payload=action_payload,
+                    session_state=turn["session_state"],
+                    financial_context=turn["financial_context"],
+                    purchase_advisor_report=turn["purchase_advisor_report"],
+                    recalled_memories=turn["recalled_memories"],
+                    intent_detection=turn["intent_detection"],
+                    openai_configured=turn["openai_configured"],
+                    openai_error_code=openai_error_code,
+                )
+                yield _sse_event(
+                    "done",
+                    {
+                        "user_message": MessageSerializer(turn["user_msg"]).data,
+                        "assistant_message": MessageSerializer(assistant_msg).data,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Streaming assistant turn failed")
+                yield _sse_event("error", {"detail": "stream_failed"})
+
+        response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response
 
 
 class MessageViewSet(AIViewSetMixin, ReadOnlyModelViewSet):

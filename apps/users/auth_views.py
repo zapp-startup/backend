@@ -15,7 +15,6 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from apps.users.supabase_auth import SupabaseJWTAuthentication
 
 from .models import UserRawExplicit
 from .session_auth import (
@@ -58,6 +57,7 @@ from .session_auth import (
     user_from_token_response,
 )
 from .session_authentication import AuthSessionAuthentication
+from .throttles import LoginRateThrottle, SignupRateThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +224,32 @@ def _resolve_session_bits(access_token: str, data: dict) -> dict[str, object]:
     return extract_session_data({"user": user_obj})
 
 
+def _safe_frontend_redirect(candidate: str | None) -> str | None:
+    """
+    Open-redirect guard for user-supplied post-auth redirect targets.
+
+    Returns the candidate only if it is a same-origin relative path or its
+    origin is explicitly allowlisted (FRONTEND_ALLOWED_REDIRECT_ORIGINS, falling
+    back to CORS_ALLOWED_ORIGINS). Returns None for anything else, including
+    protocol-relative ("//host") and backslash-obfuscated targets.
+    """
+    candidate = (candidate or "").strip()
+    if not candidate:
+        return None
+    if candidate.startswith("//") or "\\" in candidate:
+        return None
+    parsed = urlparse(candidate)
+    if not parsed.scheme and not parsed.netloc:
+        # Same-origin relative path, e.g. "/onboarding?next=/dashboard".
+        return candidate if candidate.startswith("/") else None
+    allowed = (
+        getattr(settings, "FRONTEND_ALLOWED_REDIRECT_ORIGINS", None)
+        or getattr(settings, "CORS_ALLOWED_ORIGINS", [])
+    )
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    return candidate if origin in allowed else None
+
+
 def _auth_redirect(
     frontend: str,
     login_state: str,
@@ -386,6 +412,7 @@ class CsrfView(APIView):
 
 class LoginView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [LoginRateThrottle]
 
     def post(self, request):
         email = (request.data.get("email") or "").strip()
@@ -435,6 +462,7 @@ class LoginView(APIView):
 
 class SignupView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [SignupRateThrottle]
 
     def post(self, request):
         email = (request.data.get("email") or "").strip()
@@ -507,7 +535,7 @@ class LogoutView(APIView):
 
 
 class MeView(APIView):
-    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -516,7 +544,9 @@ class MeView(APIView):
         return Response(_me_payload(request, state))
 
     def patch(self, request):
-        name = (request.data.get("name") or "").strip()
+        # Cap length to stay within the first_name column and avoid storing
+        # unbounded user-supplied input.
+        name = (request.data.get("name") or "").strip()[:120]
         request.user.first_name = name
         request.user.save(update_fields=["first_name"])
 
@@ -552,7 +582,16 @@ class OAuthStartView(APIView):
                 },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        frontend_redirect = (request.data.get("redirect_uri_after") or "").strip() or None
+        raw_redirect = (request.data.get("redirect_uri_after") or "").strip()
+        frontend_redirect = _safe_frontend_redirect(raw_redirect)
+        if raw_redirect and frontend_redirect is None:
+            return Response(
+                {
+                    "detail": "redirect_uri_after is not an allowed redirect target.",
+                    "error_code": "invalid_redirect",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         verifier = pkce_verifier()
         challenge = pkce_challenge(verifier)
         store_oauth_pkce_state(
@@ -599,7 +638,9 @@ class OAuthCallbackView(APIView):
                 {"detail": "Missing code verifier.", "error_code": "oauth_missing_verifier"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        frontend = (pkce_state.get("frontend_redirect") or "").strip()
+        # Re-validate the stored redirect target before using it (only
+        # allowlisted values are stored, but never trust a stored value blindly).
+        frontend = _safe_frontend_redirect(pkce_state.get("frontend_redirect")) or ""
         try:
             data = supabase_exchange_pkce(code, verifier)
         except SupabaseAuthError as exc:
@@ -907,7 +948,7 @@ class MfaFactorView(APIView):
 
 
 class AssuranceView(APIView):
-    authentication_classes = [AuthSessionAuthentication, SupabaseJWTAuthentication]
+    authentication_classes = [AuthSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):

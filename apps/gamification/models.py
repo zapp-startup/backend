@@ -70,7 +70,6 @@ class Group(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=["invite_code"]),
             models.Index(fields=["created_at"]),
         ]
 
@@ -152,7 +151,6 @@ class GroupInvite(models.Model):
         indexes = [
             models.Index(fields=["group", "status", "created_at"]),
             models.Index(fields=["invited_user", "status", "created_at"]),
-            models.Index(fields=["invite_code"]),
         ]
 
     def is_active(self, now=None) -> bool:
@@ -246,7 +244,6 @@ class PeriodicReview(models.Model):
             ),
         ]
         indexes = [
-            models.Index(fields=["user", "review_type", "period_start"]),
             models.Index(fields=["user", "review_type", "status"]),
             models.Index(fields=["period_start", "period_end"]),
         ]
@@ -291,7 +288,6 @@ class PointEvent(models.Model):
             models.Index(fields=["group", "action", "created_at"]),
             models.Index(fields=["user", "window_date"]),
             models.Index(fields=["group", "window_date"]),
-            models.Index(fields=["event_key"]),
         ]
 
     def save(self, *args, **kwargs):
@@ -337,7 +333,6 @@ class Badge(models.Model):
     class Meta:
         indexes = [
             models.Index(fields=["category", "is_active"]),
-            models.Index(fields=["code"]),
         ]
 
     def __str__(self) -> str:

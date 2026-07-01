@@ -46,7 +46,8 @@ Consent validity ties to `PRIVACY_POLICY_VERSION` — users must re-consent when
 |------|----------|----------|
 | SSL redirect, secure cookies, HSTS | `zapp/settings/production.py` | Infra screenshot: TLS 1.2+ at load balancer |
 | Startup validation | `zapp/security/production_validation.py` | Failed deploy logs if misconfigured |
-| Proxy header | `SECURE_PROXY_SSL_HEADER` | Nginx/ALB config sets `X-Forwarded-Proto: https` |
+| Proxy header | `SECURE_PROXY_SSL_HEADER` | Nginx/ALB config sets `X-Forwarded-Proto: https` **and strips/overwrites any client-supplied value** (otherwise a client can spoof `https` — see comment in `config/settings/production.py`) |
+| Security headers (CSP, Permissions-Policy) | `core/security/headers.py` (`SecurityHeadersMiddleware`), `CONTENT_SECURITY_POLICY` in `config/settings/base.py` | Response headers; enforced in production, report-only in development; `config/security/tests.py` |
 | Frontend production URL validation | `frontend/src/config/apiEnv.ts`, `frontend/src/api/client.ts`, `frontend/src/api/ai.api.ts`, `frontend/src/api/supabaseClient.ts` | Production build/runtime error if API or Supabase URLs are not HTTPS |
 
 Questionnaire item 12 ("encrypt data-in-transit between clients and servers using TLS 1.2 or better") maps to this control. Answer **Yes** only when:
@@ -98,8 +99,9 @@ See also:
 
 | Item | Location | Evidence |
 |------|----------|----------|
-| Throttle scopes | `banking/throttles.py`, `compliance/throttles.py` | `DEFAULT_THROTTLE_RATES` in `zapp/settings/base.py` |
-| Applied views | `banking/views.py`, `compliance/views.py` | 429 responses under load test |
+| Throttle scopes | `banking/throttles.py`, `compliance/throttles.py`, `users/throttles.py`, `waitlist/throttles.py` | `DEFAULT_THROTTLE_RATES` in `config/settings/base.py` |
+| Applied views | `banking/views.py`, `compliance/views.py`, `users/auth_views.py` (`LoginView`, `SignupView`), `waitlist/views.py` | 429 responses under load test |
+| Credential brute-force limits | `auth_login` (5/min, keyed per IP+email), `auth_signup` (10/hour) | `users/tests_auth_throttle.py` — 6th login / 11th signup returns 429 |
 
 ---
 
@@ -118,6 +120,20 @@ Secrets, raw Plaid payloads, and full account numbers are **not** logged.
 | Item | Location | Evidence |
 |------|----------|----------|
 | `X-Dev-User` disabled in prod | `users/dev_auth.py` + `DEBUG` / `ALLOW_DEV_HEADER_AUTH` | `production.py` sets `ALLOW_DEV_HEADER_AUTH = False` |
+
+---
+
+## 9a. Authorization model (default-deny, session-only)
+
+| Item | Location | Evidence |
+|------|----------|----------|
+| Fail-closed default permission | `DEFAULT_PERMISSION_CLASSES = (IsAuthenticated,)` in `config/settings/base.py` | `valuations/tests.py::DefaultPermissionFailClosedTests`; any view omitting `permission_classes` requires auth |
+| Session cookie is the sole API auth path | `DEFAULT_AUTHENTICATION_CLASSES = (SessionAuthentication,)` in `config/settings/base.py` | `users/tests_authz_hardening.py` — bearer rejected on `/me` and `/transactions` |
+| Bearer/JWT not a request-auth method | `SupabaseJWTAuthentication` removed from all `authentication_classes` | `users/tests_authz_hardening.py::DefaultAuthenticationClassesTests` |
+| AAL2 enforced for financial data | plain `SessionAuthentication` (won't resolve pending-MFA) + `IsFullyAuthenticated` (`users/permissions.py`) on transactions/subscriptions/valuations | `users/tests_authz_hardening.py::MfaGatingTests` |
+| Operator-only model metadata | `IsAdminUser` on `ValuationModelVersionViewSet` | `valuations/tests.py::ValuationModelVersionPermissionTests` |
+| Merchant catalog locked + field allowlist | `subscriptions/views.py`, `subscriptions/serializers.py` (`fields = ["id","name","category"]`) | `subscriptions/tests_merchant_exposure.py` |
+| OAuth open-redirect allowlist | `_safe_frontend_redirect` in `users/auth_views.py` | `users/tests_oauth_redirect.py` |
 
 ---
 

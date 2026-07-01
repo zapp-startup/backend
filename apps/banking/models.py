@@ -90,9 +90,6 @@ class BankAccount(models.Model):
                 name="uniq_connection_plaid_account",
             ),
         ]
-        indexes = [
-            models.Index(fields=["connection", "plaid_account_id"]),
-        ]
 
     def __str__(self) -> str:
         return f"{self.name} ({self.mask})"

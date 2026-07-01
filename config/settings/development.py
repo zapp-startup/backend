@@ -32,6 +32,10 @@ BANKING_REQUIRE_FINANCIAL_CONSENT = env_bool(
 )
 ALLOW_DEV_HEADER_AUTH = True
 
+# Roll the CSP out in observe-only mode locally so the DRF browsable API and
+# other dev tooling are not blocked while the policy is validated.
+CONTENT_SECURITY_POLICY_REPORT_ONLY = True
+
 CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
     "http://127.0.0.1:4173",
