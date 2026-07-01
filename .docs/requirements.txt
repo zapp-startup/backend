@@ -6,7 +6,7 @@ dj-database-url==3.1.2
 requests==2.33.1
 PyJWT==2.12.1
 cryptography==46.0.7
-psycopg2-binary==2.9.11
+psycopg2-binary==2.9.12
 Faker==40.13.0
 numpy>=1.26.0
 scipy>=1.17.1
