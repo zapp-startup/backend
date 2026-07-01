@@ -24,7 +24,7 @@ jobs:
           SUPABASE_JWT_ISS: https://example.supabase.co/auth/v1
           SUPABASE_ANON_KEY: test-anon-key
         run: |
-          python manage.py check --settings=zapp.settings.test
+          python manage.py check --settings=config.settings.test
       - name: Tests
         env:
           SECRET_KEY: ci-not-for-production
@@ -33,4 +33,4 @@ jobs:
           SUPABASE_JWT_ISS: https://example.supabase.co/auth/v1
           SUPABASE_ANON_KEY: test-anon-key
         run: |
-          python manage.py test --settings=zapp.settings.test --parallel 1
+          python manage.py test --settings=config.settings.test --parallel 1
