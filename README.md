@@ -8,7 +8,7 @@ This repository is the main submission repo for the local Django integration ass
 
 The milestone feature delivered in this repo is a personalized valuation workflow for subscriptions and one-off purchases:
 
-- Django stores subscription and item valuation outputs in the `valuations` app.
+- Django stores subscription and item valuation outputs in the `apps.valuations` app.
 - Authenticated REST endpoints expose valuation history to the frontend.
 - The frontend surfaces value scores, recommendations, and evidence on the subscriptions and analytics experiences.
 - The sibling [`value_score_model`](https://github.com/zapp-startup/value_score_model) repo contains the reusable training and scoring package that supports the value-score logic and future production scoring integration.
@@ -26,6 +26,18 @@ The milestone feature delivered in this repo is a personalized valuation workflo
 
 - Primary submission repo: [backend](https://github.com/zapp-startup/backend)
 - Supporting AI model repo: [value_score_model](https://github.com/zapp-startup/value_score_model)
+
+## Project Layout
+
+```text
+apps/       Django apps: ai, banking, compliance, integrations, subscriptions, transactions, users, valuations, waitlist
+config/     Django project wiring, settings, and operational config such as security alert rules
+core/       Shared backend code used across apps, including encryption helpers
+.docs/      Project notes, AI documentation, runbooks, and submission docs
+scripts/    Developer utility scripts
+```
+
+The old top-level Django app packages were consolidated under `apps/`. The old `zapp/` project package was collapsed into `config/`, production validation lives under `config/security/`, and shared encryption code lives under `core/security/`.
 
 ## Local Setup
 
@@ -62,13 +74,13 @@ Optional integrations such as Supabase, Plaid, and Spotify can be configured thr
 ### 4. Run database migrations
 
 ```powershell
-python manage.py migrate --settings=zapp.settings.development
+python manage.py migrate --settings=config.settings.development
 ```
 
 ### 5. Start the Django development server
 
 ```powershell
-python manage.py runserver --settings=zapp.settings.development
+python manage.py runserver --settings=config.settings.development
 ```
 
 The API is then available at `http://127.0.0.1:8000/`.
@@ -108,18 +120,24 @@ The current public valuation interfaces are:
 
 Authenticated reads are filtered to the current user in the Django viewsets.
 
-For local API-only testing, the repo also includes AI module testing notes in [ai/README.md](/C:/CODE/Zapp/backend/ai/README.md).
+For local API-only testing, the repo also includes AI module testing notes in [`apps/ai/README.md`](apps/ai/README.md).
 
 ## AI Integration Scope In This Repo
 
 This repo contains the Django-side integration layer:
 
-- `valuations.models`
+- `apps.valuations.models`
   stores versioned valuation outputs, confidence, and encrypted evidence payloads
-- `valuations.views`
+- `apps.valuations.views`
   exposes authenticated CRUD endpoints for valuation records
-- `zapp.urls`
+- `config.urls`
   registers the valuation endpoints under `/api/`
+- `config.settings`
+  contains environment-specific Django settings
+- `config.security`
+  contains production-security validation helpers
+- `core.security`
+  contains shared encryption helpers
 - frontend consumers in the sibling `frontend` repo read these valuation records and display them in the subscriptions and analytics pages
 
 The supporting `value_score_model` repo provides:
@@ -165,17 +183,19 @@ That package also supports batch scoring and local checkpoint generation. Submis
 
 ## Common Local Notes
 
-- Always run the backend with `--settings=zapp.settings.development` for local work.
+- Always run the backend with `--settings=config.settings.development` for local work.
 - The development settings expect loopback hosts such as `127.0.0.1`.
 - OpenAI-backed chat features require a valid `OPENAI_API_KEY`.
 - The frontend and backend should use the same loopback family so auth cookies and OAuth callbacks behave consistently.
+- Security alert rules are stored in `config/security_alert_rules.json`.
+- Security alert runbooks are stored in `.docs/runbooks/`.
 
 ## Deliverables Checklist
 
 This repo now covers the assignment-facing repository deliverables:
 
 - `README.md`
-- `README_AI.md`
+- `.docs/README_AI.md`
 - `requirements.txt`
 - Git hygiene rules for local model artifacts
-- Canvas-ready submission text file
+- `.docs/CANVAS_SUBMISSION.md`

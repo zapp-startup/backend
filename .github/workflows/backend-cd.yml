@@ -6,14 +6,8 @@ on:
       - main
     paths:
       - ".github/workflows/backend-cd.yml"
-      - "ai/**"
-      - "banking/**"
-      - "compliance/**"
-      - "gamification/**"
-      - "subscriptions/**"
-      - "transactions/**"
-      - "users/**"
-      - "valuations/**"
+      - "apps/**"
+      - "config/**"
       - "zapp/**"
       - "manage.py"
       - "requirements.txt"
@@ -71,13 +65,13 @@ jobs:
           pip install -r requirements.txt
 
       - name: Validate production Django configuration
-        run: python manage.py check --deploy --settings=zapp.settings.production
+        run: python manage.py check --deploy --settings=config.settings.production
 
       - name: Verify Plaid access tokens are encrypted
-        run: python manage.py verify_plaid_access_tokens_encrypted --settings=zapp.settings.production
+        run: python manage.py verify_plaid_access_tokens_encrypted --settings=config.settings.production
 
       - name: Run production safety smoke tests
-        run: python manage.py test zapp.security --settings=zapp.settings.test --verbosity 2
+        run: python manage.py test config.security --settings=config.settings.test --verbosity 2
 
   deploy:
     runs-on: ubuntu-latest
