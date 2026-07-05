@@ -4,7 +4,7 @@ djangorestframework==3.17.1
 django-cors-headers==4.9.0
 dj-database-url==3.1.2
 requests==2.33.1
-PyJWT==2.12.1
+PyJWT==2.13.0
 cryptography==46.0.7
 psycopg2-binary==2.9.12
 Faker==40.13.0
